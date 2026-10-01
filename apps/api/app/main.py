@@ -26,6 +26,7 @@ from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
+from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
 from .repository import Repository
 from .runtime import RunRuntime
 from .settings import Settings, running_on_vercel
@@ -165,11 +166,17 @@ def _seed_workspace(repo: Repository) -> None:
             repo.create_skill(name, description, content)
     default_skill_ids = {skill.name: skill.id for skill in repo.list_skills()}
     for bot in repo.list_bots():
-        if "manager" in bot.name.lower():
+        if "manager" in bot.name.lower() or bot.name.lower() == ORCHESTRATOR_NAME.lower():
             for skill_name in ("workspace_admin", "job_manager", "coordination"):
                 skill_id = default_skill_ids.get(skill_name)
                 if skill_id:
                     repo.assign_skill(bot.id, skill_id)
+    if not any(bot.name.lower() == ORCHESTRATOR_NAME.lower() for bot in repo.list_bots()):
+        orchestrator = repo.create_bot(ORCHESTRATOR_NAME, ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, None)
+        for skill_name in ("workspace_admin", "job_manager", "coordination"):
+            skill_id = default_skill_ids.get(skill_name)
+            if skill_id:
+                repo.assign_skill(orchestrator.id, skill_id)
 
 
 def activate_account(account_id: str) -> tuple[object, object]:

@@ -222,7 +222,14 @@ class RunRuntime:
             "it is not the source of truth for data that changes. "
             "Every Bot can list, create, update, archive, and restore Bots, and can list, create, and edit groups. "
             "When asked to make a Bot and a group with it, call create_bot and then create_group. "
-            "In a group, reply in one to three short sentences like a WhatsApp coworker. "
+            + (
+                "You are the primary orchestrator, Bandros. Delegate specialist work to a Bot you create. "
+                "A new Bot needs a specific description plus instructions with the sections Tugas, Cara kerja, Output, and Batasan. "
+                "Rewrite the instructions until create_bot returns ok. "
+                if "orkestrator" in description.lower()
+                else ""
+            )
+            + "In a group, reply in one to three short sentences like a WhatsApp coworker. "
             "Mention @Name only when that teammate should act. "
             "A message with no @Name is answered by the lead. Only a mentioned teammate replies next. "
             "Your final reply is posted to the current group, so do not call post_to_group for that same text. "

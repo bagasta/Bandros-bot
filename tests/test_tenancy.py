@@ -52,6 +52,6 @@ def test_two_chatgpt_accounts_do_not_share_bots(tmp_path: Path, monkeypatch) -> 
         other = client.get("/api/v1/bots", headers={"X-Bandros-Session": "token-b"})
 
     assert created.status_code == 201
-    assert [bot["name"] for bot in own.json()] == ["Riset A"]
-    assert other.json() == []
+    assert [bot["name"] for bot in own.json()] == ["Bandros", "Riset A"]
+    assert [bot["name"] for bot in other.json()] == ["Bandros"]
     main._workspaces.clear()

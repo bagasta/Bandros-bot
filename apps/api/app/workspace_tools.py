@@ -8,6 +8,7 @@ from uuid import UUID
 
 from .repository import Repository
 from .domain import BotStatus, RiskClass, RunStatus
+from .orchestrator import missing_instruction_details
 from .policy import PolicyEngine
 
 
@@ -54,7 +55,12 @@ class WorkspaceToolset:
         # and active jobs shape behavior; capabilities are not manager-only.
         definitions = [
             ToolDefinition("list_bots", "List bots you can create, update, or mention. No payload.", self.list_bots, RiskClass.READ_ONLY),
-            ToolDefinition("create_bot", "Create a specialist Bot. payload: {name, description, instructions?}", self.create_bot, RiskClass.LOCAL_WRITE),
+            ToolDefinition(
+                "create_bot",
+                "Create a specialist Bot. payload: {name, description, instructions}. instructions must include Tugas, Cara kerja, Output, and Batasan, each concrete enough for the Bot to work alone.",
+                self.create_bot,
+                RiskClass.LOCAL_WRITE,
+            ),
             ToolDefinition("update_bot", "Update a Bot. payload: {bot_id, name?, description?, instructions?, model?}", self.update_bot, RiskClass.LOCAL_WRITE),
             ToolDefinition("archive_bot", "Archive a Bot after explaining why. payload: {bot_id}", self.archive_bot, RiskClass.DESTRUCTIVE),
             ToolDefinition("restore_bot", "Restore an archived Bot. payload: {bot_id}", self.restore_bot, RiskClass.LOCAL_WRITE),
@@ -135,6 +141,9 @@ class WorkspaceToolset:
         name = self._text(payload, "name")
         description = str(payload.get("description", ""))[:2_000]
         instructions = str(payload.get("instructions", ""))[:10_000]
+        missing = missing_instruction_details(description, instructions)
+        if missing:
+            raise ValueError("Instruksi belum cukup untuk bot bawahan. " + " ".join(missing))
         bot = self.repository.create_bot(name, description, instructions, None)
         if "manager" in bot.name.lower():
             for skill in self.repository.list_skills():

@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from .database import Database
 from .domain import Approval, ApprovalStatus, Bot, BotStatus, GroupMessage, Handoff, Job, Memory, Message, Run, RunEvent, RunStatus, Skill, WorkGroup
+from .orchestrator import ORCHESTRATOR_NAME
 
 
 def now() -> datetime:
@@ -38,7 +39,8 @@ class Repository:
     def list_bots(self) -> list[Bot]:
         with self.database.connection() as db:
             rows = db.execute("SELECT * FROM bots ORDER BY created_at DESC").fetchall()
-        return [self._bot(row) for row in rows]
+        bots = [self._bot(row) for row in rows]
+        return sorted(bots, key=lambda bot: bot.name.lower() != ORCHESTRATOR_NAME.lower())
 
     def get_bot(self, bot_id: UUID) -> Bot:
         with self.database.connection() as db:

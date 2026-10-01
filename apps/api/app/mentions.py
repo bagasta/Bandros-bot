@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from .domain import Bot, WorkGroup
+from .orchestrator import ORCHESTRATOR_NAME
 
 
 def mentioned_bots(text: str, bots: list[Bot]) -> list[Bot]:
@@ -27,6 +28,9 @@ def addresses_everyone(text: str) -> bool:
 
 
 def lead_bot(members: list[Bot]) -> Bot:
+    orchestrator = next((member for member in members if member.name.lower() == ORCHESTRATOR_NAME.lower()), None)
+    if orchestrator is not None:
+        return orchestrator
     for needle in ("manager", "manajer"):
         match = next((member for member in members if needle in member.name.lower()), None)
         if match is not None:
