@@ -116,6 +116,7 @@ app = FastAPI(title="Persistent Agent Workspace", version="0.1.0", lifespan=life
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", settings.web_origin],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
