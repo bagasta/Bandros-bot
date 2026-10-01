@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
@@ -65,9 +66,13 @@ class RunRuntime:
                 f"Riwayat percakapan:\n{context}\n\nPesan terbaru pengguna:\n{run.prompt}"
                 if context else run.prompt
             )
+            skills = self.repository.list_bot_skills(bot.id)
             answer = await self.model_gateway.complete(
                 system=self._system_prompt(
-                    bot.instructions, bot.description, self._environment_context(bot.id), toolset.skill_names
+                    bot.instructions,
+                    bot.description,
+                    self._environment_context(bot.id),
+                    skills,
                 ),
                 prompt=prompt,
                 model=run.model,
@@ -144,14 +149,25 @@ class RunRuntime:
         )
 
     @staticmethod
-    def _system_prompt(instructions: str, description: str = "", environment: str = "", skill_names: set[str] | None = None) -> str:
+    def _system_prompt(instructions: str, description: str = "", environment: str = "", skills: Sequence[object] | None = None) -> str:
+        skill_blocks = []
+        for skill in skills or ():
+            name = getattr(skill, "name", "skill")
+            content = getattr(skill, "content", "")
+            skill_blocks.append(f"## {name}\n{content}")
+        skill_text = "\n\n".join(skill_blocks) or "none"
         return (
-            "You are a persistent AI teammate, similar to a durable Grok Bot teammate. "
-            "Follow the Bot instructions and return a concise, reviewable answer. "
-            "Use the workspace and memory tools when they help, and never claim an action "
-            "was completed unless a tool returned success.\n\n"
+            "You are a persistent named teammate on a shared computer, in the style of a Grok Bot. "
+            "Finish the task with tools instead of only drafting advice. "
+            "Keep durable project files in the shared workspace. "
+            "Memory is for stable preferences, role facts, and short work summaries; "
+            "it is not the source of truth for data that changes. "
+            "Hand work to the Bot that owns it, and post to a group when the handoff should stay visible. "
+            "Never claim a file, memory, job, or handoff exists unless the tool result says ok. "
+            "If a tool requires approval, stop and say exactly what needs approval. "
+            "Reply in the user's language and keep the user updated on what you actually did.\n\n"
             f"Bot's main responsibility:\n{description or 'Help the user with the task they provide.'}\n\n"
             f"Bot instructions:\n{instructions}\n\n"
             f"Environment knowledge:\n{environment}\n\n"
-            f"Enabled skills: {', '.join(sorted(skill_names or set())) or 'none'}. Only use the tools provided to you."
+            f"Active skills:\n{skill_text}"
         )

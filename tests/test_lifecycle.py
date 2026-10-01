@@ -41,6 +41,30 @@ def test_run_completes_and_persists_message(tmp_path: Path) -> None:
     assert repository.list_messages(conversation_id)[0].content == "completed: Check project health"
 
 
+def test_run_prompt_includes_skill_and_shared_computer(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "product.db")
+    bot = repository.create_bot("Research", "Riset sumber.", "Cek sumber terkini.", None)
+    skill = repository.create_skill("research", "Riset", "Buka sumber, lalu simpan ringkasan di workspace.")
+    repository.assign_skill(bot.id, skill.id)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    run = repository.create_run(bot.id, conversation_id, "Rangkum risiko", "test-model")
+    captured: dict[str, str] = {}
+
+    class CaptureGateway(FakeGateway):
+        async def complete(self, *, system: str, prompt: str, model: str, tools=()) -> str:
+            captured["system"] = system
+            captured["tools"] = ",".join(tool.name for tool in tools)
+            return "selesai"
+
+    runtime = RunRuntime(repository, CaptureGateway(), "test-model", 1)
+    asyncio.run(runtime.start_and_wait(run.id))
+
+    assert "shared computer" in captured["system"]
+    assert "Buka sumber" in captured["system"]
+    assert "save_memory" in captured["tools"]
+    assert "write_workspace_file" in captured["tools"]
+
+
 def test_protected_action_requires_a_durable_approval(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "product.db")
     bot = repository.create_bot("Ops", "", "", None)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-import json
 from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 import httpx
@@ -41,12 +40,10 @@ class ChatGPTGateway:
         if not codex and "chatgpt.tokens.use.direct" not in str(connection.get("scope") or "").split():
             raise RuntimeError("Akun ChatGPT belum mengizinkan penggunaan model.")
         headers = {"Authorization": f"Bearer {token}"}
-        endpoint = f"{self.base_url}/responses"
         if codex:
             account_id = connection.get("account_id")
             if not account_id:
                 raise RuntimeError("Token ChatGPT tidak memiliki account ID Codex.")
-            endpoint = "https://chatgpt.com/backend-api/codex/responses"
             headers.update(
                 {
                     "ChatGPT-Account-Id": str(account_id),
@@ -55,45 +52,43 @@ class ChatGPTGateway:
                     "User-Agent": "codex_cli_rs",
                 }
             )
-        async with httpx.AsyncClient(timeout=60) as client:
-            answer_parts: list[str] = []
-            completed = False
-            async with client.stream(
-                "POST",
-                endpoint,
-                headers=headers,
-                json={
-                    "model": model.removeprefix("chatgpt/"),
-                    "instructions": system,
-                    "input": prompt,
-                    "store": False,
-                    "stream": True,
-                },
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    raw = line.removeprefix("data: ")
-                    if raw == "[DONE]":
-                        continue
-                    event = json.loads(raw)
-                    event_type = event.get("type")
-                    if event_type == "response.output_text.delta":
-                        answer_parts.append(str(event.get("delta") or ""))
-                    elif event_type == "response.failed":
-                        error = (event.get("response") or {}).get("error") or {}
-                        raise RuntimeError(
-                            f"ChatGPT gagal memproses jawaban: {error.get('code', 'unknown_error')}"
-                        )
-                    elif event_type == "response.completed":
-                        completed = True
-            if not completed:
-                raise RuntimeError("Stream ChatGPT berakhir sebelum response.completed.")
-        answer = "".join(answer_parts).strip()
-        if not answer:
-            raise RuntimeError("ChatGPT mengembalikan response kosong.")
-        return answer
+        from openai import AsyncOpenAI
+        from pydantic_ai.models.openai import OpenAIResponsesModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+
+        model_name = model.removeprefix("chatgpt/")
+        if codex:
+            http_client = httpx.AsyncClient(timeout=120, headers=headers)
+            openai_client = AsyncOpenAI(
+                api_key=str(token),
+                base_url="https://chatgpt.com/backend-api/codex",
+                default_headers=headers,
+                http_client=http_client,
+            )
+            provider = OpenAIProvider(openai_client=openai_client)
+            model_settings = {
+                "openai_store": False,
+                "extra_headers": headers,
+            }
+        else:
+            http_client = httpx.AsyncClient(timeout=120)
+            provider = OpenAIProvider(
+                base_url=f"{self.base_url}/",
+                api_key=str(token),
+                http_client=http_client,
+            )
+            model_settings = {"openai_store": False}
+        try:
+            return await run_pydantic_agent(
+                model=OpenAIResponsesModel(model_name, provider=provider),
+                system=system,
+                prompt=prompt,
+                tools=tools,
+                model_settings=model_settings,
+                request_limit=8,
+            )
+        finally:
+            await http_client.aclose()
 
     @staticmethod
     def _expiring(value: str | None) -> bool:
@@ -125,7 +120,6 @@ class OpenRouterGateway:
             raise RuntimeError(
                 "OPENROUTER_API_KEY is not configured. Add it to .env before starting model runs."
             )
-        from pydantic_ai import Agent
         from pydantic_ai.models.openai import OpenAIChatModel
         from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -133,20 +127,50 @@ class OpenRouterGateway:
             provider = OpenAIProvider(
                 base_url=f"{self.base_url}/", api_key=self.api_key, http_client=client
             )
-            agent = Agent(OpenAIChatModel(model, provider=provider), instructions=system, retries=1)
-            for definition in tools:
-                agent.tool_plain(
-                    self._tool_function(definition),
-                    name=definition.name,
-                    description=definition.description,
-                    retries=1,
-                    timeout=30,
-                )
-            result = await agent.run(prompt)
-        return result.output
+            return await run_pydantic_agent(
+                model=OpenAIChatModel(model, provider=provider),
+                system=system,
+                prompt=prompt,
+                tools=tools,
+                request_limit=8,
+            )
 
-    @staticmethod
-    def _tool_function(definition: ToolDefinition):
-        async def invoke(payload: dict[str, object]) -> dict[str, object]:
-            return await definition.handler(dict(payload))
-        return invoke
+
+async def run_pydantic_agent(
+    *,
+    model: Any,
+    system: str,
+    prompt: str,
+    tools: Sequence[ToolDefinition],
+    model_settings: dict[str, Any] | None = None,
+    request_limit: int = 8,
+) -> str:
+    """Run the PRD tool loop: model call, tool result, repeat."""
+    from pydantic_ai import Agent
+    from pydantic_ai.usage import UsageLimits
+
+    agent = Agent(model, instructions=system, retries=1)
+    for definition in tools:
+        agent.tool_plain(
+            _tool_function(definition),
+            name=definition.name,
+            description=definition.description,
+            retries=1,
+            timeout=definition.timeout_seconds,
+        )
+    result = await agent.run(
+        prompt,
+        model_settings=model_settings,
+        usage_limits=UsageLimits(request_limit=request_limit),
+    )
+    answer = str(result.output).strip()
+    if not answer:
+        raise RuntimeError("Model mengembalikan response kosong.")
+    return answer
+
+
+def _tool_function(definition: ToolDefinition):
+    async def invoke(payload: dict[str, object]) -> dict[str, object]:
+        return await definition.handler(dict(payload))
+
+    return invoke

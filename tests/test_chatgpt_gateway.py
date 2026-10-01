@@ -2,65 +2,21 @@ from __future__ import annotations
 
 import asyncio
 
-from apps.api.app.model_gateway import ChatGPTGateway
+from apps.api.app.model_gateway import ChatGPTGateway, run_pydantic_agent
+from apps.api.app.workspace_tools import ToolDefinition
 
 
-class FakeStream:
-    async def __aenter__(self):
-        return self
+def test_chatgpt_gateway_runs_codex_tools_through_pydantic(monkeypatch) -> None:
+    captured: dict[str, object] = {}
 
-    async def __aexit__(self, *_):
-        return None
+    async def fake_run(**kwargs):
+        captured.update(kwargs)
+        definition = kwargs["tools"][0]
+        observed = await definition.handler({"kind": "preference", "content": "singkat"})
+        captured["tool_result"] = observed
+        return "Jawaban model"
 
-    def raise_for_status(self) -> None:
-        return None
-
-    async def aiter_lines(self):
-        yield 'data: {"type":"response.output_text.delta","delta":"Jawaban "}'
-        yield 'data: {"type":"response.output_text.delta","delta":"model"}'
-        yield 'data: {"type":"response.completed","response":{}}'
-
-
-class FakeClient:
-    last_call: dict[str, object] = {}
-
-    def __init__(self, **_):
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_):
-        return None
-
-    def stream(self, method: str, url: str, **kwargs):
-        FakeClient.last_call = {"method": method, "url": url, **kwargs}
-        return FakeStream()
-
-
-def test_chatgpt_gateway_consumes_responses_stream(monkeypatch) -> None:
-    monkeypatch.setattr("apps.api.app.model_gateway.httpx.AsyncClient", FakeClient)
-    gateway = ChatGPTGateway(
-        lambda: {
-            "access_token": "oauth-token",
-            "scope": "openid chatgpt.tokens.use.direct",
-        }
-    )
-
-    answer = asyncio.run(
-        gateway.complete(
-            system="Jawab jelas.",
-            prompt="Uji",
-            model="chatgpt/gpt-test",
-        )
-    )
-
-    assert answer == "Jawaban model"
-    assert FakeClient.last_call["url"] == "https://api.openai.com/v1/responses"
-
-
-def test_chatgpt_gateway_uses_codex_endpoint(monkeypatch) -> None:
-    monkeypatch.setattr("apps.api.app.model_gateway.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr("apps.api.app.model_gateway.run_pydantic_agent", fake_run)
     gateway = ChatGPTGateway(
         lambda: {
             "auth_mode": "codex",
@@ -69,36 +25,60 @@ def test_chatgpt_gateway_uses_codex_endpoint(monkeypatch) -> None:
         }
     )
 
+    async def save_memory(payload: dict[str, object]) -> dict[str, object]:
+        return {"ok": True, **payload}
+
     answer = asyncio.run(
         gateway.complete(
             system="Jawab jelas.",
-            prompt="Uji",
+            prompt="Ingat preferensi saya.",
             model="chatgpt/gpt-5.3-codex",
+            tools=(
+                ToolDefinition(
+                    "save_memory",
+                    "Save a durable preference.",
+                    save_memory,
+                ),
+            ),
         )
     )
 
     assert answer == "Jawaban model"
-    assert FakeClient.last_call["url"] == "https://chatgpt.com/backend-api/codex/responses"
-    headers = FakeClient.last_call["headers"]
-    assert headers["ChatGPT-Account-Id"] == "acct_test"
-    assert headers["originator"] == "codex_cli_rs"
+    assert captured["tool_result"] == {
+        "ok": True,
+        "kind": "preference",
+        "content": "singkat",
+    }
+    settings = captured["model_settings"]
+    assert settings["openai_store"] is False
+    assert settings["extra_headers"]["ChatGPT-Account-Id"] == "acct_test"
+    assert settings["extra_headers"]["originator"] == "codex_cli_rs"
+    assert captured["request_limit"] == 8
 
 
-def test_chatgpt_gateway_consumes_responses_stream(monkeypatch) -> None:
-    monkeypatch.setattr("apps.api.app.model_gateway.httpx.AsyncClient", FakeClient)
-    gateway = ChatGPTGateway(
-        lambda: {
-            "access_token": "oauth-token",
-            "scope": "openid chatgpt.tokens.use.direct",
-        }
-    )
+def test_pydantic_agent_returns_model_text(monkeypatch) -> None:
+    class FakeResult:
+        output = "  Siap.  "
 
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def tool_plain(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def run(self, prompt: str, **_kwargs) -> FakeResult:
+            assert prompt == "Uji"
+            return FakeResult()
+
+    monkeypatch.setattr("pydantic_ai.Agent", FakeAgent)
     answer = asyncio.run(
-        gateway.complete(
-            system="Jawab jelas.",
+        run_pydantic_agent(
+            model=object(),
+            system="Sistem",
             prompt="Uji",
-            model="chatgpt/gpt-test",
+            tools=(),
         )
     )
 
-    assert answer == "Jawaban model"
+    assert answer == "Siap."
