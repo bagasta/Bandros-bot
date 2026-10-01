@@ -75,7 +75,9 @@
 .bandros-message p { margin: 7px 0 0; color: #e4e4e7; font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
 .bandros-composer { position: fixed; right: 24px; bottom: 30px; left: calc(292px + (100% - 292px) / 2 - 410px); width: min(820px, calc(100% - 340px)); padding: 10px 12px 8px; background: #19191c; border: 1px solid #3a3a3f; border-radius: 14px; box-shadow: 0 12px 40px #000b; }
 .bandros-composer textarea { width: 100%; padding: 3px 2px; color: var(--text); background: transparent; border: 0; outline: 0; resize: none; font-size: 14px; }
-.bandros-composer-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; color: #909097; font-size: 10px; }
+.bandros-composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: #909097; font-size: 10px; }
+.bandros-model-picker { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.bandros-model-picker select { max-width: 240px; min-height: 28px; padding: 4px 8px; color: var(--text); background: #09090b; border: 1px solid #3f3f46; border-radius: 8px; font: inherit; font-size: 11px; }
 .bandros-composer-footer button { width: 29px; min-height: 29px; padding: 0; color: #09090b; background: var(--accent); border-radius: 50%; font-size: 18px; }
 .bandros-composer-footer button:disabled { color: #71717a; background: #3f3f46; }
 .bandros-composer-footer .bandros-stop { color: #fda4af; background: #4c0519; }

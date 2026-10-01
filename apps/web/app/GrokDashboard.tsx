@@ -101,7 +101,9 @@ export default function GrokDashboard() {
   };
 
   useEffect(() => {
-    void loadChatGPT().catch(() => undefined);
+    void loadChatGPT().catch((cause) => {
+      setError(cause instanceof Error ? cause.message : "Model ChatGPT tidak dapat dimuat.");
+    });
   }, []);
 
   useEffect(() => {
@@ -180,7 +182,7 @@ export default function GrokDashboard() {
       }
       const botId = selectedBot?.id;
       if (!botId) return;
-      const run = await request<Run>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content }) });
+      const run = await request<Run>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content, model: selectedBot?.model || null }) });
       setActiveRunId(run.id);
       if (["completed", "failed", "failed_retryable", "cancelled"].includes(run.status)) {
         if (run.error) throw new Error(run.error);
@@ -344,7 +346,23 @@ export default function GrokDashboard() {
     }
   };
 
+  const chooseModel = async (model: string) => {
+    if (!selectedBot) return;
+    setEditModel(model);
+    try {
+      const updated = await request<Bot>(`/bots/${selectedBot.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ model: model || null }),
+      });
+      setBots((current) => current.map((bot) => bot.id === updated.id ? updated : bot));
+      setSelectedBot(updated);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Model tidak dapat disimpan.");
+    }
+  };
+
   const displayName = selectedGroup?.name || selectedBot?.name || "Bandros Manager";
+  const automaticModel = chatGPTModels.find((model) => model.id === chatGPT.preferred_model)?.display_name || chatGPT.preferred_model || "ChatGPT";
 
   return (
     <main className="bandros-app">
@@ -372,7 +390,7 @@ export default function GrokDashboard() {
           <div className="bandros-date">Today · 10:35 AM</div>
           {!selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><span className="bandros-welcome-mark">B</span><h1>What can I take off your plate?</h1><p>Think of me as a teammate with my own computer. I can dig up answers, write and send things, work in your tools once you connect them, and run recurring work in the background while you&apos;re busy.</p><div className="bandros-quick-prompts">{quickPrompts.map((item, index) => <button key={item} onClick={() => setPrompt(item)}><span>{String.fromCharCode(65 + index)}</span>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Agent"}</span><p>{message.content}</p></article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.role === "user" ? "Kamu" : displayName}</span><p>{message.content}</p></article>)}
         </div>
-        <form className="bandros-composer" onSubmit={sendMessage}><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={`Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} /><div className="bandros-composer-footer"><span>Enter untuk kirim · Shift + Enter untuk baris baru</span>{working ? <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">■</button> : <button type="submit" disabled={!prompt.trim()} aria-label="Send message">↑</button>}</div></form>
+        <form className="bandros-composer" onSubmit={sendMessage}><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={`Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} /><div className="bandros-composer-footer"><div className="bandros-model-picker">{chatGPT.connected && chatGPTModels.length > 0 ? <select aria-label="Model Codex" value={selectedBot?.model || ""} onChange={(event) => void chooseModel(event.target.value)} disabled={!selectedBot || working}><option value="">{`Otomatis · ${automaticModel}`}</option>{chatGPTModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}</select> : <span>{chatGPT.connected ? "Model Codex belum tersedia" : "Sign in untuk memilih model"}</span>}<span>Enter untuk kirim · Shift + Enter untuk baris baru</span></div>{working ? <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">■</button> : <button type="submit" disabled={!prompt.trim()} aria-label="Send message">↑</button>}</div></form>
         <footer className="bandros-footer">Bandros v2.4 · Orchestrator Mode</footer>
       </section>
       {settingsOpen && selectedBot && <aside className="bandros-settings" aria-label="Agent settings">
@@ -382,10 +400,9 @@ export default function GrokDashboard() {
           <input id="agent-name" value={editName} onChange={(event) => setEditName(event.target.value)} required />
           <label htmlFor="agent-model">Model</label>
           {chatGPTModels.length > 0 ? <select id="agent-model" value={editModel} onChange={(event) => setEditModel(event.target.value)}>
-            <option value="">Otomatis · {chatGPT.preferred_model || "ChatGPT"}</option>
+            <option value="">{`Otomatis · ${automaticModel}`}</option>
             {chatGPTModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}
-            <option value="openrouter/free">OpenRouter free</option>
-          </select> : <input id="agent-model" value={editModel} onChange={(event) => setEditModel(event.target.value)} placeholder="chatgpt/model atau openrouter/free" />}
+          </select> : <input id="agent-model" value={editModel} onChange={(event) => setEditModel(event.target.value)} placeholder="chatgpt/model" />}
           <label htmlFor="agent-description">Description</label>
           <textarea id="agent-description" value={editDescription} onChange={(event) => setEditDescription(event.target.value)} rows={5} />
           <label htmlFor="agent-instructions">Working instructions</label>

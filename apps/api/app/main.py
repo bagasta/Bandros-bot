@@ -61,6 +61,7 @@ runtime = RunRuntime(
 policy = PolicyEngine()
 openai_jwks = PyJWKClient("https://auth.openai.com/.well-known/jwks.json")
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_CLIENT_VERSION = "0.149.0"
 CODEX_DEVICE_CODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
 CODEX_DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/deviceauth/token"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -222,6 +223,35 @@ class DevicePollInput(BaseModel):
     flow_id: str
 
 
+def listed_codex_models(payload: object) -> list[dict[str, str]]:
+    raw_models = payload.get("models", []) if isinstance(payload, dict) else []
+    ranked: list[tuple[int, int, dict[str, str]]] = []
+    for index, item in enumerate(raw_models):
+        if not isinstance(item, dict):
+            continue
+        if item.get("visibility", "list") != "list":
+            continue
+        if item.get("supported_in_api") is False:
+            continue
+        slug = item.get("slug") or item.get("id")
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        priority = item.get("priority")
+        rank = priority if isinstance(priority, int) else 10_000
+        ranked.append(
+            (
+                rank,
+                index,
+                {
+                    "id": slug,
+                    "display_name": str(item.get("display_name") or slug),
+                },
+            )
+        )
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in ranked]
+
+
 async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, str]]:
     headers = {
         "Authorization": f"Bearer {connection['access_token']}",
@@ -232,20 +262,11 @@ async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, st
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
             "https://chatgpt.com/backend-api/codex/models",
-            params={"client_version": "1.0.0"},
+            params={"client_version": CODEX_CLIENT_VERSION},
             headers=headers,
         )
     response.raise_for_status()
-    return [
-        {
-            "id": str(item.get("slug") or item.get("id")),
-            "display_name": str(
-                item.get("display_name") or item.get("slug") or item.get("id")
-            ),
-        }
-        for item in response.json().get("models", [])
-        if item.get("slug") or item.get("id")
-    ]
+    return listed_codex_models(response.json())
 
 
 async def _start_run(run_id: UUID) -> None:
@@ -616,7 +637,7 @@ def get_bot(bot_id: UUID) -> Bot:
 @app.patch("/api/v1/bots/{bot_id}", response_model=Bot)
 def update_bot(bot_id: UUID, payload: UpdateBot) -> Bot:
     try:
-        return repository.update_bot(bot_id, payload.model_dump())
+        return repository.update_bot(bot_id, payload.model_dump(exclude_unset=True))
     except KeyError as error:
         raise not_found(error) from error
 

@@ -48,7 +48,11 @@ class Repository:
         return self._bot(row)
 
     def update_bot(self, bot_id: UUID, fields: dict[str, Any]) -> Bot:
-        accepted = {key: value for key, value in fields.items() if value is not None}
+        accepted = {
+            key: value
+            for key, value in fields.items()
+            if value is not None or key == "model"
+        }
         if not accepted:
             return self.get_bot(bot_id)
         accepted["updated_at"] = dump_time(now())
