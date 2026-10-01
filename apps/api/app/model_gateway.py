@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Awaitable, Callable, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Protocol, Sequence, cast
 
 import httpx
 
@@ -81,6 +81,7 @@ class ChatGPTGateway:
         from pydantic_ai.providers.openai import OpenAIProvider
 
         model_name = model.removeprefix("chatgpt/")
+        responses_model = CodexResponsesModel if codex else OpenAIResponsesModel
         if codex:
             http_client = httpx.AsyncClient(timeout=120, headers=headers)
             openai_client = AsyncOpenAI(
@@ -104,7 +105,7 @@ class ChatGPTGateway:
             model_settings = {"openai_store": False}
         try:
             return await run_pydantic_agent(
-                model=OpenAIResponsesModel(model_name, provider=provider),
+                model=responses_model(model_name, provider=provider),
                 system=system,
                 prompt=prompt,
                 tools=tools,
@@ -180,6 +181,50 @@ class OpenRouterGateway:
                 tools=tools,
                 request_limit=request_limit,
             )
+
+
+class CodexResponsesModel:
+    """Codex rejects non-streaming Responses calls, so every request is streamed."""
+
+    def __new__(cls, model_name: str, *, provider: Any) -> Any:
+        from pydantic_ai.models.openai import OpenAIResponsesModel
+
+        model = OpenAIResponsesModel(model_name, provider=provider)
+        model.request = _codex_request.__get__(model, OpenAIResponsesModel)  # type: ignore[method-assign]
+        return model
+
+
+async def _codex_request(self: Any, messages: list[Any], model_settings: Any, model_request_parameters: Any) -> Any:
+    from pydantic_ai.models import ModelResponse, check_allow_model_requests
+    from pydantic_ai.models.openai import OpenAIResponsesModelSettings
+
+    check_allow_model_requests()
+    model_settings, model_request_parameters = self.prepare_request(model_settings, model_request_parameters)
+    settings = cast(OpenAIResponsesModelSettings, model_settings or {})
+    stream = await self._responses_create(messages, True, settings, model_request_parameters)
+    if isinstance(stream, ModelResponse):
+        return stream
+    completed = await _completed_codex_response(stream)
+    return self._process_response(completed, settings, model_request_parameters)
+
+
+async def _completed_codex_response(stream: Any) -> Any:
+    completed = None
+
+    async def consume(source: Any) -> None:
+        nonlocal completed
+        async for event in source:
+            if getattr(event, "type", None) in {"response.completed", "response.incomplete"} and getattr(event, "response", None) is not None:
+                completed = event.response
+
+    if hasattr(stream, "__aenter__"):
+        async with stream:
+            await consume(stream)
+    else:
+        await consume(stream)
+    if completed is None:
+        raise RuntimeError("Codex tidak mengembalikan response selesai.")
+    return completed
 
 
 async def run_pydantic_agent(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from apps.api.app.model_gateway import ChatGPTGateway, run_pydantic_agent
+from apps.api.app.model_gateway import ChatGPTGateway, _codex_request, run_pydantic_agent
 from apps.api.app.workspace_tools import ToolDefinition
 
 
@@ -54,6 +54,56 @@ def test_chatgpt_gateway_runs_codex_tools_through_pydantic(monkeypatch) -> None:
     assert settings["extra_headers"]["ChatGPT-Account-Id"] == "acct_test"
     assert settings["extra_headers"]["originator"] == "codex_cli_rs"
     assert captured["request_limit"] == 8
+    assert captured["model"].request.__func__ is _codex_request
+
+
+def test_codex_request_streams_until_the_response_is_complete() -> None:
+    class Event:
+        def __init__(self, event_type: str, response: object) -> None:
+            self.type = event_type
+            self.response = response
+
+    class Stream:
+        def __init__(self) -> None:
+            self.events = [Event("response.created", None), Event("response.completed", {"id": "resp_1"})]
+            self.entered = False
+
+        async def __aenter__(self):
+            self.entered = True
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.events:
+                raise StopAsyncIteration
+            return self.events.pop(0)
+
+    captured: dict[str, object] = {}
+    stream = Stream()
+
+    class Model:
+        def prepare_request(self, model_settings, model_request_parameters):
+            return model_settings, model_request_parameters
+
+        async def _responses_create(self, messages, streaming, model_settings, model_request_parameters):
+            captured["stream"] = streaming
+            return stream
+
+        def _process_response(self, response, model_settings, model_request_parameters):
+            captured["response"] = response
+            return "processed"
+
+    answer = asyncio.run(_codex_request(Model(), [], None, None))
+
+    assert answer == "processed"
+    assert captured["stream"] is True
+    assert captured["response"] == {"id": "resp_1"}
+    assert stream.entered is True
 
 
 def test_pydantic_agent_returns_model_text(monkeypatch) -> None:
