@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from .domain import ApprovalStatus, BotStatus, RunStatus
+from .mentions import addresses_everyone, group_prompt, is_silence, lead_bot, mentioned_bots
 from .model_gateway import ModelGateway
 from .repository import Repository
 from .workspace_tools import WorkspaceToolset
@@ -21,6 +22,9 @@ class RunRuntime:
     workspace_root: Path = Path("/workspace")
     _tasks: dict[UUID, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _approved_tools: dict[UUID, dict[str, list[dict[str, object]]]] = field(default_factory=dict, init=False)
+    _group_depth: dict[UUID, int] = field(default_factory=dict, init=False)
+    _pending_wakes: list[tuple[UUID, str, UUID, int]] = field(default_factory=list, init=False)
+    _wake_budget: int = field(default=8, init=False)
 
     def start(self, run_id: UUID) -> None:
         if task := self._tasks.get(run_id):
@@ -54,12 +58,13 @@ class RunRuntime:
             self.default_model,
             self._approved_tools.pop(run_id, {}),
             self.workspace_root,
+            on_group_post=self.queue_group_wake,
         )
         try:
             history = self.repository.list_messages(run.conversation_id, limit=50)
             previous_turns = history[:-1][-10:]
             context = "\n".join(
-                f"{'Pengguna' if message.role == 'user' else 'Bot'}: {message.content[-3000:]}"
+                f"{'Pengguna' if message.role == 'user' else 'Grup' if message.role == 'group' else 'Bot'}: {message.content[-3000:]}"
                 for message in previous_turns
             )
             prompt = (
@@ -92,12 +97,20 @@ class RunRuntime:
             return
         self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
         self.repository.append_message(run.conversation_id, "assistant", answer, model=run.model)
-        if group_id := self.repository.group_for_run(run_id):
-            self.repository.append_group_message(group_id, "bot", answer, bot.id)
+        group_id = self.repository.group_for_run(run_id)
+        if group_id and not is_silence(answer):
+            recent = self.repository.list_group_messages(group_id)
+            already_posted = bool(recent) and recent[-1].sender_bot_id == bot.id and recent[-1].content.strip() == answer.strip()
+            if not already_posted:
+                self.repository.append_group_message(group_id, "bot", answer, bot.id)
+            depth = self._group_depth.get(run_id, 0)
+            if depth < 3:
+                self.queue_group_wake(group_id, answer, bot.id, depth + 1)
         self.repository.record_event(run_id, "assistant.message", {"characters": len(answer)})
         self.repository.record_event(run_id, "model.request.completed", {"model": run.model, "call": 1})
         self.repository.update_run(run_id, RunStatus.COMPLETED)
         self._resolve_handoffs(run_id, answer, success=True)
+        await self.drain_group_wakes()
 
     def recover(self) -> int:
         """Make interrupted work recoverable after an API restart."""
@@ -135,6 +148,51 @@ class RunRuntime:
             status = "selesai" if success else "gagal"
             self.repository.append_message(source_conversation, "bot", f"Hasil dari {target_name} ({status}):\n{result}")
 
+    def queue_group_wake(self, group_id: UUID, content: str, sender_bot_id: UUID, depth: int = 1) -> None:
+        if depth > 3 or self._wake_budget <= 0 or is_silence(content):
+            return
+        wake = (group_id, content, sender_bot_id, depth)
+        if wake not in self._pending_wakes:
+            self._pending_wakes.append(wake)
+
+    async def drain_group_wakes(self) -> None:
+        while self._pending_wakes and self._wake_budget > 0:
+            group_id, content, sender_bot_id, depth = self._pending_wakes.pop(0)
+            await self.speak_in_group(group_id, content, sender_bot_id, depth)
+
+    async def speak_in_group(self, group_id: UUID, content: str, sender_bot_id: UUID | None, depth: int) -> None:
+        if depth > 3 or self._wake_budget <= 0:
+            return
+        group = self.repository.get_group(group_id)
+        members = [member for member in group.members if member.status is BotStatus.ACTIVE]
+        if addresses_everyone(content):
+            targets = members
+        else:
+            targets = mentioned_bots(content, members)
+        if sender_bot_id is not None:
+            targets = [member for member in targets if member.id != sender_bot_id]
+        elif not targets and members:
+            targets = [lead_bot(members)]
+        messages = self.repository.list_group_messages(group_id)
+        names = {member.id: member.name for member in group.members}
+        prior = messages[:-1] if messages and messages[-1].content == content else messages
+        transcript = "\n".join(
+            f"{'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')}: {message.content[:500]}"
+            for message in prior[-12:]
+        )
+        busy = {run.bot_id for run in self.repository.runs_for_group(group_id)}
+        for target in targets:
+            if target.id in busy or self._wake_budget <= 0:
+                continue
+            self._wake_budget -= 1
+            conversation_id = self.repository.conversation_for_bot(target.id)
+            prompt = group_prompt(group, content, transcript)
+            self.repository.append_message(conversation_id, "group", prompt)
+            run = self.repository.create_run(target.id, conversation_id, prompt, target.model or self.default_model)
+            self.repository.link_run_to_group(run.id, group_id)
+            self._group_depth[run.id] = depth
+            await self.start_and_wait(run.id)
+
     def _environment_context(self, bot_id: UUID) -> str:
         bots = self.repository.list_bots()
         jobs = self.repository.list_jobs(bot_id)
@@ -163,8 +221,14 @@ class RunRuntime:
             "Keep durable project files in the shared workspace. "
             "Memory is for stable preferences, role facts, and short work summaries; "
             "it is not the source of truth for data that changes. "
-            "Hand work to the Bot that owns it, and post to a group when the handoff should stay visible. "
-            "Never claim a file, memory, job, or handoff exists unless the tool result says ok. "
+            "Every Bot can list, create, update, archive, and restore Bots, and can list, create, and edit groups. "
+            "When asked to make a Bot and a group with it, call create_bot and then create_group. "
+            "In a group, write like a coworker in a WhatsApp thread: short, in the user's language, "
+            "and mention the exact teammate with @Name when they should respond or take the work. "
+            "A message with no @Name is answered by the lead. Only a mentioned teammate replies next. "
+            "Your final reply is posted to the current group, so do not call post_to_group for that same text. "
+            "Do not say a group tool is missing. "
+            "Never claim a file, memory, job, bot, group, or handoff exists unless the tool result says ok. "
             "If a tool requires approval, stop and say exactly what needs approval. "
             "Reply in the user's language and keep the user updated on what you actually did.\n\n"
             f"Bot's main responsibility:\n{description or 'Help the user with the task they provide.'}\n\n"

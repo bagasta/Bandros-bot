@@ -749,18 +749,11 @@ def list_group_messages(group_id: UUID) -> list[GroupMessage]:
 @app.post("/api/v1/groups/{group_id}/messages", response_model=GroupMessage, status_code=status.HTTP_201_CREATED)
 async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> GroupMessage:
     try:
-        group = repository.get_group(group_id)
+        repository.get_group(group_id)
         message = repository.append_group_message(group_id, "user", payload.content)
     except KeyError as error:
         raise not_found(error) from error
-    for member in group.members:
-        if member.status is BotStatus.ACTIVE:
-            conversation_id = repository.conversation_for_bot(member.id)
-            prompt = f"Pesan grup {group.name} dari Bos: {payload.content}\nBalas dengan update singkat untuk grup."
-            repository.append_message(conversation_id, "group", prompt)
-            run = repository.create_run(member.id, conversation_id, prompt, _model_for_bot(member))
-            repository.link_run_to_group(run.id, group_id)
-            await _start_run(run.id)
+    await runtime.speak_in_group(group_id, payload.content, None, 0)
     return message
 
 

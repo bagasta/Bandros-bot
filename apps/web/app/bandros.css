@@ -53,6 +53,7 @@
 .bandros-message p { margin: 6px 0 0; padding: 12px 14px; background: var(--panel); border-radius: 16px; line-height: 1.55; white-space: pre-wrap; }
 .bandros-message.from-user p { background: #1c1c1e; color: #fff; }
 .bandros-working { color: var(--live); text-align: center; font-size: 13px; }
+.bandros-mention { background: transparent; color: var(--live); font-weight: 700; }
 .bandros-composer { margin: 0 18% 22px; padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; }
 .bandros-composer textarea { width: 100%; min-height: 44px; padding: 4px 6px; color: var(--ink); background: transparent; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; }
 .bandros-composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

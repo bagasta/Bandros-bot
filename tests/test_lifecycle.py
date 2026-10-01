@@ -93,7 +93,7 @@ def test_every_agent_has_orchestration_tools(tmp_path: Path) -> None:
     run = repository.create_run(manager.id, repository.conversation_for_bot(manager.id), "Organize team", "test-model")
 
     worker_tools = WorkspaceToolset(repository, run.id, worker.id, lambda _: None)
-    assert {"handoff_to_bot", "post_to_group", "create_job"} <= {
+    assert {"handoff_to_bot", "post_to_group", "create_job", "create_bot", "create_group", "list_bots", "archive_bot", "restore_bot"} <= {
         tool.name for tool in worker_tools.definitions()
     }
 

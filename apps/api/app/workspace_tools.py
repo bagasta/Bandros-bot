@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from .repository import Repository
-from .domain import RiskClass, RunStatus
+from .domain import BotStatus, RiskClass, RunStatus
 from .policy import PolicyEngine
 
 
@@ -36,6 +36,7 @@ class WorkspaceToolset:
         default_model: str = "openrouter/free",
         approved_tools: dict[str, list[dict[str, Any]]] | None = None,
         workspace_root: Path | None = None,
+        on_group_post: Callable[[UUID, str, UUID], None] | None = None,
     ) -> None:
         self.repository = repository
         self.run_id = run_id
@@ -45,19 +46,27 @@ class WorkspaceToolset:
         self.policy = PolicyEngine()
         self.approved_tools = approved_tools or {}
         self.workspace_root = (workspace_root or Path("/workspace")).resolve()
+        self.on_group_post = on_group_post
         self.skill_names = {skill.name for skill in repository.list_bot_skills(bot_id)}
 
     def definitions(self) -> list[ToolDefinition]:
         # Every persistent Agent is an orchestrator. Description, instructions,
         # and active jobs shape behavior; capabilities are not manager-only.
         definitions = [
+            ToolDefinition("list_bots", "List bots you can create, update, or mention. No payload.", self.list_bots, RiskClass.READ_ONLY),
             ToolDefinition("create_bot", "Create a specialist Bot. payload: {name, description, instructions?}", self.create_bot, RiskClass.LOCAL_WRITE),
             ToolDefinition("update_bot", "Update a Bot. payload: {bot_id, name?, description?, instructions?, model?}", self.update_bot, RiskClass.LOCAL_WRITE),
             ToolDefinition("archive_bot", "Archive a Bot after explaining why. payload: {bot_id}", self.archive_bot, RiskClass.DESTRUCTIVE),
+            ToolDefinition("restore_bot", "Restore an archived Bot. payload: {bot_id}", self.restore_bot, RiskClass.LOCAL_WRITE),
+            ToolDefinition("list_groups", "List work groups and their members. No payload.", self.list_groups, RiskClass.READ_ONLY),
+            ToolDefinition("create_group", "Create a WhatsApp-style group and join it. payload: {name, description?, member_names?: [bot name], member_bot_ids?}", self.create_group, RiskClass.LOCAL_WRITE),
+            ToolDefinition("add_group_member", "Add a bot to a group. payload: {group_id, bot_id? , member_name?}", self.add_group_member, RiskClass.LOCAL_WRITE),
+            ToolDefinition("remove_group_member", "Remove a bot from a group. payload: {group_id, bot_id?, member_name?}", self.remove_group_member, RiskClass.LOCAL_WRITE),
+            ToolDefinition("list_group_messages", "Read the latest messages in a group. payload: {group_id}", self.list_group_messages, RiskClass.READ_ONLY),
             ToolDefinition("create_job", "Create a job for a Bot. payload: {title, description?, priority?, assignee_bot_id?}", self.create_job, RiskClass.LOCAL_WRITE),
             ToolDefinition("update_job", "Update a job. payload: {job_id, status?, title?, description?, priority?, assignee_bot_id?}", self.update_job, RiskClass.LOCAL_WRITE),
             ToolDefinition("handoff_to_bot", "Delegate a bounded task to another active Bot. payload: {target_bot_id, task}", self.handoff_to_bot, RiskClass.LOCAL_WRITE),
-            ToolDefinition("post_to_group", "Post a work update to a group. payload: {group_id, content}", self.post_to_group, RiskClass.LOCAL_WRITE),
+            ToolDefinition("post_to_group", "Post into a group. @Name wakes that bot. payload: {group_id, content}", self.post_to_group, RiskClass.LOCAL_WRITE),
             ToolDefinition("list_workspace_files", "List files under the persistent Bot workspace. payload: {path?}", self.list_workspace_files, RiskClass.READ_ONLY),
             ToolDefinition("read_workspace_file", "Read a text file from the persistent Bot workspace. payload: {path}", self.read_workspace_file, RiskClass.READ_ONLY),
             ToolDefinition("write_workspace_file", "Write a text file into the persistent Bot workspace. payload: {path, content}", self.write_workspace_file, RiskClass.LOCAL_WRITE),
@@ -140,8 +149,74 @@ class WorkspaceToolset:
         return {"ok": True, "bot_id": str(bot.id), "name": bot.name}
 
     async def archive_bot(self, payload: dict[str, Any]) -> dict[str, Any]:
-        bot = self.repository.set_bot_status(UUID(self._text(payload, "bot_id")), "archived")
+        bot = self.repository.set_bot_status(UUID(self._text(payload, "bot_id")), BotStatus.ARCHIVED)
         return {"ok": True, "bot_id": str(bot.id), "status": bot.status}
+
+    async def restore_bot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        bot = self.repository.set_bot_status(UUID(self._text(payload, "bot_id")), BotStatus.ACTIVE)
+        return {"ok": True, "bot_id": str(bot.id), "status": bot.status}
+
+    async def list_bots(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "bots": [
+                {"id": str(bot.id), "name": bot.name, "description": bot.description, "status": bot.status}
+                for bot in self.repository.list_bots()
+            ],
+        }
+
+    async def list_groups(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "groups": [
+                {
+                    "id": str(group.id),
+                    "name": group.name,
+                    "members": [member.name for member in group.members],
+                }
+                for group in self.repository.list_groups()
+            ],
+        }
+
+    async def create_group(self, payload: dict[str, Any]) -> dict[str, Any]:
+        member_ids = [self.bot_id]
+        for raw in payload.get("member_bot_ids") or []:
+            member_ids.append(UUID(str(raw)))
+        for name in payload.get("member_names") or []:
+            match = self._bot_named(str(name))
+            if match is None:
+                raise ValueError(f"bot named {name} was not found")
+            member_ids.append(match.id)
+        group = self.repository.create_group(self._text(payload, "name"), str(payload.get("description", ""))[:2_000], member_ids)
+        return {"ok": True, "group_id": str(group.id), "name": group.name, "members": [member.name for member in group.members]}
+
+    async def add_group_member(self, payload: dict[str, Any]) -> dict[str, Any]:
+        group_id = UUID(self._text(payload, "group_id"))
+        bot = self._member_from_payload(payload)
+        self.repository.add_group_member(group_id, bot.id)
+        return {"ok": True, "group_id": str(group_id), "bot": bot.name}
+
+    async def remove_group_member(self, payload: dict[str, Any]) -> dict[str, Any]:
+        group_id = UUID(self._text(payload, "group_id"))
+        bot = self._member_from_payload(payload)
+        self.repository.remove_group_member(group_id, bot.id)
+        return {"ok": True, "group_id": str(group_id), "bot": bot.name}
+
+    async def list_group_messages(self, payload: dict[str, Any]) -> dict[str, Any]:
+        group_id = UUID(self._text(payload, "group_id"))
+        messages = self.repository.list_group_messages(group_id)[-30:]
+        group = self.repository.get_group(group_id)
+        names = {member.id: member.name for member in group.members}
+        return {
+            "ok": True,
+            "messages": [
+                {
+                    "sender": "Kamu" if message.sender_type == "user" else names.get(message.sender_bot_id, "Bot"),
+                    "content": message.content,
+                }
+                for message in messages
+            ],
+        }
 
     async def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         assignee = UUID(payload["assignee_bot_id"]) if payload.get("assignee_bot_id") else None
@@ -178,8 +253,24 @@ class WorkspaceToolset:
         return {"ok": True, "handoff_id": str(handoff.id), "run_id": str(child.id), "target_bot": target.name}
 
     async def post_to_group(self, payload: dict[str, Any]) -> dict[str, Any]:
-        message = self.repository.append_group_message(UUID(self._text(payload, "group_id")), "bot", self._text(payload, "content"), self.bot_id)
+        group_id = UUID(self._text(payload, "group_id"))
+        content = self._text(payload, "content")
+        message = self.repository.append_group_message(group_id, "bot", content, self.bot_id)
+        if self.on_group_post:
+            self.on_group_post(group_id, content, self.bot_id)
         return {"ok": True, "message_id": str(message.id)}
+
+    def _bot_named(self, name: str):
+        needle = name.strip().lower()
+        return next((bot for bot in self.repository.list_bots() if bot.name.lower() == needle), None)
+
+    def _member_from_payload(self, payload: dict[str, Any]):
+        if payload.get("bot_id"):
+            return self.repository.get_bot(UUID(str(payload["bot_id"])))
+        match = self._bot_named(self._text(payload, "member_name"))
+        if match is None:
+            raise ValueError("bot was not found")
+        return match
 
     def _workspace_path(self, value: str) -> Path:
         candidate = (self.workspace_root / value).resolve()

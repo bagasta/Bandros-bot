@@ -30,6 +30,17 @@ type DeviceFlow = {
 };
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
+
+function renderMentions(content: string, names: string[]) {
+  const unique = [...names].filter(Boolean).sort((left, right) => right.length - left.length);
+  if (unique.length === 0) return content;
+  const pattern = unique.map((name) => `@${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).join("|");
+  return content.split(new RegExp(`(${pattern})`, "ig")).map((part, index) => (
+    unique.some((name) => part.toLowerCase() === `@${name.toLowerCase()}`)
+      ? <mark className="bandros-mention" key={`${part}-${index}`}>{part}</mark>
+      : part
+  ));
+}
 const quickPrompts = [
   "Analisis performa semua Bot",
   "Buat Bot baru untuk riset LinkedIn",
@@ -189,19 +200,17 @@ export default function GrokDashboard() {
     try {
       if (selectedGroup) {
         const groupId = selectedGroup.id;
-        const expectedReplies = selectedGroup.members.filter((member) => member.status === "active").length;
-        const previousCount = groupMessages.length;
+        setGroupMessages((current) => [...current, { id: `local-${Date.now()}`, sender_type: "user", sender_bot_id: null, content }]);
         await request<GroupMessage>(`/groups/${groupId}/messages`, { method: "POST", body: JSON.stringify({ content }) });
-        let receivedReplies = false;
-        for (let attempt = 0; attempt < 40; attempt += 1) {
-          const nextMessages = await request<GroupMessage[]>(`/groups/${groupId}/messages`);
-          if (selectedGroup?.id !== groupId) return;
-          setGroupMessages(nextMessages);
-          receivedReplies = nextMessages.length >= previousCount + 1 + expectedReplies;
-          if (receivedReplies) break;
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-        if (!receivedReplies) throw new Error("Sebagian respons grup belum selesai. Coba refresh grup.");
+        const [nextMessages, nextGroups] = await Promise.all([
+          request<GroupMessage[]>(`/groups/${groupId}/messages`),
+          request<Group[]>("/groups"),
+        ]);
+        if (selectedGroup?.id !== groupId) return;
+        setGroupMessages(nextMessages);
+        setGroups(nextGroups);
+        const refreshed = nextGroups.find((group) => group.id === groupId);
+        if (refreshed) setSelectedGroup(refreshed);
         return;
       }
       const botId = selectedBot?.id;
@@ -249,6 +258,7 @@ export default function GrokDashboard() {
       if (completed.error) throw new Error(completed.error);
       if (selectedBot?.id !== botId) return;
       setMessages(await request<Message[]>(`/bots/${botId}/messages`));
+      void loadBots();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Pesan tidak dapat dikirim.");
     } finally { setWorking(false); setActiveRunId(null); }
@@ -423,16 +433,16 @@ export default function GrokDashboard() {
           <button className="bandros-back" type="button" onClick={() => { setMobilePane("list"); setSettingsOpen(false); }} aria-label="Kembali ke daftar Bot">Bots</button>
           <button className="bandros-title" type="button" onClick={openSettings} disabled={!selectedBot}>
             <span className={`bandros-status-dot ${working ? "is-live" : ""}`} />
-            <span><strong>{displayName}</strong><small>{selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
+            <span><strong>{displayName}</strong><small>{selectedGroup ? selectedGroup.members.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
           </button>
         </header>
         {error && <div className="bandros-alert" role="alert">{error}<button aria-label="Tutup notifikasi" onClick={() => setError(null)}>×</button></div>}
         <div className="bandros-chat" ref={chatRef}>
-          {!selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>Kirim satu tugas yang selesai jelas. {displayName} mengerjakannya di komputer bersama, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"}</span><p>{message.content}</p></article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.role === "user" ? "Kamu" : displayName}</span><p>{message.content}</p></article>)}
-          {working && <p className="bandros-working">Sedang bekerja…</p>}
+          {!selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>Kirim satu tugas yang selesai jelas. {displayName} mengerjakannya di komputer bersama, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"}</span><p>{renderMentions(message.content, selectedGroup.members.map((member) => member.name))}</p></article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.role === "user" ? "Kamu" : displayName}</span><p>{message.content}</p></article>)}
+          {working && <p className="bandros-working">{selectedGroup ? `${selectedGroup.name} sedang membalas…` : "Sedang bekerja…"}</p>}
         </div>
         <form className="bandros-composer" onSubmit={sendMessage}>
-          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={`Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
+          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}. Sebut @Nama untuk menunjuk Bot` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
           <div className="bandros-composer-footer">
             <label className="bandros-model-picker">Model{chatGPT.connected ? modelSelect : <button type="button" onClick={() => void connectChatGPT()}>Sign in</button>}</label>
             {working ? <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button> : <button type="submit" disabled={!prompt.trim()} aria-label="Send message">Send</button>}

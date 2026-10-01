@@ -464,6 +464,11 @@ class Repository:
         with self.database.connection() as db:
             db.execute("INSERT OR IGNORE INTO group_members VALUES (?, ?)", (str(group_id), str(bot_id)))
 
+    def remove_group_member(self, group_id: UUID, bot_id: UUID) -> None:
+        self.get_group(group_id)
+        with self.database.connection() as db:
+            db.execute("DELETE FROM group_members WHERE group_id = ? AND bot_id = ?", (str(group_id), str(bot_id)))
+
     def append_group_message(self, group_id: UUID, sender_type: str, content: str, sender_bot_id: UUID | None = None) -> GroupMessage:
         self.get_group(group_id)
         message_id, timestamp = uuid4(), now()
@@ -550,7 +555,7 @@ class Repository:
     def _group(self, row: Any) -> WorkGroup:
         group_id = UUID(row["id"])
         with self.database.connection() as db:
-            member_rows = db.execute("SELECT bots.* FROM bots JOIN group_members ON group_members.bot_id = bots.id WHERE group_members.group_id = ? ORDER BY bots.name", (str(group_id),)).fetchall()
+            member_rows = db.execute("SELECT bots.* FROM bots JOIN group_members ON group_members.bot_id = bots.id WHERE group_members.group_id = ? ORDER BY group_members.rowid", (str(group_id),)).fetchall()
         return WorkGroup(id=group_id, name=row["name"], description=row["description"], members=[self._bot(member) for member in member_rows], created_at=load_time(row["created_at"]))
 
     def _handoff(self, row: Any) -> Handoff:
