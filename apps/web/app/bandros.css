@@ -35,7 +35,8 @@
 .bandros-account { display: block; width: 100%; margin-top: auto; padding: 12px 8px 4px; color: var(--ink); text-align: left; }
 .bandros-account small { color: var(--muted); font-size: 12px; }
 .bandros-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.bandros-topbar { display: flex; align-items: center; min-height: 64px; padding: 0 28px; }
+.bandros-app header.bandros-topbar { position: static; top: auto; z-index: auto; display: flex; align-items: center; width: 100%; max-width: none; min-height: 64px; margin: 0; padding: 0 28px; background: transparent; }
+.bandros-app header.bandros-topbar button { margin: 0; padding: 0; color: var(--ink); background: transparent; border-radius: 0; }
 .bandros-title { display: flex; align-items: center; gap: 10px; min-height: 0; padding: 0; color: var(--ink); text-align: left; background: transparent; border: 0; }
 .bandros-title strong { font-size: 15px; }
 .bandros-title small { color: var(--muted); font-size: 12px; }
