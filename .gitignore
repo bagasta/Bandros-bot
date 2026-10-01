@@ -14,3 +14,11 @@ data/
 *.crt
 *.p12
 *.pfx
+*.db
+*.sqlite
+*.sqlite3
+.npmrc
+.yarnrc
+.yarnrc.yml
+credentials*.json
+secrets*.json
