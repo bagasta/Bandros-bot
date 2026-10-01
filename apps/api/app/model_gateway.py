@@ -5,9 +5,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 import httpx
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider
 
 from .workspace_tools import ToolDefinition
 
@@ -90,6 +87,10 @@ class OpenRouterGateway:
             raise RuntimeError(
                 "OPENROUTER_API_KEY is not configured. Add it to .env before starting model runs."
             )
+        from pydantic_ai import Agent
+        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+
         async with httpx.AsyncClient(timeout=60) as client:
             provider = OpenAIProvider(
                 base_url=f"{self.base_url}/", api_key=self.api_key, http_client=client
