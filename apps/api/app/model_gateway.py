@@ -50,8 +50,9 @@ class ChatGPTGateway:
             headers.update(
                 {
                     "ChatGPT-Account-Id": str(account_id),
-                    "originator": "bandros",
+                    "originator": "codex_cli_rs",
                     "OpenAI-Beta": "responses=v1",
+                    "User-Agent": "codex_cli_rs",
                 }
             )
         async with httpx.AsyncClient(timeout=60) as client:

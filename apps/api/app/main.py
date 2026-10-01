@@ -226,7 +226,8 @@ async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, st
     headers = {
         "Authorization": f"Bearer {connection['access_token']}",
         "ChatGPT-Account-Id": str(connection["account_id"]),
-        "originator": "bandros",
+        "originator": "codex_cli_rs",
+        "User-Agent": "codex_cli_rs",
     }
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(

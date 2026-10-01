@@ -19,7 +19,10 @@ class CredentialStore:
 
     @property
     def durable(self) -> bool:
-        return bool(os.getenv("BLOB_STORE_ID") and os.getenv("VERCEL"))
+        return bool(
+            os.getenv("BLOB_READ_WRITE_TOKEN")
+            or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
+        )
 
     async def put(self, kind: str, identifier: str, value: dict[str, Any]) -> None:
         key = self._key(kind, identifier)
@@ -28,26 +31,30 @@ class CredentialStore:
             return
         from vercel.blob import AsyncBlobClient
 
-        await AsyncBlobClient().put(
-            key,
-            json.dumps(value).encode(),
-            access="private",
-            content_type="application/json",
-            overwrite=True,
-        )
+        payload = json.dumps(value).encode()
+        async with AsyncBlobClient() as client:
+            await client.put(
+                key,
+                payload,
+                access="private",
+                content_type="application/json",
+                overwrite=True,
+            )
 
     async def get(self, kind: str, identifier: str) -> dict[str, Any] | None:
         key = self._key(kind, identifier)
         if not self.durable:
             value = self._memory.get(key)
             return dict(value) if value else None
+        from vercel._internal.blob.errors import BlobNotFoundError
         from vercel.blob import AsyncBlobClient
 
         try:
-            result = await AsyncBlobClient().get(key, access="private", use_cache=False)
-        except Exception:
+            async with AsyncBlobClient() as client:
+                result = await client.get(key, access="private", use_cache=False)
+        except BlobNotFoundError:
             return None
-        if result is None or result.status_code != 200:
+        except Exception:
             return None
         value = json.loads(result.content)
         return value if isinstance(value, dict) else None
@@ -60,6 +67,7 @@ class CredentialStore:
         from vercel.blob import AsyncBlobClient
 
         try:
-            await AsyncBlobClient().delete(key)
+            async with AsyncBlobClient() as client:
+                await client.delete(key)
         except Exception:
             return

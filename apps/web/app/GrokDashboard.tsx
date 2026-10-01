@@ -187,7 +187,10 @@ export default function GrokDashboard() {
         setMessages(await request<Message[]>(`/bots/${botId}/messages`));
         return;
       }
-      const response = await fetch(`${apiBase}/runs/${run.id}/events/stream`);
+      const session = window.localStorage.getItem("bandros_chatgpt_session");
+      const response = await fetch(`${apiBase}/runs/${run.id}/events/stream`, {
+        headers: session ? { "X-Bandros-Session": session } : {},
+      });
       if (!response.ok || !response.body) throw new Error("Streaming Run tidak tersedia.");
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
