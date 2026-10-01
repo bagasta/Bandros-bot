@@ -61,7 +61,8 @@ runtime = RunRuntime(
 policy = PolicyEngine()
 openai_jwks = PyJWKClient("https://auth.openai.com/.well-known/jwks.json")
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-CODEX_CLIENT_VERSION = "0.149.0"
+CODEX_CLIENT_VERSION = "0.157.1"
+LATEST_CODEX_MODEL = {"id": "gpt-6-luna", "display_name": "GPT-6 Luna"}
 CODEX_DEVICE_CODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
 CODEX_DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/deviceauth/token"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -256,6 +257,11 @@ def listed_codex_models(payload: object) -> list[dict[str, str]]:
     return [item[4] for item in chosen]
 
 
+def ensure_latest_codex_models(models: list[dict[str, str]]) -> list[dict[str, str]]:
+    rest = [item for item in models if item.get("id") != LATEST_CODEX_MODEL["id"]]
+    return [LATEST_CODEX_MODEL, *rest]
+
+
 async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, str]]:
     headers = {
         "Authorization": f"Bearer {connection['access_token']}",
@@ -265,7 +271,7 @@ async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, st
     }
     last_detail = "katalog kosong"
     async with httpx.AsyncClient(timeout=30) as client:
-        for version in (CODEX_CLIENT_VERSION, "0.99.0", "1.0.0"):
+        for version in (CODEX_CLIENT_VERSION, "0.157.0", "0.149.0"):
             response = await client.get(
                 "https://chatgpt.com/backend-api/codex/models",
                 params={"client_version": version},
@@ -274,7 +280,7 @@ async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, st
             if response.is_error:
                 last_detail = f"{response.status_code}: {response.text[:180]}"
                 continue
-            models = listed_codex_models(response.json())
+            models = ensure_latest_codex_models(listed_codex_models(response.json()))
             if models:
                 return models
             last_detail = "katalog tidak memuat model yang bisa dipilih"
@@ -410,7 +416,7 @@ async def chatgpt_device_poll(payload: DevicePollInput) -> dict[str, object]:
     }
     models = await _list_codex_models(connection)
     connection["models"] = models
-    connection["preferred_model"] = models[0]["id"] if models else "gpt-5.3-codex"
+    connection["preferred_model"] = models[0]["id"] if models else LATEST_CODEX_MODEL["id"]
     session_token = secrets.token_urlsafe(48)
     await credential_store.put("sessions", session_token, connection)
     await credential_store.delete("flows", payload.flow_id)
@@ -629,7 +635,7 @@ async def chatgpt_models() -> dict[str, object]:
         for item in catalog.get("models", catalog.get("data", []))
         if (item.get("slug") or item.get("id")) and item.get("visibility", "list") == "list"
     ]
-    return {"models": models}
+    return {"models": ensure_latest_codex_models(models)}
 
 
 @app.get("/api/v1/bots", response_model=list[Bot])

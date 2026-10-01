@@ -17,6 +17,11 @@ type ChatGPTStatus = {
   reason?: string | null;
 };
 type ChatGPTModel = { id: string; display_name: string };
+const latestCodexModel: ChatGPTModel = { id: "gpt-6-luna", display_name: "GPT-6 Luna" };
+
+function withLatestCodexModel(models: ChatGPTModel[]): ChatGPTModel[] {
+  return [latestCodexModel, ...models.filter((model) => model.id !== latestCodexModel.id)];
+}
 type DeviceFlow = {
   flow_id: string;
   user_code: string;
@@ -99,15 +104,15 @@ export default function GrokDashboard() {
       const savedModels = JSON.parse(window.localStorage.getItem("bandros_bot_models") || "{}") as Record<string, string>;
       if (savedModels && typeof savedModels === "object") setModelByBot(savedModels);
       const cached = JSON.parse(window.localStorage.getItem("bandros_codex_models") || "[]") as ChatGPTModel[];
-      if (Array.isArray(cached) && cached.length > 0) setChatGPTModels(cached);
+      if (Array.isArray(cached) && cached.length > 0) setChatGPTModels(withLatestCodexModel(cached));
     } catch {
       /* Cache is only a fallback when the catalog request is unavailable. */
     }
   }, []);
   const rememberModels = (models: ChatGPTModel[]) => {
-    if (models.length === 0) return;
-    setChatGPTModels(models);
-    window.localStorage.setItem("bandros_codex_models", JSON.stringify(models));
+    const listed = withLatestCodexModel(models);
+    setChatGPTModels(listed);
+    window.localStorage.setItem("bandros_codex_models", JSON.stringify(listed));
   };
   const loadChatGPT = async () => {
     const status = await request<ChatGPTStatus>("/auth/chatgpt/status");
@@ -389,11 +394,12 @@ export default function GrokDashboard() {
 
   const displayName = selectedGroup?.name || selectedBot?.name || "New Bot";
   const currentModel = selectedBot ? (modelByBot[selectedBot.id] ?? selectedBot.model ?? "") : "";
-  const automaticModel = chatGPTModels.find((model) => model.id === chatGPT.preferred_model)?.display_name || chatGPT.preferred_model || "Codex";
+  const selectableModels = withLatestCodexModel(chatGPTModels);
+  const automaticModel = selectableModels.find((model) => model.id === chatGPT.preferred_model)?.display_name || chatGPT.preferred_model || latestCodexModel.display_name;
   const modelSelect = (
     <select aria-label="Model Codex" value={currentModel} onChange={(event) => void chooseModel(event.target.value)} disabled={!selectedBot}>
       <option value="">{`Otomatis · ${automaticModel}`}</option>
-      {chatGPTModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}
+      {selectableModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}
     </select>
   );
 
@@ -450,7 +456,7 @@ export default function GrokDashboard() {
           <label htmlFor="agent-model">Model</label>
           {chatGPT.connected ? <select id="agent-model" value={editModel} onChange={(event) => { setEditModel(event.target.value); void chooseModel(event.target.value); }}>
             <option value="">{`Otomatis · ${automaticModel}`}</option>
-            {chatGPTModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}
+            {selectableModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}
           </select> : <button type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button>}
           {chatGPT.connected && chatGPTModels.length === 0 && <button type="button" onClick={() => void loadChatGPT().catch((cause) => setError(cause instanceof Error ? cause.message : "Model tidak dapat dimuat."))}>Muat ulang model</button>}
           <button type="submit">Save</button>
