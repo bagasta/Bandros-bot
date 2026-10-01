@@ -57,53 +57,50 @@ def test_chatgpt_gateway_runs_codex_tools_through_pydantic(monkeypatch) -> None:
     assert captured["model"].request.__func__ is _codex_request
 
 
-def test_codex_request_streams_until_the_response_is_complete() -> None:
-    class Event:
-        def __init__(self, event_type: str, response: object) -> None:
-            self.type = event_type
-            self.response = response
+def test_codex_request_reads_the_streamed_response() -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart
 
-    class Stream:
-        def __init__(self) -> None:
-            self.events = [Event("response.created", None), Event("response.completed", {"id": "resp_1"})]
-            self.entered = False
-
-        async def __aenter__(self):
-            self.entered = True
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
+    class Streamed:
         def __aiter__(self):
             return self
 
         async def __anext__(self):
-            if not self.events:
-                raise StopAsyncIteration
-            return self.events.pop(0)
+            raise StopAsyncIteration
 
-    captured: dict[str, object] = {}
+        def get(self):
+            return ModelResponse(parts=[TextPart(content="Siap.")])
+
+    class Stream:
+        entered = False
+
+        async def __aenter__(self):
+            self.entered = True
+            return Streamed()
+
+        async def __aexit__(self, *_args):
+            return False
+
     stream = Stream()
 
     class Model:
-        def prepare_request(self, model_settings, model_request_parameters):
-            return model_settings, model_request_parameters
-
-        async def _responses_create(self, messages, streaming, model_settings, model_request_parameters):
-            captured["stream"] = streaming
+        def request_stream(self, *_args, **_kwargs):
             return stream
-
-        def _process_response(self, response, model_settings, model_request_parameters):
-            captured["response"] = response
-            return "processed"
 
     answer = asyncio.run(_codex_request(Model(), [], None, None))
 
-    assert answer == "processed"
-    assert captured["stream"] is True
-    assert captured["response"] == {"id": "resp_1"}
+    assert answer.parts[0].content == "Siap."
     assert stream.entered is True
+
+
+def test_reasoning_only_codex_response_becomes_visible_text() -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+
+    from apps.api.app.model_gateway import _with_visible_text
+
+    response = _with_visible_text(ModelResponse(parts=[ThinkingPart(content="Jawaban dari reasoning.")]))
+
+    assert isinstance(response.parts[-1], TextPart)
+    assert response.parts[-1].content == "Jawaban dari reasoning."
 
 
 def test_pydantic_agent_returns_model_text(monkeypatch) -> None:

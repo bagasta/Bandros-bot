@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Awaitable, Callable, Protocol, Sequence, cast
+from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 import httpx
 
@@ -195,36 +195,27 @@ class CodexResponsesModel:
 
 
 async def _codex_request(self: Any, messages: list[Any], model_settings: Any, model_request_parameters: Any) -> Any:
-    from pydantic_ai.models import ModelResponse, check_allow_model_requests
-    from pydantic_ai.models.openai import OpenAIResponsesModelSettings
-
-    check_allow_model_requests()
-    model_settings, model_request_parameters = self.prepare_request(model_settings, model_request_parameters)
-    settings = cast(OpenAIResponsesModelSettings, model_settings or {})
-    stream = await self._responses_create(messages, True, settings, model_request_parameters)
-    if isinstance(stream, ModelResponse):
-        return stream
-    completed = await _completed_codex_response(stream)
-    return self._process_response(completed, settings, model_request_parameters)
+    async with self.request_stream(messages, model_settings, model_request_parameters) as streamed:
+        async for _event in streamed:
+            pass
+        return _with_visible_text(streamed.get())
 
 
-async def _completed_codex_response(stream: Any) -> Any:
-    completed = None
+def _with_visible_text(response: Any) -> Any:
+    """Use reasoning text when Codex returns no message the agent can accept."""
+    from pydantic_ai.messages import TextPart, ThinkingPart, ToolCallPart
 
-    async def consume(source: Any) -> None:
-        nonlocal completed
-        async for event in source:
-            if getattr(event, "type", None) in {"response.completed", "response.incomplete"} and getattr(event, "response", None) is not None:
-                completed = event.response
-
-    if hasattr(stream, "__aenter__"):
-        async with stream:
-            await consume(stream)
-    else:
-        await consume(stream)
-    if completed is None:
-        raise RuntimeError("Codex tidak mengembalikan response selesai.")
-    return completed
+    parts = list(response.parts)
+    has_answer = any(
+        isinstance(part, ToolCallPart) or (isinstance(part, TextPart) and part.content.strip())
+        for part in parts
+    )
+    if has_answer:
+        return response
+    thoughts = [part.content.strip() for part in parts if isinstance(part, ThinkingPart) and part.content.strip()]
+    if thoughts:
+        response.parts = [*parts, TextPart("\n\n".join(thoughts))]
+    return response
 
 
 async def run_pydantic_agent(
@@ -240,15 +231,9 @@ async def run_pydantic_agent(
     from pydantic_ai import Agent
     from pydantic_ai.usage import UsageLimits
 
-    agent = Agent(model, instructions=system, retries=1)
+    agent = Agent(model, instructions=system, retries=3)
     for definition in tools:
-        agent.tool_plain(
-            _tool_function(definition),
-            name=definition.name,
-            description=definition.description,
-            retries=1,
-            timeout=definition.timeout_seconds,
-        )
+        agent._function_toolset.add_tool(_tool(definition))
     result = await agent.run(
         prompt,
         model_settings=model_settings,
@@ -260,8 +245,18 @@ async def run_pydantic_agent(
     return answer
 
 
-def _tool_function(definition: ToolDefinition):
-    async def invoke(payload: dict[str, object]) -> dict[str, object]:
+def _tool(definition: ToolDefinition) -> Any:
+    from pydantic_ai.tools import Tool
+
+    async def invoke(**payload: object) -> dict[str, object]:
         return await definition.handler(dict(payload))
 
-    return invoke
+    tool = Tool.from_schema(
+        invoke,
+        name=definition.name,
+        description=definition.description,
+        json_schema={"type": "object", "additionalProperties": True},
+    )
+    tool.max_retries = 2
+    tool.timeout = definition.timeout_seconds
+    return tool
