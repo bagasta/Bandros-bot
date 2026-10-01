@@ -72,6 +72,7 @@ export default function GrokDashboard() {
   const [modelByBot, setModelByBot] = useState<Record<string, string>>({});
   const [deviceFlow, setDeviceFlow] = useState<DeviceFlow | null>(null);
   const [deviceStatus, setDeviceStatus] = useState("");
+  const [mobilePane, setMobilePane] = useState<"list" | "chat">("list");
   const chatRef = useRef<HTMLDivElement>(null);
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
@@ -263,6 +264,7 @@ export default function GrokDashboard() {
   const openBot = (bot: Bot) => {
     setSelectedGroup(null);
     setSelectedBot(bot);
+    setMobilePane("chat");
   };
 
   const openSettings = () => {
@@ -310,6 +312,7 @@ export default function GrokDashboard() {
   const openGroup = (group: Group) => {
     setSelectedBot(null);
     setSelectedGroup(group);
+    setMobilePane("chat");
   };
 
   const createGroup = async () => {
@@ -338,6 +341,7 @@ export default function GrokDashboard() {
       }) });
       setBots((current) => [bot, ...current.filter((item) => item.id !== bot.id)]);
       setSelectedBot(bot);
+      setMobilePane("chat");
       void loadBots();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Bot tidak dapat dibuat."); }
   };
@@ -394,7 +398,7 @@ export default function GrokDashboard() {
   );
 
   return (
-    <main className="bandros-app">
+    <main className={`bandros-app ${mobilePane === "chat" ? "is-chat" : "is-list"}`}>
       <aside className="bandros-sidebar">
         <div className="bandros-brand"><strong>Bandros</strong><button type="button" onClick={() => void createBot()}>New</button></div>
         <div className="bandros-agent-list">
@@ -410,6 +414,7 @@ export default function GrokDashboard() {
       </aside>
       <section className="bandros-main">
         <header className="bandros-topbar">
+          <button className="bandros-back" type="button" onClick={() => { setMobilePane("list"); setSettingsOpen(false); }} aria-label="Kembali ke daftar Bot">Bots</button>
           <button className="bandros-title" type="button" onClick={openSettings} disabled={!selectedBot}>
             <span className={`bandros-status-dot ${working ? "is-live" : ""}`} />
             <span><strong>{displayName}</strong><small>{selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>

@@ -20,8 +20,9 @@
 .bandros-brand button, .bandros-groups-heading button, .bandros-account { min-height: 0; border: 0; background: transparent; }
 .bandros-brand button, .bandros-groups-heading button { padding: 4px 8px; color: var(--ink); border-radius: 8px; font-size: 13px; }
 .bandros-brand button:hover, .bandros-groups-heading button:hover { background: #f1f0ec; }
-.bandros-agent-list, .bandros-group-list { display: grid; gap: 2px; overflow: auto; }
-.bandros-agent, .bandros-group { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 8px; color: var(--ink); text-align: left; background: transparent; border: 0; border-radius: 12px; }
+.bandros-agent-list, .bandros-group-list { display: grid; align-content: start; gap: 2px; overflow: auto; }
+.bandros-agent-list { flex: 1; min-height: 0; }
+.bandros-agent, .bandros-group { display: flex; align-items: center; align-self: start; gap: 10px; width: 100%; height: auto; min-height: 52px; padding: 8px; color: var(--ink); text-align: left; background: transparent; border: 0; border-radius: 12px; }
 .bandros-agent:hover, .bandros-group:hover, .bandros-agent.is-selected, .bandros-group.is-selected { background: #f3f2ee; }
 .bandros-avatar { display: grid; place-items: center; width: 32px; height: 32px; color: #fff; background: #8d8d92; border-radius: 50%; font-size: 12px; font-weight: 700; }
 .bandros-avatar.is-live { box-shadow: 0 0 0 3px #e4dcff; background: var(--live); }
@@ -81,9 +82,52 @@
 .bandros-device-card code { display: block; margin: 16px 0; padding: 14px; background: #f5f4f1; border-radius: 12px; text-align: center; letter-spacing: .12em; font-size: 24px; font-weight: 750; }
 .bandros-device-card a { display: block; padding: 12px; color: #fff; background: #1c1c1e; border-radius: 999px; text-align: center; text-decoration: none; }
 .bandros-device-close { position: absolute; top: 10px; right: 10px; min-height: 0; background: transparent; border: 0; font-size: 22px; }
+.bandros-back { display: none; }
 @media (max-width: 980px) {
   .bandros-app { grid-template-columns: 240px minmax(0, 1fr); }
   .bandros-computer { display: none; }
-  .bandros-chat, .bandros-composer, .bandros-alert { margin-right: 16px; margin-left: 16px; padding-right: 0; padding-left: 0; }
   .bandros-chat { padding: 8px 16px 12px; }
+  .bandros-composer, .bandros-alert { margin-right: 16px; margin-left: 16px; }
+}
+@media (max-width: 760px) {
+  html, body { height: 100%; overflow: hidden; background: #f5f4f1; }
+  .bandros-app { display: block; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: #fff; }
+  .bandros-app.is-list .bandros-main,
+  .bandros-app.is-chat .bandros-sidebar,
+  .bandros-computer { display: none; }
+  .bandros-app.is-chat .bandros-main { display: flex; width: 100%; height: 100%; min-height: 0; }
+  .bandros-sidebar {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    position: static;
+    width: 100%;
+    height: 100%;
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
+    overflow: hidden;
+    background: #fff;
+    border: 0;
+  }
+  .bandros-agent-list { flex: 1; min-height: 0; align-content: start; }
+  .bandros-agent, .bandros-group { align-self: start; height: auto; }
+  .bandros-account { flex: 0 0 auto; margin-top: 8px; }
+  .bandros-back { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 36px; margin: 0; padding: 0 10px; color: var(--ink); background: transparent; border: 0; border-radius: 8px; font-size: 14px; font-weight: 650; }
+  .bandros-topbar, .bandros-app header.bandros-topbar { position: static; display: flex; align-items: center; width: 100%; max-width: none; min-height: 56px; margin: 0; padding: 0 8px; gap: 4px; background: #fff; }
+  .bandros-title { min-width: 0; flex: 1; margin: 0; }
+  .bandros-title span:last-child { min-width: 0; }
+  .bandros-chat { width: auto; padding: 4px 12px 8px; }
+  .bandros-welcome { margin-top: 6vh; }
+  .bandros-welcome h1 { font-size: 28px; }
+  .bandros-message { max-width: none; }
+  .bandros-composer { width: auto; margin: 0 12px calc(12px + env(safe-area-inset-bottom)); }
+  .bandros-alert { margin: 0 12px 8px; }
+  .bandros-composer-footer { gap: 8px; }
+  .bandros-model-picker { min-width: 0; flex: 1; }
+  .bandros-model-picker select { width: 100%; max-width: none; }
+  .bandros-settings { width: 100%; }
+  .bandros-app aside { display: flex; flex-direction: column; align-items: stretch; position: static; padding: 12px; border: 0; }
+  .bandros-app header button { margin-top: 0; }
+  .bandros-app form { display: block; }
+  .bandros-app form button { margin-top: 0; justify-self: auto; }
+  .bandros-app .bandros-composer-footer { margin-bottom: 0; }
 }
