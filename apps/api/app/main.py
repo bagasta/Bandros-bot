@@ -224,32 +224,36 @@ class DevicePollInput(BaseModel):
 
 
 def listed_codex_models(payload: object) -> list[dict[str, str]]:
-    raw_models = payload.get("models", []) if isinstance(payload, dict) else []
-    ranked: list[tuple[int, int, dict[str, str]]] = []
+    raw_models: object = []
+    if isinstance(payload, dict):
+        raw_models = payload.get("models") or payload.get("data") or []
+    elif isinstance(payload, list):
+        raw_models = payload
+    ranked: list[tuple[bool, bool, int, int, dict[str, str]]] = []
+    if not isinstance(raw_models, list):
+        return []
     for index, item in enumerate(raw_models):
         if not isinstance(item, dict):
-            continue
-        if item.get("visibility", "list") != "list":
-            continue
-        if item.get("supported_in_api") is False:
             continue
         slug = item.get("slug") or item.get("id")
         if not isinstance(slug, str) or not slug.strip():
             continue
         priority = item.get("priority")
         rank = priority if isinstance(priority, int) else 10_000
+        visible = item.get("visibility", "list") == "list"
+        supported = item.get("supported_in_api") is not False
         ranked.append(
             (
+                visible,
+                supported,
                 rank,
                 index,
-                {
-                    "id": slug,
-                    "display_name": str(item.get("display_name") or slug),
-                },
+                {"id": slug, "display_name": str(item.get("display_name") or slug)},
             )
         )
-    ranked.sort(key=lambda item: (item[0], item[1]))
-    return [item[2] for item in ranked]
+    chosen = [item for item in ranked if item[0] and item[1]] or [item for item in ranked if item[1]]
+    chosen.sort(key=lambda item: (item[2], item[3]))
+    return [item[4] for item in chosen]
 
 
 async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, str]]:
@@ -259,14 +263,22 @@ async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, st
         "originator": "codex_cli_rs",
         "User-Agent": "codex_cli_rs",
     }
+    last_detail = "katalog kosong"
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.get(
-            "https://chatgpt.com/backend-api/codex/models",
-            params={"client_version": CODEX_CLIENT_VERSION},
-            headers=headers,
-        )
-    response.raise_for_status()
-    return listed_codex_models(response.json())
+        for version in (CODEX_CLIENT_VERSION, "0.99.0", "1.0.0"):
+            response = await client.get(
+                "https://chatgpt.com/backend-api/codex/models",
+                params={"client_version": version},
+                headers=headers,
+            )
+            if response.is_error:
+                last_detail = f"{response.status_code}: {response.text[:180]}"
+                continue
+            models = listed_codex_models(response.json())
+            if models:
+                return models
+            last_detail = "katalog tidak memuat model yang bisa dipilih"
+    raise HTTPException(status_code=502, detail=f"Katalog model Codex gagal ({last_detail})")
 
 
 async def _start_run(run_id: UUID) -> None:
@@ -397,6 +409,7 @@ async def chatgpt_device_poll(payload: DevicePollInput) -> dict[str, object]:
         else None,
     }
     models = await _list_codex_models(connection)
+    connection["models"] = models
     connection["preferred_model"] = models[0]["id"] if models else "gpt-5.3-codex"
     session_token = secrets.token_urlsafe(48)
     await credential_store.put("sessions", session_token, connection)
@@ -567,6 +580,7 @@ def chatgpt_auth_status() -> dict[str, object]:
         "subscription_enabled": codex
         or "chatgpt.tokens.use.direct" in str(connection.get("scope") or "").split(),
         "preferred_model": connection.get("preferred_model"),
+        "models": connection.get("models") or [],
         "auth_mode": connection.get("auth_mode", "siwc"),
     }
 
@@ -591,7 +605,15 @@ async def chatgpt_models() -> dict[str, object]:
         await _refresh_chatgpt_token(connection)
         connection = _chatgpt_connection() or connection
     if connection.get("auth_mode") == "codex":
-        return {"models": await _list_codex_models(connection)}
+        models = await _list_codex_models(connection)
+        session_token = connection.get("_session_token")
+        if isinstance(session_token, str) and session_token:
+            stored = {key: value for key, value in connection.items() if key != "_session_token"}
+            stored["models"] = models
+            if models:
+                stored["preferred_model"] = models[0]["id"]
+            await credential_store.put("sessions", session_token, stored)
+        return {"models": models}
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
             "https://api.openai.com/v1/models",

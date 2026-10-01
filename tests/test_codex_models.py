@@ -24,6 +24,14 @@ def test_listed_codex_models_keeps_picker_models_in_priority_order() -> None:
     ]
 
 
+def test_listed_codex_models_falls_back_when_nothing_is_marked_visible() -> None:
+    models = listed_codex_models(
+        {"models": [{"slug": "gpt-5.4", "display_name": "GPT-5.4", "visibility": "hide", "supported_in_api": True}]}
+    )
+
+    assert models == [{"id": "gpt-5.4", "display_name": "GPT-5.4"}]
+
+
 def test_bot_model_can_return_to_automatic(tmp_path: Path) -> None:
     database = Database(tmp_path / "product.db")
     database.initialize()
