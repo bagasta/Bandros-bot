@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+import os
 import sqlite3
 from typing import Iterator
+
+_LOADED_DATABASE: ContextVar[str | None] = ContextVar("bandros_loaded_database", default=None)
+_DATABASE_BLOB_PATH = "state/workspace.db"
 
 
 SCHEMA = """
@@ -181,6 +186,38 @@ class Database:
             self._migrate(connection)
 
     @staticmethod
+    def _durable() -> bool:
+        return bool(os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN"))
+
+    def pull(self) -> None:
+        if not self._durable():
+            return
+        from vercel.blob import BlobClient
+        from vercel.blob.errors import BlobNotFoundError
+
+        try:
+            with BlobClient() as client:
+                result = client.get(_DATABASE_BLOB_PATH, access="private", use_cache=False)
+        except BlobNotFoundError:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_bytes(result.content)
+
+    def push(self) -> None:
+        if not self._durable() or not self.path.exists():
+            return
+        from vercel.blob import BlobClient
+
+        with BlobClient() as client:
+            client.put(
+                _DATABASE_BLOB_PATH,
+                self.path.read_bytes(),
+                access="private",
+                content_type="application/vnd.sqlite3",
+                overwrite=True,
+            )
+
+    @staticmethod
     def _migrate(connection: sqlite3.Connection) -> None:
         """Apply additive migrations for databases created by earlier versions."""
         migrations = {
@@ -212,12 +249,18 @@ class Database:
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
+        if _LOADED_DATABASE.get() != str(self.path):
+            self.pull()
+            _LOADED_DATABASE.set(str(self.path))
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA foreign_keys = ON")
+            changes = connection.total_changes
             yield connection
             connection.commit()
+            if connection.total_changes != changes:
+                self.push()
         except Exception:
             connection.rollback()
             raise
