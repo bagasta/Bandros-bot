@@ -111,7 +111,6 @@ export default function GrokDashboard() {
       const orchestrator = nextBots.find((bot) => bot.status === "active" && bot.name.toLowerCase() === "bandros");
       setSelectedBot((current) => {
         if (current && nextBots.some((bot) => bot.id === current.id)) return current;
-        if (orchestrator) setMobilePane("chat");
         return orchestrator ?? nextBots.find((bot) => bot.status === "active") ?? nextBots[0] ?? null;
       });
       setSelectedGroup((current) => (current && nextGroups.some((group) => group.id === current.id) ? current : null));

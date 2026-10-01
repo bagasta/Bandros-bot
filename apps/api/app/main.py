@@ -171,12 +171,15 @@ def _seed_workspace(repo: Repository) -> None:
                 skill_id = default_skill_ids.get(skill_name)
                 if skill_id:
                     repo.assign_skill(bot.id, skill_id)
-    if not repo.list_bots():
+    existing = next((bot for bot in repo.list_bots() if bot.name.lower() == ORCHESTRATOR_NAME.lower()), None)
+    if existing is None:
         orchestrator = repo.create_bot(ORCHESTRATOR_NAME, ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, None)
         for skill_name in ("workspace_admin", "job_manager", "coordination"):
             skill_id = default_skill_ids.get(skill_name)
             if skill_id:
                 repo.assign_skill(orchestrator.id, skill_id)
+    elif existing.status is not BotStatus.ACTIVE:
+        repo.set_bot_status(existing.id, BotStatus.ACTIVE)
 
 
 def activate_account(account_id: str) -> tuple[object, object]:
@@ -721,6 +724,7 @@ async def chatgpt_models() -> dict[str, object]:
 
 @app.get("/api/v1/bots", response_model=list[Bot])
 def list_bots() -> list[Bot]:
+    _seed_workspace(repository)
     return repository.list_bots()
 
 
