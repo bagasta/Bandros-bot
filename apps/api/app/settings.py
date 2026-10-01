@@ -20,6 +20,7 @@ class Settings:
     model_gateway: str
     max_model_calls_per_run: int
     api_auth_token: str | None
+    web_origin: str
     openai_client_id: str | None
     openai_client_secret: str | None
     openai_redirect_uri: str
@@ -42,6 +43,7 @@ class Settings:
             model_gateway=os.getenv("MODEL_GATEWAY", "openrouter"),
             max_model_calls_per_run=int(os.getenv("MAX_MODEL_CALLS_PER_RUN", "8")),
             api_auth_token=os.getenv("API_AUTH_TOKEN") or None,
+            web_origin=os.getenv("WEB_ORIGIN", "http://127.0.0.1:3000"),
             openai_client_id=os.getenv("OPENAI_CLIENT_ID") or None,
             openai_client_secret=os.getenv("OPENAI_CLIENT_SECRET") or None,
             openai_redirect_uri=os.getenv(
