@@ -171,7 +171,7 @@ def _seed_workspace(repo: Repository) -> None:
                 skill_id = default_skill_ids.get(skill_name)
                 if skill_id:
                     repo.assign_skill(bot.id, skill_id)
-    if not any(bot.name.lower() == ORCHESTRATOR_NAME.lower() for bot in repo.list_bots()):
+    if not repo.list_bots():
         orchestrator = repo.create_bot(ORCHESTRATOR_NAME, ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, None)
         for skill_name in ("workspace_admin", "job_manager", "coordination"):
             skill_id = default_skill_ids.get(skill_name)
@@ -906,6 +906,14 @@ def list_handoffs(bot_id: UUID) -> list[Handoff]:
     try:
         repository.get_bot(bot_id)
         return repository.list_handoffs(bot_id)
+    except KeyError as error:
+        raise not_found(error) from error
+
+
+@app.delete("/api/v1/bots/{bot_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_bot(bot_id: UUID) -> None:
+    try:
+        repository.delete_bot(bot_id)
     except KeyError as error:
         raise not_found(error) from error
 

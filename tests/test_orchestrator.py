@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from uuid import UUID
 
+import pytest
+
 from apps.api.app.database import Database
 from apps.api.app.main import _seed_workspace
 from apps.api.app.mentions import lead_bot
@@ -39,6 +41,23 @@ def test_orchestrator_is_the_group_lead_and_stays_first(tmp_path: Path) -> None:
     assert repository.list_bots()[0].id == bandros.id
     assert lead_bot(repository.list_bots()).id == bandros.id
     assert lead_bot([repository.list_bots()[1], manager]).id == manager.id
+
+
+def test_deleting_a_bot_removes_it_without_recreating_the_orchestrator(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "delete.db")
+    _seed_workspace(repository)
+    specialist = repository.create_bot("Riset", "Mencari sumber.", "Tugas riset.", None)
+    group = repository.create_group("Tim", "", [specialist.id])
+    repository.append_group_message(group.id, "bot", "Siap.", specialist.id)
+    repository.append_message(repository.conversation_for_bot(specialist.id), "user", "Cari sumber")
+
+    repository.delete_bot(specialist.id)
+    _seed_workspace(repository)
+
+    assert [bot.name for bot in repository.list_bots()] == [ORCHESTRATOR_NAME]
+    assert repository.list_group_messages(group.id)[0].sender_bot_id is None
+    with pytest.raises(KeyError):
+        repository.get_bot(specialist.id)
 
 
 def test_create_bot_requires_detailed_instructions(tmp_path: Path) -> None:

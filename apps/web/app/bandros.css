@@ -23,6 +23,10 @@
 .bandros-agent-list, .bandros-group-list { display: grid; align-content: start; gap: 2px; overflow: auto; }
 .bandros-agent-list { flex: 1; min-height: 0; }
 .bandros-agent, .bandros-group { display: flex; align-items: center; align-self: start; gap: 10px; width: 100%; height: auto; min-height: 52px; padding: 8px; color: var(--ink); text-align: left; background: transparent; border: 0; border-radius: 12px; }
+.bandros-agent-open { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 0; color: inherit; text-align: left; background: transparent; border: 0; }
+.bandros-agent-actions, .bandros-topbar-actions { display: flex; flex: 0 0 auto; gap: 4px; }
+.bandros-agent-actions button, .bandros-app header.bandros-topbar .bandros-topbar-actions button { min-height: 28px; margin: 0; padding: 0 8px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.bandros-agent-actions button.is-danger, .bandros-app header.bandros-topbar .bandros-topbar-actions button.is-danger { color: #9f1239; border-color: #fecdd3; }
 .bandros-agent:hover, .bandros-group:hover, .bandros-agent.is-selected, .bandros-group.is-selected { background: #f3f2ee; }
 .bandros-avatar { display: grid; place-items: center; width: 32px; height: 32px; color: #fff; background: #8d8d92; border-radius: 50%; font-size: 12px; font-weight: 700; }
 .bandros-avatar.is-live { box-shadow: 0 0 0 3px #e4dcff; background: var(--live); }

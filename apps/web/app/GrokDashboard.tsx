@@ -64,6 +64,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await response.json().catch(() => null);
     throw new Error(typeof body?.detail === "string" ? body.detail : `Request gagal (${response.status}).`);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -352,13 +353,18 @@ export default function GrokDashboard() {
     setMobilePane("chat");
   };
 
+  const openBotSettings = (bot: Bot) => {
+    openBot(bot);
+    setEditName(bot.name);
+    setEditDescription(bot.description);
+    setEditInstructions(bot.instructions || "");
+    setEditModel(modelByBot[bot.id] ?? bot.model ?? "");
+    setSettingsOpen(true);
+  };
+
   const openSettings = () => {
     if (!selectedBot) return;
-    setEditName(selectedBot.name);
-    setEditDescription(selectedBot.description);
-    setEditInstructions(selectedBot.instructions || "");
-    setEditModel(modelByBot[selectedBot.id] ?? selectedBot.model ?? "");
-    setSettingsOpen(true);
+    openBotSettings(selectedBot);
   };
 
   const saveSettings = async (event: FormEvent) => {
@@ -382,15 +388,21 @@ export default function GrokDashboard() {
     }
   };
 
-  const archiveSelectedBot = async () => {
-    if (!selectedBot || !window.confirm(`Archive ${selectedBot.name}? Riwayat chat tetap disimpan.`)) return;
+  const deleteBot = async (bot: Bot) => {
+    if (!window.confirm(`Hapus ${bot.name}? Percakapan bot ini ikut terhapus.`)) return;
     try {
-      const archived = await request<Bot>(`/bots/${selectedBot.id}/archive`, { method: "POST" });
-      setBots((current) => current.map((bot) => bot.id === archived.id ? archived : bot));
-      setSelectedBot(null);
+      await request<void>(`/bots/${bot.id}`, { method: "DELETE" });
+      const remaining = bots.filter((item) => item.id !== bot.id);
+      setBots(remaining);
+      if (selectedBot?.id === bot.id) {
+        const next = remaining.find((item) => item.status === "active") ?? null;
+        setSelectedBot(next);
+        setMessages([]);
+        if (!next) setMobilePane("list");
+      }
       setSettingsOpen(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Agent tidak dapat di-archive.");
+      setError(cause instanceof Error ? cause.message : "Bot tidak dapat dihapus.");
     }
   };
 
@@ -530,7 +542,7 @@ export default function GrokDashboard() {
         <div className="bandros-brand"><strong>Bandros</strong><button type="button" onClick={() => void createBot()} disabled={!chatGPT.connected}>New</button></div>
         <div className="bandros-agent-list">
           {loading && <p className="bandros-muted">Memuat Bot…</p>}
-          {activeBots.map((bot) => <button className={`bandros-agent ${selectedBot?.id === bot.id && !selectedGroup ? "is-selected" : ""}`} key={bot.id} onClick={() => openBot(bot)}><span className={`bandros-avatar ${working && selectedBot?.id === bot.id ? "is-live" : ""}`}>{bot.name.slice(0, 1).toUpperCase()}</span><span className="bandros-agent-copy"><strong>{bot.name}</strong><small>{bot.description || "Belum ada peran"}</small></span></button>)}
+          {activeBots.map((bot) => <div className={`bandros-agent ${selectedBot?.id === bot.id && !selectedGroup ? "is-selected" : ""}`} key={bot.id}><button type="button" className="bandros-agent-open" onClick={() => openBot(bot)}><span className={`bandros-avatar ${working && selectedBot?.id === bot.id ? "is-live" : ""}`}>{bot.name.slice(0, 1).toUpperCase()}</span><span className="bandros-agent-copy"><strong>{bot.name}</strong><small>{bot.description || "Belum ada peran"}</small></span></button><span className="bandros-agent-actions"><button type="button" aria-label={`Edit ${bot.name}`} onClick={() => openBotSettings(bot)}>Edit</button><button type="button" className="is-danger" aria-label={`Hapus ${bot.name}`} onClick={() => void deleteBot(bot)}>Hapus</button></span></div>)}
           {!loading && chatGPT.connected && bots.length === 0 && <p className="bandros-muted">Belum ada Bot. Buat Bot pertama.</p>}
           {authReady && !chatGPT.connected && <p className="bandros-muted">Masuk dengan ChatGPT untuk membuka Bot kamu.</p>}
         </div>
@@ -547,6 +559,7 @@ export default function GrokDashboard() {
             <span className={`bandros-status-dot ${working || botWorking || typingNames.length > 0 ? "is-live" : ""}`} />
             <span><strong>{displayName}</strong><small>{selectedGroup ? selectedGroup.members.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
           </button>}
+          {selectedBot && !selectedGroup && <span className="bandros-topbar-actions"><button type="button" onClick={openSettings}>Edit</button><button type="button" className="is-danger" onClick={() => void deleteBot(selectedBot)}>Hapus</button></span>}
           {selectedGroup && <select className="bandros-add-member" aria-label="Tambah anggota" value="" onChange={(event) => { const botId = event.target.value; if (botId) void addGroupMember(botId); }}>
             <option value="">{availableMembers.length ? "Tambah anggota" : "Semua Bot sudah masuk"}</option>
             {availableMembers.map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
@@ -586,9 +599,9 @@ export default function GrokDashboard() {
             {selectableModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}
           </select> : <button type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button>}
           {chatGPT.connected && chatGPTModels.length === 0 && <button type="button" onClick={() => void loadChatGPT().catch((cause) => setError(cause instanceof Error ? cause.message : "Model tidak dapat dimuat."))}>Muat ulang model</button>}
-          <button type="submit">Save</button>
+          <button type="submit">Simpan</button>
         </form>
-        <button className="bandros-danger-button" type="button" onClick={() => void archiveSelectedBot()}>Hide Bot</button>
+        <button className="bandros-danger-button" type="button" onClick={() => void deleteBot(selectedBot)}>Hapus bot</button>
       </aside>}
       {deviceFlow && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Sign in with ChatGPT">
         <section className="bandros-device-card">

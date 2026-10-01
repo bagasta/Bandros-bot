@@ -67,6 +67,34 @@ class Repository:
             raise KeyError("bot not found")
         return self.get_bot(bot_id)
 
+    def delete_bot(self, bot_id: UUID) -> None:
+        self.get_bot(bot_id)
+        bot = str(bot_id)
+        with self.database.connection() as db:
+            run_ids = [row["id"] for row in db.execute("SELECT id FROM runs WHERE bot_id = ?", (bot,)).fetchall()]
+            conversation_ids = [row["id"] for row in db.execute("SELECT id FROM conversations WHERE bot_id = ?", (bot,)).fetchall()]
+            if run_ids:
+                marks = ",".join("?" * len(run_ids))
+                db.execute(f"DELETE FROM tool_calls WHERE run_id IN ({marks})", run_ids)
+                db.execute(f"DELETE FROM run_events WHERE run_id IN ({marks})", run_ids)
+                db.execute(f"DELETE FROM approvals WHERE run_id IN ({marks})", run_ids)
+                db.execute(f"DELETE FROM group_run_links WHERE run_id IN ({marks})", run_ids)
+                db.execute(
+                    f"DELETE FROM handoffs WHERE parent_run_id IN ({marks}) OR child_run_id IN ({marks})",
+                    [*run_ids, *run_ids],
+                )
+            db.execute("DELETE FROM handoffs WHERE source_bot_id = ? OR target_bot_id = ?", (bot, bot))
+            db.execute("UPDATE jobs SET assignee_bot_id = NULL WHERE assignee_bot_id = ?", (bot,))
+            db.execute("UPDATE jobs SET created_by_bot_id = NULL WHERE created_by_bot_id = ?", (bot,))
+            db.execute("UPDATE group_messages SET sender_bot_id = NULL WHERE sender_bot_id = ?", (bot,))
+            db.execute("DELETE FROM memories WHERE bot_id = ?", (bot,))
+            db.execute("DELETE FROM runs WHERE bot_id = ?", (bot,))
+            if conversation_ids:
+                marks = ",".join("?" * len(conversation_ids))
+                db.execute(f"DELETE FROM messages WHERE conversation_id IN ({marks})", conversation_ids)
+            db.execute("DELETE FROM conversations WHERE bot_id = ?", (bot,))
+            db.execute("DELETE FROM bots WHERE id = ?", (bot,))
+
     def set_bot_status(self, bot_id: UUID, status: BotStatus) -> Bot:
         return self.update_bot(bot_id, {"status": status})
 
