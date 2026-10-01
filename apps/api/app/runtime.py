@@ -77,6 +77,7 @@ class RunRuntime:
                 prompt=prompt,
                 model=run.model,
                 tools=toolset.definitions(),
+                request_limit=self.max_model_calls,
             )
         except Exception as error:
             self.repository.update_run(run_id, RunStatus.FAILED_RETRYABLE, str(error))

@@ -10,14 +10,30 @@ from .workspace_tools import ToolDefinition
 
 
 class ModelGateway(Protocol):
-    async def complete(self, *, system: str, prompt: str, model: str, tools: Sequence[ToolDefinition] = ()) -> str: ...
+    async def complete(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        model: str,
+        tools: Sequence[ToolDefinition] = (),
+        request_limit: int = 8,
+    ) -> str: ...
 
 
 @dataclass(slots=True)
 class MockGateway:
     """Deterministic local gateway for browser and integration tests."""
 
-    async def complete(self, *, system: str, prompt: str, model: str, tools: Sequence[ToolDefinition] = ()) -> str:
+    async def complete(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        model: str,
+        tools: Sequence[ToolDefinition] = (),
+        request_limit: int = 8,
+    ) -> str:
         return f"Mock response for: {prompt}"
 
 
@@ -27,7 +43,15 @@ class ChatGPTGateway:
     refresh: Callable[[dict[str, Any]], Awaitable[str | None]] | None = None
     base_url: str = "https://api.openai.com/v1"
 
-    async def complete(self, *, system: str, prompt: str, model: str, tools: Sequence[ToolDefinition] = ()) -> str:
+    async def complete(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        model: str,
+        tools: Sequence[ToolDefinition] = (),
+        request_limit: int = 8,
+    ) -> str:
         connection = self.connection_provider()
         if connection and self.refresh and connection.get("refresh_token") and self._expiring(connection.get("expires_at")):
             if not await self.refresh(connection):
@@ -85,7 +109,7 @@ class ChatGPTGateway:
                 prompt=prompt,
                 tools=tools,
                 model_settings=model_settings,
-                request_limit=8,
+                request_limit=request_limit,
             )
         finally:
             await http_client.aclose()
@@ -105,9 +129,23 @@ class CompositeGateway:
     openrouter: ModelGateway
     chatgpt: ModelGateway
 
-    async def complete(self, *, system: str, prompt: str, model: str, tools: Sequence[ToolDefinition] = ()) -> str:
+    async def complete(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        model: str,
+        tools: Sequence[ToolDefinition] = (),
+        request_limit: int = 8,
+    ) -> str:
         gateway = self.chatgpt if model.startswith("chatgpt/") else self.openrouter
-        return await gateway.complete(system=system, prompt=prompt, model=model, tools=tools)
+        return await gateway.complete(
+            system=system,
+            prompt=prompt,
+            model=model,
+            tools=tools,
+            request_limit=request_limit,
+        )
 
 
 @dataclass(slots=True)
@@ -115,7 +153,15 @@ class OpenRouterGateway:
     api_key: str | None
     base_url: str
 
-    async def complete(self, *, system: str, prompt: str, model: str, tools: Sequence[ToolDefinition] = ()) -> str:
+    async def complete(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        model: str,
+        tools: Sequence[ToolDefinition] = (),
+        request_limit: int = 8,
+    ) -> str:
         if not self.api_key:
             raise RuntimeError(
                 "OPENROUTER_API_KEY is not configured. Add it to .env before starting model runs."
@@ -132,7 +178,7 @@ class OpenRouterGateway:
                 system=system,
                 prompt=prompt,
                 tools=tools,
-                request_limit=8,
+                request_limit=request_limit,
             )
 
 

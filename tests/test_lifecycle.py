@@ -14,7 +14,7 @@ from apps.api.app.workspace_tools import WorkspaceToolset
 
 
 class FakeGateway:
-    async def complete(self, *, system: str, prompt: str, model: str, tools=()) -> str:
+    async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
         return f"completed: {prompt}"
 
 
@@ -51,16 +51,18 @@ def test_run_prompt_includes_skill_and_shared_computer(tmp_path: Path) -> None:
     captured: dict[str, str] = {}
 
     class CaptureGateway(FakeGateway):
-        async def complete(self, *, system: str, prompt: str, model: str, tools=()) -> str:
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
             captured["system"] = system
             captured["tools"] = ",".join(tool.name for tool in tools)
+            captured["request_limit"] = str(request_limit)
             return "selesai"
 
-    runtime = RunRuntime(repository, CaptureGateway(), "test-model", 1)
+    runtime = RunRuntime(repository, CaptureGateway(), "test-model", 3)
     asyncio.run(runtime.start_and_wait(run.id))
 
     assert "shared computer" in captured["system"]
     assert "Buka sumber" in captured["system"]
+    assert captured["request_limit"] == "3"
     assert "save_memory" in captured["tools"]
     assert "write_workspace_file" in captured["tools"]
 
@@ -145,7 +147,7 @@ def test_stop_marks_run_cancelled(tmp_path: Path) -> None:
     bot = repository.create_bot("Worker", "", "", None)
     run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Stop", "test-model")
     class SlowGateway(FakeGateway):
-        async def complete(self, *, system: str, prompt: str, model: str, tools=()) -> str:
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
             await asyncio.sleep(0.1)
             return "completed"
 
