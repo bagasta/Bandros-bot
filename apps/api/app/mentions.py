@@ -36,12 +36,11 @@ def lead_bot(members: list[Bot]) -> Bot:
 
 def group_prompt(group: WorkGroup, content: str, transcript: str = "") -> str:
     roster = ", ".join(f"@{member.name}" for member in group.members)
-    history = f"Percakapan terbaru:\n{transcript}\n\n" if transcript else ""
-    return (
-        f"Kamu ada di grup {group.name}, seperti grup WhatsApp tempat rekan kerja saling membalas. "
-        f"Anggota: {roster}. Balas singkat dalam bahasa pengguna. "
-        "Sebut @Nama persis bila bot itu yang harus mengerjakan atau membalas. "
-        "Jika pesan ini bukan untukmu, balas persis (diam).\n\n"
-        f"{history}"
-        f"Pesan yang perlu kamu tanggapi:\n{content}"
-    )
+    lines = [
+        f"Grup {group.name}. Anggota: {roster}.",
+        "Balas 1-3 kalimat seperti chat WhatsApp. Sebut @Nama hanya bila dia harus bertindak. Jika bukan untukmu, balas (diam).",
+    ]
+    if transcript.strip():
+        lines.append(f"Riwayat:\n{transcript.strip()}")
+    lines.append(content.strip())
+    return "\n".join(lines)

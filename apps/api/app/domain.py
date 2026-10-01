@@ -213,6 +213,20 @@ class WorkGroup(APIModel):
     created_at: datetime
 
 
+class GroupMemberInput(APIModel):
+    bot_id: UUID
+
+
+class GroupActivity(APIModel):
+    bot_id: UUID
+    name: str
+    status: str
+
+
+class BotActivity(APIModel):
+    working: bool
+
+
 class GroupMessageInput(APIModel):
     content: str = Field(min_length=1, max_length=50_000)
 

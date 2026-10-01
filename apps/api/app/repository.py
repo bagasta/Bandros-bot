@@ -491,6 +491,14 @@ class Repository:
             row = db.execute("SELECT group_id FROM group_run_links WHERE run_id = ?", (str(run_id),)).fetchone()
         return UUID(row["group_id"]) if row else None
 
+    def active_runs_for_bot(self, bot_id: UUID) -> list[Run]:
+        with self.database.connection() as db:
+            rows = db.execute(
+                "SELECT * FROM runs WHERE bot_id = ? AND status IN (?, ?)",
+                (str(bot_id), RunStatus.QUEUED, RunStatus.RUNNING),
+            ).fetchall()
+        return [self._run(row) for row in rows]
+
     def runs_for_group(self, group_id: UUID) -> list[Run]:
         with self.database.connection() as db:
             rows = db.execute(

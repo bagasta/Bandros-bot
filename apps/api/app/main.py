@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from .database import Database
 from .credential_store import CredentialStore
-from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotStatus, CreateBot, GroupInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
+from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
 from .repository import Repository
@@ -810,6 +810,37 @@ def create_group(payload: GroupInput) -> WorkGroup:
         return repository.create_group(payload.name, payload.description, payload.member_bot_ids)
     except KeyError as error:
         raise not_found(error) from error
+
+
+@app.post("/api/v1/groups/{group_id}/members", response_model=WorkGroup)
+def add_group_member(group_id: UUID, payload: GroupMemberInput) -> WorkGroup:
+    try:
+        repository.add_group_member(group_id, payload.bot_id)
+        return repository.get_group(group_id)
+    except KeyError as error:
+        raise not_found(error) from error
+
+
+@app.get("/api/v1/groups/{group_id}/activity", response_model=list[GroupActivity])
+def group_activity(group_id: UUID) -> list[GroupActivity]:
+    try:
+        repository.get_group(group_id)
+    except KeyError as error:
+        raise not_found(error) from error
+    activity: list[GroupActivity] = []
+    for run in repository.runs_for_group(group_id):
+        bot = repository.get_bot(run.bot_id)
+        activity.append(GroupActivity(bot_id=bot.id, name=bot.name, status=str(run.status)))
+    return activity
+
+
+@app.get("/api/v1/bots/{bot_id}/activity", response_model=BotActivity)
+def bot_activity(bot_id: UUID) -> BotActivity:
+    try:
+        repository.get_bot(bot_id)
+    except KeyError as error:
+        raise not_found(error) from error
+    return BotActivity(working=bool(repository.active_runs_for_bot(bot_id)))
 
 
 @app.get("/api/v1/groups/{group_id}/messages", response_model=list[GroupMessage])

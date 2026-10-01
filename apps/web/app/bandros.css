@@ -55,6 +55,10 @@
 .bandros-message p { margin: 6px 0 0; padding: 12px 14px; background: var(--panel); border-radius: 16px; line-height: 1.55; white-space: pre-wrap; }
 .bandros-message.from-user p { background: #1c1c1e; color: #fff; }
 .bandros-working { color: var(--live); text-align: center; font-size: 13px; }
+.bandros-add-member { max-width: 160px; margin-left: auto; min-height: 32px; padding: 4px 8px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 10px; font: inherit; font-size: 12px; }
+.bandros-mentions { display: grid; gap: 2px; margin: 0 18% 8px; padding: 6px; background: #fff; border: 1px solid var(--line); border-radius: 12px; }
+.bandros-mentions button { min-height: 0; padding: 8px 10px; color: var(--ink); text-align: left; background: transparent; border: 0; border-radius: 8px; font-weight: 650; }
+.bandros-mentions button:hover { background: #f3f2ee; }
 .bandros-mention { background: transparent; color: var(--live); font-weight: 700; }
 .bandros-composer { margin: 0 18% 22px; padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; }
 .bandros-composer textarea { width: 100%; min-height: 44px; padding: 4px 6px; color: var(--ink); background: transparent; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; }
@@ -122,7 +126,9 @@
   .bandros-welcome { margin-top: 6vh; }
   .bandros-welcome h1 { font-size: 28px; }
   .bandros-message { max-width: none; }
-  .bandros-composer { width: auto; margin: 0 12px calc(12px + env(safe-area-inset-bottom)); }
+  .bandros-composer, .bandros-mentions { width: auto; margin: 0 12px calc(12px + env(safe-area-inset-bottom)); }
+  .bandros-mentions { margin-bottom: 8px; }
+  .bandros-add-member { max-width: 42vw; }
   .bandros-alert { margin: 0 12px 8px; }
   .bandros-composer-footer { gap: 8px; }
   .bandros-model-picker { min-width: 0; flex: 1; }

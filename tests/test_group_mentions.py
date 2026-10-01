@@ -68,7 +68,10 @@ def test_unmentioned_message_wakes_the_lead_then_the_mention(tmp_path: Path) -> 
     ]
     assert messages[1].sender_bot_id == manager.id
     assert messages[2].sender_bot_id == worker.id
-    assert "Percakapan terbaru" in runtime.model_gateway.prompts[1]
+    assert "Riwayat:" in runtime.model_gateway.prompts[1]
+    private = repository.list_messages(repository.conversation_for_bot(worker.id))
+    assert all(message.role != "group" for message in private)
+    assert all("Anggota:" not in message.content for message in private)
 
 
 def test_explicit_mention_skips_the_other_bot(tmp_path: Path) -> None:

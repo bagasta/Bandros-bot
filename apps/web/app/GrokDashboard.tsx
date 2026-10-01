@@ -7,6 +7,7 @@ type Message = { id: string; role: string; content: string };
 type Run = { id: string; status: string; error: string | null };
 type Group = { id: string; name: string; description: string; members: Bot[] };
 type GroupMessage = { id: string; sender_type: string; sender_bot_id: string | null; content: string };
+type GroupActivity = { bot_id: string; name: string; status: string };
 type ChatGPTStatus = {
   connected: boolean;
   available?: boolean;
@@ -90,6 +91,10 @@ export default function GrokDashboard() {
   const [deviceStatus, setDeviceStatus] = useState("");
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("list");
   const [authReady, setAuthReady] = useState(false);
+  const [typingNames, setTypingNames] = useState<string[]>([]);
+  const [botWorking, setBotWorking] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
@@ -197,23 +202,56 @@ export default function GrokDashboard() {
   }, [deviceFlow]);
 
   useEffect(() => {
-    if (!selectedBot) { setMessages([]); return; }
+    if (!selectedBot || !chatGPT.connected) {
+      if (!selectedBot) setMessages([]);
+      setBotWorking(false);
+      return;
+    }
     let active = true;
     const botId = selectedBot.id;
-    void request<Message[]>(`/bots/${botId}/messages`)
-      .then((nextMessages) => { if (active) setMessages(nextMessages); })
-      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : "Chat tidak dapat dimuat."); });
-    return () => { active = false; };
-  }, [selectedBot]);
+    const tick = async () => {
+      try {
+        const [nextMessages, activity] = await Promise.all([
+          request<Message[]>(`/bots/${botId}/messages`),
+          request<{ working: boolean }>(`/bots/${botId}/activity`),
+        ]);
+        if (!active) return;
+        setMessages(nextMessages.filter((message) => message.role !== "group"));
+        setBotWorking(activity.working);
+      } catch {
+        /* Poll lagi pada interval berikutnya. */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 1200);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [selectedBot, chatGPT.connected]);
 
   useEffect(() => {
-    if (!selectedGroup) { setGroupMessages([]); return; }
+    if (!selectedGroup || !chatGPT.connected) {
+      if (!selectedGroup) setGroupMessages([]);
+      setTypingNames([]);
+      return;
+    }
     let active = true;
-    void request<GroupMessage[]>(`/groups/${selectedGroup.id}/messages`)
-      .then((nextMessages) => { if (active) setGroupMessages(nextMessages); })
-      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : "Grup tidak dapat dimuat."); });
-    return () => { active = false; };
-  }, [selectedGroup]);
+    const groupId = selectedGroup.id;
+    const tick = async () => {
+      try {
+        const [nextMessages, activity] = await Promise.all([
+          request<GroupMessage[]>(`/groups/${groupId}/messages`),
+          request<GroupActivity[]>(`/groups/${groupId}/activity`),
+        ]);
+        if (!active) return;
+        setGroupMessages(nextMessages);
+        setTypingNames(activity.map((item) => item.name));
+      } catch {
+        /* Poll lagi pada interval berikutnya. */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 1200);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [selectedGroup, chatGPT.connected]);
 
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
@@ -435,7 +473,42 @@ export default function GrokDashboard() {
     }
   };
 
+  const syncMention = (value: string, cursor: number) => {
+    if (!selectedGroup) { setMentionQuery(null); return; }
+    const match = value.slice(0, cursor).match(/(?:^|\s)@([^\n@]*)$/);
+    setMentionQuery(match ? match[1] : null);
+  };
+
+  const mentionSuggestions = selectedGroup && mentionQuery !== null
+    ? selectedGroup.members.filter((member) => member.name.toLowerCase().includes(mentionQuery.toLowerCase()))
+    : [];
+
+  const insertMention = (name: string) => {
+    const cursor = composerRef.current?.selectionStart ?? prompt.length;
+    const before = prompt.slice(0, cursor).replace(/(?:^|\s)@([^\n@]*)$/, (full) => `${full.startsWith("@") ? "" : full[0]}@${name} `);
+    const next = before + prompt.slice(cursor);
+    setPrompt(next);
+    setMentionQuery(null);
+    window.requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      composerRef.current?.setSelectionRange(before.length, before.length);
+    });
+  };
+
+  const addGroupMember = async (botId: string) => {
+    if (!selectedGroup || !botId) return;
+    try {
+      const updated = await request<Group>(`/groups/${selectedGroup.id}/members`, { method: "POST", body: JSON.stringify({ bot_id: botId }) });
+      setGroups((current) => current.map((group) => group.id === updated.id ? updated : group));
+      setSelectedGroup(updated);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Anggota tidak dapat ditambahkan.");
+    }
+  };
+
   const displayName = selectedGroup?.name || selectedBot?.name || "New Bot";
+  const availableMembers = selectedGroup ? activeBots.filter((bot) => !selectedGroup.members.some((member) => member.id === bot.id)) : [];
+  const typingLabel = typingNames.length > 0 ? `${typingNames.join(", ")} sedang mengetik…` : working || botWorking ? `${displayName} sedang mengetik…` : "";
   const currentModel = selectedBot ? (modelByBot[selectedBot.id] ?? selectedBot.model ?? "") : "";
   const selectableModels = withLatestCodexModel(chatGPTModels);
   const automaticModel = selectableModels.find((model) => model.id === chatGPT.preferred_model)?.display_name || chatGPT.preferred_model || latestCodexModel.display_name;
@@ -466,17 +539,22 @@ export default function GrokDashboard() {
         <header className="bandros-topbar">
           <button className="bandros-back" type="button" onClick={() => { setMobilePane("list"); setSettingsOpen(false); }} aria-label="Kembali ke daftar Bot">Bots</button>
           {chatGPT.connected && (selectedBot || selectedGroup) && <button className="bandros-title" type="button" onClick={openSettings} disabled={!selectedBot}>
-            <span className={`bandros-status-dot ${working ? "is-live" : ""}`} />
+            <span className={`bandros-status-dot ${working || botWorking || typingNames.length > 0 ? "is-live" : ""}`} />
             <span><strong>{displayName}</strong><small>{selectedGroup ? selectedGroup.members.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
           </button>}
+          {selectedGroup && <select className="bandros-add-member" aria-label="Tambah anggota" value="" onChange={(event) => { const botId = event.target.value; if (botId) void addGroupMember(botId); }}>
+            <option value="">{availableMembers.length ? "Tambah anggota" : "Semua Bot sudah masuk"}</option>
+            {availableMembers.map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
+          </select>}
         </header>
         {error && <div className="bandros-alert" role="alert">{error}<button aria-label="Tutup notifikasi" onClick={() => setError(null)}>×</button></div>}
         <div className="bandros-chat" ref={chatRef}>
           {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>Kirim satu tugas yang selesai jelas. {displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"}</span><p>{renderMentions(message.content, selectedGroup.members.map((member) => member.name))}</p></article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.role === "user" ? "Kamu" : displayName}</span><p>{message.content}</p></article>)}
-          {working && <p className="bandros-working">{selectedGroup ? `${selectedGroup.name} sedang membalas…` : "Sedang bekerja…"}</p>}
+          {typingLabel && <p className="bandros-working">{typingLabel}</p>}
         </div>
+        {mentionSuggestions.length > 0 && <div className="bandros-mentions" role="listbox" aria-label="Saran mention">{mentionSuggestions.map((member) => <button type="button" key={member.id} onMouseDown={(event) => event.preventDefault()} onClick={() => insertMention(member.name)}>@{member.name}</button>)}</div>}
         {chatGPT.connected && <form className="bandros-composer" onSubmit={sendMessage}>
-          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}. Sebut @Nama untuk menunjuk Bot` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
+          <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}. Ketik @ untuk menyebut Bot` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
           <div className="bandros-composer-footer">
             <label className="bandros-model-picker">Model{chatGPT.connected ? modelSelect : <button type="button" onClick={() => void connectChatGPT()}>Sign in</button>}</label>
             {working ? <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button> : <button type="submit" disabled={!prompt.trim()} aria-label="Send message">Send</button>}

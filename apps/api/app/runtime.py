@@ -177,8 +177,8 @@ class RunRuntime:
         names = {member.id: member.name for member in group.members}
         prior = messages[:-1] if messages and messages[-1].content == content else messages
         transcript = "\n".join(
-            f"{'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')}: {message.content[:500]}"
-            for message in prior[-12:]
+            f"{'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')}: {message.content[:160]}"
+            for message in prior[-6:]
         )
         busy = {run.bot_id for run in self.repository.runs_for_group(group_id)}
         for target in targets:
@@ -187,7 +187,6 @@ class RunRuntime:
             self._wake_budget -= 1
             conversation_id = self.repository.conversation_for_bot(target.id)
             prompt = group_prompt(group, content, transcript)
-            self.repository.append_message(conversation_id, "group", prompt)
             run = self.repository.create_run(target.id, conversation_id, prompt, target.model or self.default_model)
             self.repository.link_run_to_group(run.id, group_id)
             self._group_depth[run.id] = depth
@@ -223,8 +222,8 @@ class RunRuntime:
             "it is not the source of truth for data that changes. "
             "Every Bot can list, create, update, archive, and restore Bots, and can list, create, and edit groups. "
             "When asked to make a Bot and a group with it, call create_bot and then create_group. "
-            "In a group, write like a coworker in a WhatsApp thread: short, in the user's language, "
-            "and mention the exact teammate with @Name when they should respond or take the work. "
+            "In a group, reply in one to three short sentences like a WhatsApp coworker. "
+            "Mention @Name only when that teammate should act. "
             "A message with no @Name is answered by the lead. Only a mentioned teammate replies next. "
             "Your final reply is posted to the current group, so do not call post_to_group for that same text. "
             "Do not say a group tool is missing. "
