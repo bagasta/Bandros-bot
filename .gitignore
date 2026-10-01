@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.venv/
+node_modules/
+.next/
+*.egg-info/
+*.tsbuildinfo
+data/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
