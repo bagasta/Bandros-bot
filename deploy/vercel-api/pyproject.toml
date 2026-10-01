@@ -11,4 +11,4 @@ dependencies = [
 ]
 
 [tool.vercel]
-entrypoint = "index.py"
+entrypoint = "index:app"
