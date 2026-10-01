@@ -89,10 +89,18 @@
 .bandros-settings-eyebrow { color: var(--muted); font-size: 11px; }
 .bandros-settings form { display: grid; gap: 8px; }
 .bandros-settings label { margin-top: 10px; color: var(--muted); font-size: 11px; }
-.bandros-settings input, .bandros-settings textarea { padding: 10px; color: var(--text); background: #09090b; border: 1px solid #3f3f46; border-radius: 8px; font: inherit; font-size: 12px; }
+.bandros-settings input, .bandros-settings textarea, .bandros-settings select { padding: 10px; color: var(--text); background: #09090b; border: 1px solid #3f3f46; border-radius: 8px; font: inherit; font-size: 12px; }
 .bandros-settings form button { margin-top: 12px; }
 .bandros-danger-button { width: 100%; margin-top: 36px; color: #fda4af; background: #4c0519; border: 1px solid #9f1239; }
 .bandros-danger-button:hover { background: #881337; }
+.bandros-device-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 20px; background: #000a; backdrop-filter: blur(8px); }
+.bandros-device-card { position: relative; width: min(430px, 100%); padding: 28px; color: var(--text); background: #17171a; border: 1px solid #3f3f46; border-radius: 16px; box-shadow: 0 24px 80px #000d; }
+.bandros-device-card h2 { margin: 8px 0 16px; font-size: 22px; }
+.bandros-device-card p { color: #c5c5ca; line-height: 1.55; }
+.bandros-device-card code { display: block; margin: 18px 0; padding: 16px; color: #fff; background: #09090b; border: 1px solid #52525b; border-radius: 10px; text-align: center; letter-spacing: .14em; font-size: 24px; font-weight: 800; }
+.bandros-device-card a { display: block; padding: 11px 14px; color: #09090b; background: var(--accent); border-radius: 8px; text-align: center; font-weight: 800; text-decoration: none; }
+.bandros-device-card small { display: block; margin-top: 14px; color: var(--muted); line-height: 1.5; }
+.bandros-device-close { position: absolute; top: 12px; right: 12px; min-height: 0; padding: 3px 8px; color: var(--muted); background: transparent; border: 0; font-size: 22px; }
 @media (max-width: 1112px) and (min-width: 761px) {
   .bandros-composer { right: 24px; left: 316px; width: auto; }
 }

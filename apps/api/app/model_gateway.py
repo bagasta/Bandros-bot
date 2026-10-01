@@ -37,15 +37,30 @@ class ChatGPTGateway:
         token = connection.get("access_token") if connection else None
         if not token:
             raise RuntimeError("ChatGPT belum terhubung. Hubungkan akun ChatGPT terlebih dahulu.")
-        if "chatgpt.tokens.use.direct" not in str(connection.get("scope") or "").split():
+        codex = connection.get("auth_mode") == "codex"
+        if not codex and "chatgpt.tokens.use.direct" not in str(connection.get("scope") or "").split():
             raise RuntimeError("Akun ChatGPT belum mengizinkan penggunaan model.")
+        headers = {"Authorization": f"Bearer {token}"}
+        endpoint = f"{self.base_url}/responses"
+        if codex:
+            account_id = connection.get("account_id")
+            if not account_id:
+                raise RuntimeError("Token ChatGPT tidak memiliki account ID Codex.")
+            endpoint = "https://chatgpt.com/backend-api/codex/responses"
+            headers.update(
+                {
+                    "ChatGPT-Account-Id": str(account_id),
+                    "originator": "bandros",
+                    "OpenAI-Beta": "responses=v1",
+                }
+            )
         async with httpx.AsyncClient(timeout=60) as client:
             answer_parts: list[str] = []
             completed = False
             async with client.stream(
                 "POST",
-                f"{self.base_url}/responses",
-                headers={"Authorization": f"Bearer {token}"},
+                endpoint,
+                headers=headers,
                 json={
                     "model": model.removeprefix("chatgpt/"),
                     "instructions": system,

@@ -16,6 +16,12 @@ type ChatGPTStatus = {
   reason?: string | null;
 };
 type ChatGPTModel = { id: string; display_name: string };
+type DeviceFlow = {
+  flow_id: string;
+  user_code: string;
+  verification_url: string;
+  interval: number;
+};
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
 const quickPrompts = [
@@ -27,10 +33,12 @@ const quickPrompts = [
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE_URL belum diatur.");
+  const session = typeof window !== "undefined" ? window.localStorage.getItem("bandros_chatgpt_session") : null;
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(session ? { "X-Bandros-Session": session } : {}),
       ...init?.headers,
     },
   });
@@ -60,6 +68,8 @@ export default function GrokDashboard() {
   const [editModel, setEditModel] = useState("");
   const [chatGPT, setChatGPT] = useState<ChatGPTStatus>({ connected: false });
   const [chatGPTModels, setChatGPTModels] = useState<ChatGPTModel[]>([]);
+  const [deviceFlow, setDeviceFlow] = useState<DeviceFlow | null>(null);
+  const [deviceStatus, setDeviceStatus] = useState("");
   const chatRef = useRef<HTMLDivElement>(null);
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
@@ -81,18 +91,46 @@ export default function GrokDashboard() {
   };
 
   useEffect(() => { void loadBots(); }, []);
+  const loadChatGPT = async () => {
+    const status = await request<ChatGPTStatus>("/auth/chatgpt/status");
+    setChatGPT(status);
+    if (status.connected && status.subscription_enabled) {
+      const result = await request<{ models: ChatGPTModel[] }>("/auth/chatgpt/models");
+      setChatGPTModels(result.models);
+    }
+  };
+
   useEffect(() => {
-    void request<ChatGPTStatus>("/auth/chatgpt/status").then(async (status) => {
-      setChatGPT(status);
-      if (status.connected && status.subscription_enabled) {
-        const result = await request<{ models: ChatGPTModel[] }>("/auth/chatgpt/models");
-        setChatGPTModels(result.models);
-      }
-      if (new URLSearchParams(window.location.search).has("chatgpt")) {
-        window.history.replaceState({}, "", window.location.pathname);
-      }
-    }).catch(() => undefined);
+    void loadChatGPT().catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (!deviceFlow) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const result = await request<{ status: string; session_token?: string; slow_down?: boolean }>(
+          "/auth/chatgpt/device/poll",
+          { method: "POST", body: JSON.stringify({ flow_id: deviceFlow.flow_id }) },
+        );
+        if (!active) return;
+        if (result.status === "connected" && result.session_token) {
+          window.localStorage.setItem("bandros_chatgpt_session", result.session_token);
+          setDeviceStatus("ChatGPT terhubung.");
+          setDeviceFlow(null);
+          await loadChatGPT();
+          return;
+        }
+        setDeviceStatus("Menunggu persetujuan di ChatGPT…");
+        window.setTimeout(poll, (deviceFlow.interval + (result.slow_down ? 5 : 0)) * 1000);
+      } catch (cause) {
+        if (!active) return;
+        setDeviceStatus(cause instanceof Error ? cause.message : "Device login gagal.");
+      }
+    };
+    const timer = window.setTimeout(poll, deviceFlow.interval * 1000);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [deviceFlow]);
 
   useEffect(() => {
     if (!selectedBot) { setMessages([]); return; }
@@ -281,15 +319,25 @@ export default function GrokDashboard() {
   };
 
   const connectChatGPT = async () => {
-    if (chatGPT.available === false) {
-      setError(chatGPT.reason || "Sign in with ChatGPT belum tersedia untuk deployment ini.");
-      return;
-    }
     try {
-      const result = await request<{ authorization_url: string }>("/auth/chatgpt/start");
-      window.location.assign(result.authorization_url);
+      setDeviceStatus("Meminta kode dari ChatGPT…");
+      const result = await request<DeviceFlow>("/auth/chatgpt/device/start", { method: "POST" });
+      setDeviceFlow(result);
+      setDeviceStatus("Buka ChatGPT dan masukkan kode berikut.");
+      window.open(result.verification_url, "_blank", "noopener,noreferrer");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "ChatGPT tidak dapat dihubungkan.");
+    }
+  };
+
+  const disconnectChatGPT = async () => {
+    try {
+      await request<{ disconnected: boolean }>("/auth/chatgpt/disconnect", { method: "POST" });
+      window.localStorage.removeItem("bandros_chatgpt_session");
+      setChatGPT({ connected: false, available: true });
+      setChatGPTModels([]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "ChatGPT tidak dapat diputus.");
     }
   };
 
@@ -311,7 +359,7 @@ export default function GrokDashboard() {
           {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-icon">G</span><span><strong>{group.name}</strong><small>{group.members.length} agents</small></span></button>)}
           {groups.length === 0 && <button className="bandros-create-group" onClick={() => void createGroup()}>+ Create group</button>}
         </div>
-        <button className="bandros-marketplace" type="button" onClick={() => void connectChatGPT()}>{chatGPT.connected ? `ChatGPT · ${chatGPT.email || "Connected"}` : "Sign in with ChatGPT"}</button>
+        <button className="bandros-marketplace" type="button" onClick={() => chatGPT.connected ? void disconnectChatGPT() : void connectChatGPT()}>{chatGPT.connected ? `ChatGPT · ${chatGPT.email || "Connected"} (disconnect)` : "Sign in with ChatGPT"}</button>
         <div className="bandros-user"><span className="bandros-avatar">RA</span><span><strong>Rizky A.</strong><small>24.5k tokens</small></span></div>
       </aside>
       <section className="bandros-main">
@@ -343,6 +391,18 @@ export default function GrokDashboard() {
         </form>
         <button className="bandros-danger-button" type="button" onClick={() => void archiveSelectedBot()}>Archive Agent</button>
       </aside>}
+      {deviceFlow && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Sign in with ChatGPT">
+        <section className="bandros-device-card">
+          <button className="bandros-device-close" aria-label="Tutup device login" onClick={() => setDeviceFlow(null)}>×</button>
+          <span className="bandros-settings-eyebrow">ChatGPT Device Login</span>
+          <h2>Hubungkan paket ChatGPT</h2>
+          <p>Buka halaman ChatGPT, lalu masukkan kode ini:</p>
+          <code>{deviceFlow.user_code}</code>
+          <a href={deviceFlow.verification_url} target="_blank" rel="noreferrer">Buka ChatGPT Device Login ↗</a>
+          <p className="bandros-muted">{deviceStatus}</p>
+          <small>Device Code Authentication harus aktif di pengaturan keamanan ChatGPT.</small>
+        </section>
+      </div>}
     </main>
   );
 }

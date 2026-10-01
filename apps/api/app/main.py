@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import asyncio
 import json
 import base64
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from uuid import UUID
 from urllib.parse import quote, urlencode
 
@@ -18,8 +19,10 @@ from jwt import PyJWKClient
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from pydantic import BaseModel
 
 from .database import Database
+from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotStatus, CreateBot, GroupInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
@@ -30,6 +33,16 @@ from .settings import Settings, running_on_vercel
 
 settings = Settings.from_environment()
 repository = Repository(Database(settings.database_path))
+credential_store = CredentialStore()
+current_chatgpt_connection: ContextVar[dict[str, object] | None] = ContextVar(
+    "current_chatgpt_connection", default=None
+)
+
+
+def _chatgpt_connection() -> dict[str, object] | None:
+    return current_chatgpt_connection.get() or repository.chatgpt_connection()
+
+
 runtime = RunRuntime(
     repository=repository,
     model_gateway=CompositeGateway(
@@ -37,7 +50,7 @@ runtime = RunRuntime(
         if settings.model_gateway == "mock"
         else OpenRouterGateway(settings.openrouter_api_key, settings.openrouter_base_url),
         ChatGPTGateway(
-            repository.chatgpt_connection,
+            _chatgpt_connection,
             lambda connection: _refresh_chatgpt_token(connection),
         ),
     ),
@@ -47,9 +60,14 @@ runtime = RunRuntime(
 )
 policy = PolicyEngine()
 openai_jwks = PyJWKClient("https://auth.openai.com/.well-known/jwks.json")
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_DEVICE_CODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
+CODEX_DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/deviceauth/token"
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_DEVICE_REDIRECT_URI = "https://auth.openai.com/deviceauth/callback"
 
 
-def _jwt_payload(token: str) -> dict[str, str]:
+def _jwt_payload(token: str) -> dict[str, Any]:
     try:
         encoded = token.split(".")[1]
         encoded += "=" * (-len(encoded) % 4)
@@ -75,13 +93,19 @@ async def _refresh_chatgpt_token(connection: dict[str, object]) -> str | None:
         return None
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
-            "https://auth.openai.com/api/accounts/oauth/token",
+            CODEX_TOKEN_URL
+            if connection.get("auth_mode") == "codex"
+            else "https://auth.openai.com/api/accounts/oauth/token",
             headers=_openai_token_headers(str(client_id)),
             data={
                 "grant_type": "refresh_token",
                 "client_id": client_id,
                 "refresh_token": refresh_token,
-                "resource": "https://api.openai.com/v1",
+                **(
+                    {}
+                    if connection.get("auth_mode") == "codex"
+                    else {"resource": "https://api.openai.com/v1"}
+                ),
             },
         )
     if response.is_error:
@@ -91,10 +115,24 @@ async def _refresh_chatgpt_token(connection: dict[str, object]) -> str | None:
     if not access_token:
         return None
     expires = tokens.get("expires_in")
+    expires_at = datetime.now(UTC) + timedelta(seconds=int(expires)) if expires else None
+    if connection.get("auth_mode") == "codex" and connection.get("_session_token"):
+        updated = {
+            **connection,
+            "access_token": access_token,
+            "refresh_token": tokens.get("refresh_token") or refresh_token,
+            "id_token": tokens.get("id_token") or connection.get("id_token"),
+            "expires_at": expires_at.isoformat() if expires_at else None,
+        }
+        await credential_store.put(
+            "sessions", str(connection["_session_token"]), updated
+        )
+        current_chatgpt_connection.set(updated)
+        return access_token
     repository.update_chatgpt_tokens(
         access_token=access_token,
         refresh_token=tokens.get("refresh_token"),
-        expires_at=datetime.now(UTC) + timedelta(seconds=int(expires)) if expires else None,
+        expires_at=expires_at,
         scope=tokens.get("scope", str(connection.get("scope") or "")),
     )
     return access_token
@@ -132,20 +170,30 @@ app.add_middleware(
     allow_origin_regex=None if settings.cors_allow_all else r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-Bandros-Session"],
 )
 
 
 @app.middleware("http")
 async def optional_auth(request: Request, call_next):
+    session_token = request.headers.get("X-Bandros-Session")
+    connection = (
+        await credential_store.get("sessions", session_token) if session_token else None
+    )
+    if connection is not None and session_token:
+        connection["_session_token"] = session_token
+    context_token = current_chatgpt_connection.set(connection)
     public_oauth = request.url.path in {"/api/v1/auth/chatgpt/start", "/api/v1/auth/chatgpt/callback"}
     public_health = request.url.path in {"/health", "/"}
-    if settings.api_auth_token and not public_health and not public_oauth and request.method != "OPTIONS":
-        expected = f"Bearer {settings.api_auth_token}"
-        provided = request.headers.get("Authorization")
-        if provided != expected:
-            return JSONResponse({"detail": "authentication required"}, status_code=401)
-    return await call_next(request)
+    try:
+        if settings.api_auth_token and not public_health and not public_oauth and request.method != "OPTIONS":
+            expected = f"Bearer {settings.api_auth_token}"
+            provided = request.headers.get("Authorization")
+            if provided != expected:
+                return JSONResponse({"detail": "authentication required"}, status_code=401)
+        return await call_next(request)
+    finally:
+        current_chatgpt_connection.reset(context_token)
 
 
 def not_found(error: KeyError) -> HTTPException:
@@ -157,14 +205,46 @@ def _model_for_bot(bot: Bot, requested: str | None = None) -> str:
         return requested
     if bot.model:
         return bot.model
-    connection = repository.chatgpt_connection()
+    connection = _chatgpt_connection()
     if (
         connection
-        and "chatgpt.tokens.use.direct" in str(connection.get("scope") or "").split()
+        and (
+            connection.get("auth_mode") == "codex"
+            or "chatgpt.tokens.use.direct" in str(connection.get("scope") or "").split()
+        )
         and connection.get("preferred_model")
     ):
         return f"chatgpt/{connection['preferred_model']}"
     return settings.default_model
+
+
+class DevicePollInput(BaseModel):
+    flow_id: str
+
+
+async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, str]]:
+    headers = {
+        "Authorization": f"Bearer {connection['access_token']}",
+        "ChatGPT-Account-Id": str(connection["account_id"]),
+        "originator": "bandros",
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            "https://chatgpt.com/backend-api/codex/models",
+            params={"client_version": "1.0.0"},
+            headers=headers,
+        )
+    response.raise_for_status()
+    return [
+        {
+            "id": str(item.get("slug") or item.get("id")),
+            "display_name": str(
+                item.get("display_name") or item.get("slug") or item.get("id")
+            ),
+        }
+        for item in response.json().get("models", [])
+        if item.get("slug") or item.get("id")
+    ]
 
 
 async def _start_run(run_id: UUID) -> None:
@@ -178,6 +258,133 @@ async def _start_run(run_id: UUID) -> None:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "environment": settings.environment_name}
+
+
+@app.post("/api/v1/auth/chatgpt/device/start")
+async def chatgpt_device_start() -> dict[str, object]:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            CODEX_DEVICE_CODE_URL,
+            json={"client_id": CODEX_CLIENT_ID},
+        )
+    if response.is_error:
+        raise HTTPException(
+            status_code=502,
+            detail="Device Code Authentication belum aktif pada akun/workspace ChatGPT.",
+        )
+    device = response.json()
+    device_code = device.get("device_code") or device.get("device_auth_id")
+    user_code = device.get("user_code")
+    if not device_code or not user_code:
+        raise HTTPException(status_code=502, detail="Response device OAuth tidak lengkap")
+    flow_id = secrets.token_urlsafe(32)
+    await credential_store.put(
+        "flows",
+        flow_id,
+        {
+            "device_code": device_code,
+            "user_code": user_code,
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        },
+    )
+    return {
+        "flow_id": flow_id,
+        "user_code": user_code,
+        "verification_url": device.get("verification_uri")
+        or device.get("verification_uri_complete")
+        or "https://auth.openai.com/codex/device",
+        "interval": max(int(device.get("interval") or 5), 3),
+    }
+
+
+@app.post("/api/v1/auth/chatgpt/device/poll")
+async def chatgpt_device_poll(payload: DevicePollInput) -> dict[str, object]:
+    flow = await credential_store.get("flows", payload.flow_id)
+    if not flow:
+        raise HTTPException(status_code=404, detail="Device login tidak ditemukan")
+    if datetime.fromisoformat(str(flow["expires_at"])) < datetime.now(UTC):
+        await credential_store.delete("flows", payload.flow_id)
+        raise HTTPException(status_code=410, detail="Kode device sudah kedaluwarsa")
+    async with httpx.AsyncClient(timeout=30) as client:
+        poll_response = await client.post(
+            CODEX_DEVICE_TOKEN_URL,
+            json={
+                "device_auth_id": flow["device_code"],
+                "user_code": flow["user_code"],
+            },
+        )
+    poll = poll_response.json() if poll_response.content else {}
+    error = poll.get("error") if isinstance(poll, dict) else None
+    error_code = error if isinstance(error, str) else (
+        str(error.get("code") or error.get("type") or error.get("message"))
+        if isinstance(error, dict)
+        else None
+    )
+    if not poll_response.is_success:
+        if poll_response.status_code in {403, 404} or error_code in {
+            "authorization_pending",
+            "slow_down",
+        }:
+            return {"status": "pending", "slow_down": error_code == "slow_down"}
+        await credential_store.delete("flows", payload.flow_id)
+        raise HTTPException(status_code=400, detail=f"Device OAuth gagal: {error_code or 'unknown'}")
+    authorization_code = poll.get("authorization_code")
+    verifier = poll.get("code_verifier")
+    if not authorization_code or not verifier:
+        return {"status": "pending"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        token_response = await client.post(
+            CODEX_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": authorization_code,
+                "redirect_uri": CODEX_DEVICE_REDIRECT_URI,
+                "client_id": CODEX_CLIENT_ID,
+                "code_verifier": verifier,
+            },
+        )
+    if token_response.is_error:
+        raise HTTPException(status_code=502, detail="Token device ChatGPT tidak dapat ditukar")
+    tokens = token_response.json()
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    id_token = tokens.get("id_token")
+    if not access_token or not refresh_token:
+        raise HTTPException(status_code=502, detail="Token ChatGPT tidak lengkap")
+    access_claims = _jwt_payload(access_token)
+    id_claims = _jwt_payload(id_token or "")
+    auth_claims = access_claims.get("https://api.openai.com/auth") or {}
+    account_id = auth_claims.get("chatgpt_account_id")
+    if not account_id:
+        raise HTTPException(status_code=502, detail="Account ID ChatGPT tidak ada pada token")
+    expires = tokens.get("expires_in")
+    connection: dict[str, object] = {
+        "auth_mode": "codex",
+        "client_id": CODEX_CLIENT_ID,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "id_token": id_token,
+        "account_id": account_id,
+        "email": id_claims.get("email"),
+        "subject": id_claims.get("sub"),
+        "scope": tokens.get("scope", "openid profile email offline_access"),
+        "expires_at": (
+            datetime.now(UTC) + timedelta(seconds=int(expires))
+        ).isoformat()
+        if expires
+        else None,
+    }
+    models = await _list_codex_models(connection)
+    connection["preferred_model"] = models[0]["id"] if models else "gpt-5.3-codex"
+    session_token = secrets.token_urlsafe(48)
+    await credential_store.put("sessions", session_token, connection)
+    await credential_store.delete("flows", payload.flow_id)
+    return {
+        "status": "connected",
+        "session_token": session_token,
+        "email": connection.get("email"),
+        "preferred_model": connection["preferred_model"],
+    }
 
 
 @app.get("/api/v1/auth/chatgpt/start")
@@ -320,15 +527,14 @@ async def chatgpt_auth_callback(code: str | None = None, state: str | None = Non
 
 @app.get("/api/v1/auth/chatgpt/status")
 def chatgpt_auth_status() -> dict[str, object]:
-    connection = repository.chatgpt_connection()
+    connection = _chatgpt_connection()
     if not connection:
         return {
             "connected": False,
-            "available": not running_on_vercel() or bool(settings.openai_client_id),
-            "reason": None
-            if not running_on_vercel() or settings.openai_client_id
-            else "Website OAuth membutuhkan OPENAI_CLIENT_ID dari OpenAI.",
+            "available": True,
+            "reason": None,
         }
+    codex = connection.get("auth_mode") == "codex"
     return {
         "connected": True,
         "available": True,
@@ -336,25 +542,34 @@ def chatgpt_auth_status() -> dict[str, object]:
         "subject": connection.get("subject"),
         "scope": connection.get("scope"),
         "expires_at": connection.get("expires_at"),
-        "subscription_enabled": "chatgpt.tokens.use.direct" in connection.get("scope", "").split(),
+        "subscription_enabled": codex
+        or "chatgpt.tokens.use.direct" in str(connection.get("scope") or "").split(),
         "preferred_model": connection.get("preferred_model"),
+        "auth_mode": connection.get("auth_mode", "siwc"),
     }
 
 
 @app.post("/api/v1/auth/chatgpt/disconnect")
-def chatgpt_auth_disconnect() -> dict[str, bool]:
-    repository.clear_chatgpt_connection()
+async def chatgpt_auth_disconnect() -> dict[str, bool]:
+    connection = _chatgpt_connection()
+    if connection and connection.get("_session_token"):
+        await credential_store.delete("sessions", str(connection["_session_token"]))
+        current_chatgpt_connection.set(None)
+    else:
+        repository.clear_chatgpt_connection()
     return {"disconnected": True}
 
 
 @app.get("/api/v1/auth/chatgpt/models")
 async def chatgpt_models() -> dict[str, object]:
-    connection = repository.chatgpt_connection()
+    connection = _chatgpt_connection()
     if not connection:
         raise HTTPException(status_code=404, detail="ChatGPT belum terhubung")
     if connection.get("refresh_token") and ChatGPTGateway._expiring(connection.get("expires_at")):
         await _refresh_chatgpt_token(connection)
-        connection = repository.chatgpt_connection() or connection
+        connection = _chatgpt_connection() or connection
+    if connection.get("auth_mode") == "codex":
+        return {"models": await _list_codex_models(connection)}
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
             "https://api.openai.com/v1/models",
