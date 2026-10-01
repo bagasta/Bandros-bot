@@ -9,9 +9,11 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import AsyncIterator
 from uuid import UUID
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
+import jwt
+from jwt import PyJWKClient
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,27 +25,28 @@ from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRo
 from .policy import PolicyEngine
 from .repository import Repository
 from .runtime import RunRuntime
-from .settings import Settings
+from .settings import Settings, running_on_vercel
 
 
 settings = Settings.from_environment()
 repository = Repository(Database(settings.database_path))
 runtime = RunRuntime(
     repository=repository,
-    model_gateway=(
+    model_gateway=CompositeGateway(
         MockGateway()
         if settings.model_gateway == "mock"
-        else CompositeGateway(
-            OpenRouterGateway(settings.openrouter_api_key, settings.openrouter_base_url),
-            ChatGPTGateway(repository.chatgpt_connection, lambda connection: _refresh_chatgpt_token(connection)),
-        )
+        else OpenRouterGateway(settings.openrouter_api_key, settings.openrouter_base_url),
+        ChatGPTGateway(
+            repository.chatgpt_connection,
+            lambda connection: _refresh_chatgpt_token(connection),
+        ),
     ),
     default_model=settings.default_model,
     max_model_calls=settings.max_model_calls_per_run,
     workspace_root=settings.workspace_root,
 )
 policy = PolicyEngine()
-oauth_states: dict[str, tuple[str, datetime, str, str, str]] = {}
+openai_jwks = PyJWKClient("https://auth.openai.com/.well-known/jwks.json")
 
 
 def _jwt_payload(token: str) -> dict[str, str]:
@@ -56,6 +59,15 @@ def _jwt_payload(token: str) -> dict[str, str]:
         return {}
 
 
+def _openai_token_headers(client_id: str) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if settings.openai_client_secret:
+        credentials = f"{quote(client_id, safe='')}:{quote(settings.openai_client_secret, safe='')}"
+        encoded = base64.b64encode(credentials.encode()).decode()
+        headers["Authorization"] = f"Basic {encoded}"
+    return headers
+
+
 async def _refresh_chatgpt_token(connection: dict[str, object]) -> str | None:
     refresh_token = connection.get("refresh_token")
     client_id = connection.get("client_id")
@@ -64,6 +76,7 @@ async def _refresh_chatgpt_token(connection: dict[str, object]) -> str | None:
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
             "https://auth.openai.com/api/accounts/oauth/token",
+            headers=_openai_token_headers(str(client_id)),
             data={
                 "grant_type": "refresh_token",
                 "client_id": client_id,
@@ -139,6 +152,21 @@ def not_found(error: KeyError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
 
 
+def _model_for_bot(bot: Bot, requested: str | None = None) -> str:
+    if requested:
+        return requested
+    if bot.model:
+        return bot.model
+    connection = repository.chatgpt_connection()
+    if (
+        connection
+        and "chatgpt.tokens.use.direct" in str(connection.get("scope") or "").split()
+        and connection.get("preferred_model")
+    ):
+        return f"chatgpt/{connection['preferred_model']}"
+    return settings.default_model
+
+
 async def _start_run(run_id: UUID) -> None:
     if settings.await_runs:
         await runtime.start_and_wait(run_id)
@@ -154,18 +182,32 @@ def health() -> dict[str, str]:
 
 @app.get("/api/v1/auth/chatgpt/start")
 def chatgpt_auth_start() -> dict[str, str]:
+    existing = repository.chatgpt_connection() or {}
+    configured_client_id = settings.openai_client_id or existing.get("client_id")
+    if running_on_vercel() and not configured_client_id:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Sign in with ChatGPT untuk website memerlukan OPENAI_CLIENT_ID "
+                "oaiapp_... dan callback Vercel yang didaftarkan ke OpenAI."
+            ),
+        )
     verifier = secrets.token_urlsafe(64)
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
-    host_id = f"urn:uuid:{secrets.token_hex(16)}"
+    host_id = str(existing.get("host_id") or f"urn:uuid:{secrets.token_hex(16)}")
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    existing = repository.chatgpt_connection() or {}
-    client_id = str(existing.get("client_id") or "dynamic_agent_client")
-    oauth_states[state] = (verifier, datetime.now(UTC) + timedelta(minutes=10), nonce, client_id, str(existing.get("host_id") or host_id))
+    client_id = str(configured_client_id or "dynamic_agent_client")
+    repository.create_oauth_transaction(
+        state,
+        verifier,
+        nonce,
+        client_id,
+        host_id,
+        datetime.now(UTC) + timedelta(minutes=10),
+    )
     query = urlencode({
         "client_id": client_id,
-        "agent_name_hint": "Bandros AI",
-        "ext_agent_host_id": str(existing.get("host_id") or host_id),
         "redirect_uri": settings.openai_redirect_uri,
         "response_type": "code",
         "scope": settings.openai_scopes,
@@ -175,6 +217,8 @@ def chatgpt_auth_start() -> dict[str, str]:
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     })
+    if client_id == "dynamic_agent_client":
+        query += f"&{urlencode({'agent_name_hint': 'Bandros AI', 'ext_agent_host_id': host_id})}"
     if existing.get("id_token"):
         query += f"&{urlencode({'id_token_hint': existing['id_token'], 'login_hint': existing.get('email', '')})}"
     return {"authorization_url": f"https://auth.openai.com/api/accounts/authorize?{query}"}
@@ -182,19 +226,31 @@ def chatgpt_auth_start() -> dict[str, str]:
 
 @app.get("/api/v1/auth/chatgpt/callback")
 async def chatgpt_auth_callback(code: str | None = None, state: str | None = None, error: str | None = None, client_id: str | None = None) -> dict[str, str]:
+    if not state:
+        raise HTTPException(status_code=400, detail="OAuth state tidak valid atau sudah kedaluwarsa")
+    transaction = repository.consume_oauth_transaction(state)
+    if not transaction:
+        raise HTTPException(status_code=400, detail="OAuth state sudah kedaluwarsa")
     if error:
         raise HTTPException(status_code=400, detail=f"ChatGPT OAuth gagal: {error}")
-    if not code or not state or state not in oauth_states:
-        raise HTTPException(status_code=400, detail="OAuth state tidak valid atau sudah kedaluwarsa")
-    verifier, expires_at, nonce, requested_client_id, host_id = oauth_states.pop(state)
-    if expires_at < datetime.now(UTC):
-        raise HTTPException(status_code=400, detail="OAuth state sudah kedaluwarsa")
+    if not code:
+        raise HTTPException(status_code=400, detail="Callback ChatGPT tidak membawa authorization code")
+    verifier = str(transaction["code_verifier"])
+    nonce = str(transaction["nonce"])
+    requested_client_id = str(transaction["client_id"])
+    host_id = str(transaction["host_id"])
+    if client_id and requested_client_id != "dynamic_agent_client" and client_id != requested_client_id:
+        raise HTTPException(status_code=400, detail="Client ID ChatGPT tidak cocok")
+    issued_client_id = client_id or requested_client_id
+    if issued_client_id == "dynamic_agent_client":
+        raise HTTPException(status_code=502, detail="Registrasi client ChatGPT belum selesai")
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
             "https://auth.openai.com/api/accounts/oauth/token",
+            headers=_openai_token_headers(issued_client_id),
             data={
                 "grant_type": "authorization_code",
-                "client_id": client_id or requested_client_id,
+                "client_id": issued_client_id,
                 "code": code,
                 "redirect_uri": settings.openai_redirect_uri,
                 "code_verifier": verifier,
@@ -211,19 +267,46 @@ async def chatgpt_auth_callback(code: str | None = None, state: str | None = Non
     if "chatgpt.tokens.use.direct" not in granted_scope.split():
         raise HTTPException(status_code=403, detail="Akun ChatGPT tidak memberikan izin penggunaan subscription")
     id_token = tokens.get("id_token")
-    claims = _jwt_payload(id_token or access_token)
-    if id_token and claims.get("nonce") and claims["nonce"] != nonce:
+    if not id_token:
+        raise HTTPException(status_code=502, detail="ID token ChatGPT tidak ada pada response")
+    try:
+        signing_key = openai_jwks.get_signing_key_from_jwt(id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=issued_client_id,
+            issuer="https://auth.openai.com",
+            options={"require": ["sub", "exp", "iat"]},
+        )
+    except jwt.PyJWTError as token_error:
+        raise HTTPException(status_code=400, detail="ID token ChatGPT tidak valid") from token_error
+    if claims.get("nonce") != nonce:
         raise HTTPException(status_code=400, detail="ID token nonce tidak valid")
     expires = tokens.get("expires_in")
-    issued_client_id = client_id or tokens.get("client_id") or requested_client_id
-    if issued_client_id == "dynamic_agent_client":
-        raise HTTPException(status_code=502, detail="Registrasi client ChatGPT belum selesai")
     existing_connection = repository.chatgpt_connection()
     if existing_connection and existing_connection.get("client_id") and issued_client_id != existing_connection["client_id"]:
         raise HTTPException(status_code=400, detail="Client ID ChatGPT tidak cocok dengan koneksi tersimpan")
+    preferred_model = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        models_response = await client.get(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if models_response.is_success:
+            catalog = models_response.json().get("models", [])
+            preferred_model = next(
+                (
+                    item.get("slug")
+                    for item in catalog
+                    if item.get("visibility") == "list" and item.get("slug")
+                ),
+                None,
+            )
     repository.save_chatgpt_connection(
         client_id=issued_client_id,
         host_id=host_id,
+        preferred_model=preferred_model,
         access_token=access_token,
         refresh_token=tokens.get("refresh_token"),
         id_token=id_token,
@@ -232,21 +315,29 @@ async def chatgpt_auth_callback(code: str | None = None, state: str | None = Non
         expires_at=datetime.now(UTC) + timedelta(seconds=int(expires)) if expires else None,
         scope=granted_scope,
     )
-    return RedirectResponse(url="http://localhost:3000?chatgpt=connected", status_code=303)
+    return RedirectResponse(url=f"{settings.web_origin}?chatgpt=connected", status_code=303)
 
 
 @app.get("/api/v1/auth/chatgpt/status")
 def chatgpt_auth_status() -> dict[str, object]:
     connection = repository.chatgpt_connection()
     if not connection:
-        return {"connected": False}
+        return {
+            "connected": False,
+            "available": not running_on_vercel() or bool(settings.openai_client_id),
+            "reason": None
+            if not running_on_vercel() or settings.openai_client_id
+            else "Website OAuth membutuhkan OPENAI_CLIENT_ID dari OpenAI.",
+        }
     return {
         "connected": True,
+        "available": True,
         "email": connection.get("email"),
         "subject": connection.get("subject"),
         "scope": connection.get("scope"),
         "expires_at": connection.get("expires_at"),
         "subscription_enabled": "chatgpt.tokens.use.direct" in connection.get("scope", "").split(),
+        "preferred_model": connection.get("preferred_model"),
     }
 
 
@@ -270,10 +361,14 @@ async def chatgpt_models() -> dict[str, object]:
             headers={"Authorization": f"Bearer {connection['access_token']}"},
         )
     response.raise_for_status()
+    catalog = response.json()
     models = [
-        {"id": item["id"], "display_name": item.get("display_name", item["id"])}
-        for item in response.json().get("data", [])
-        if item.get("id")
+        {
+            "id": item.get("slug") or item.get("id"),
+            "display_name": item.get("display_name") or item.get("slug") or item.get("id"),
+        }
+        for item in catalog.get("models", catalog.get("data", []))
+        if (item.get("slug") or item.get("id")) and item.get("visibility", "list") == "list"
     ]
     return {"models": models}
 
@@ -398,7 +493,7 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
             conversation_id = repository.conversation_for_bot(member.id)
             prompt = f"Pesan grup {group.name} dari Bos: {payload.content}\nBalas dengan update singkat untuk grup."
             repository.append_message(conversation_id, "group", prompt)
-            run = repository.create_run(member.id, conversation_id, prompt, member.model or settings.default_model)
+            run = repository.create_run(member.id, conversation_id, prompt, _model_for_bot(member))
             repository.link_run_to_group(run.id, group_id)
             await _start_run(run.id)
     return message
@@ -430,7 +525,7 @@ async def create_handoff(bot_id: UUID, payload: HandoffInput) -> Handoff:
     except KeyError as error:
         raise not_found(error) from error
     repository.append_message(conversation_id, f"bot:{source.id}", f"Delegasi dari {source.name}: {payload.task}")
-    run = repository.create_run(target.id, conversation_id, payload.task, target.model or settings.default_model)
+    run = repository.create_run(target.id, conversation_id, payload.task, _model_for_bot(target))
     handoff = repository.set_handoff_child(handoff.id, run.id)
     await _start_run(run.id)
     return handoff
@@ -501,7 +596,7 @@ async def regenerate(bot_id: UUID, payload: RegenerateInput | None = None) -> Ru
             bot_id,
             conversation_id,
             latest_user.content,
-            (payload.model if payload else None) or latest_user.model or bot.model or settings.default_model,
+            _model_for_bot(bot, (payload.model if payload else None) or latest_user.model),
         )
         await _start_run(run.id)
         return repository.get_run(run.id)
@@ -529,7 +624,7 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         bot_id,
         conversation_id,
         payload.content,
-        payload.model or bot.model or settings.default_model,
+        _model_for_bot(bot, payload.model),
     )
     await _start_run(run.id)
     return repository.get_run(run.id)

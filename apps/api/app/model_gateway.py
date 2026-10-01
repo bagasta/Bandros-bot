@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import json
 from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 import httpx
@@ -36,23 +37,44 @@ class ChatGPTGateway:
         token = connection.get("access_token") if connection else None
         if not token:
             raise RuntimeError("ChatGPT belum terhubung. Hubungkan akun ChatGPT terlebih dahulu.")
+        if "chatgpt.tokens.use.direct" not in str(connection.get("scope") or "").split():
+            raise RuntimeError("Akun ChatGPT belum mengizinkan penggunaan model.")
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
+            answer_parts: list[str] = []
+            completed = False
+            async with client.stream(
+                "POST",
                 f"{self.base_url}/responses",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"model": model.removeprefix("chatgpt/"), "instructions": system, "input": prompt, "store": False},
-            )
-            response.raise_for_status()
-            payload = response.json()
-        output = payload.get("output", [])
-        texts = [
-            item.get("text", "")
-            for message in output
-            if isinstance(message, dict)
-            for item in message.get("content", [])
-            if isinstance(item, dict)
-        ]
-        answer = "".join(texts).strip()
+                json={
+                    "model": model.removeprefix("chatgpt/"),
+                    "instructions": system,
+                    "input": prompt,
+                    "store": False,
+                    "stream": True,
+                },
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    raw = line.removeprefix("data: ")
+                    if raw == "[DONE]":
+                        continue
+                    event = json.loads(raw)
+                    event_type = event.get("type")
+                    if event_type == "response.output_text.delta":
+                        answer_parts.append(str(event.get("delta") or ""))
+                    elif event_type == "response.failed":
+                        error = (event.get("response") or {}).get("error") or {}
+                        raise RuntimeError(
+                            f"ChatGPT gagal memproses jawaban: {error.get('code', 'unknown_error')}"
+                        )
+                    elif event_type == "response.completed":
+                        completed = True
+            if not completed:
+                raise RuntimeError("Stream ChatGPT berakhir sebelum response.completed.")
+        answer = "".join(answer_parts).strip()
         if not answer:
             raise RuntimeError("ChatGPT mengembalikan response kosong.")
         return answer

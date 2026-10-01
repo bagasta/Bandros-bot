@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS chatgpt_oauth (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     client_id TEXT,
     host_id TEXT,
+    preferred_model TEXT,
     subject TEXT,
     email TEXT,
     access_token TEXT NOT NULL,
@@ -157,6 +158,14 @@ CREATE TABLE IF NOT EXISTS chatgpt_oauth (
     scope TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oauth_transactions (
+    state TEXT PRIMARY KEY,
+    code_verifier TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL
 );
 """
 
@@ -189,6 +198,7 @@ class Database:
                 "client_id": "TEXT",
                 "host_id": "TEXT",
                 "id_token": "TEXT",
+                "preferred_model": "TEXT",
             },
         }
         for table, columns in migrations.items():

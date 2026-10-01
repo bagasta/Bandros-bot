@@ -269,6 +269,7 @@ class Repository:
         self,
         client_id: str,
         host_id: str,
+        preferred_model: str | None,
         access_token: str,
         refresh_token: str | None,
         id_token: str | None,
@@ -282,11 +283,12 @@ class Repository:
             db.execute(
                 """
                 INSERT INTO chatgpt_oauth
-                    (id, client_id, host_id, subject, email, access_token, refresh_token, id_token, expires_at, scope, created_at, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, client_id, host_id, preferred_model, subject, email, access_token, refresh_token, id_token, expires_at, scope, created_at, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     client_id = excluded.client_id,
                     host_id = excluded.host_id,
+                    preferred_model = excluded.preferred_model,
                     subject = excluded.subject,
                     email = excluded.email,
                     access_token = excluded.access_token,
@@ -296,8 +298,34 @@ class Repository:
                     scope = excluded.scope,
                     updated_at = excluded.updated_at
                 """,
-                (client_id, host_id, subject, email, access_token, refresh_token, id_token, dump_time(expires_at), scope, timestamp, timestamp),
+                (client_id, host_id, preferred_model, subject, email, access_token, refresh_token, id_token, dump_time(expires_at), scope, timestamp, timestamp),
             )
+
+    def create_oauth_transaction(
+        self,
+        state: str,
+        code_verifier: str,
+        nonce: str,
+        client_id: str,
+        host_id: str,
+        expires_at: datetime,
+    ) -> None:
+        with self.database.connection() as db:
+            db.execute("DELETE FROM oauth_transactions WHERE expires_at < ?", (dump_time(now()),))
+            db.execute(
+                "INSERT INTO oauth_transactions VALUES (?, ?, ?, ?, ?, ?)",
+                (state, code_verifier, nonce, client_id, host_id, dump_time(expires_at)),
+            )
+
+    def consume_oauth_transaction(self, state: str) -> dict[str, Any] | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                "SELECT * FROM oauth_transactions WHERE state = ?", (state,)
+            ).fetchone()
+            db.execute("DELETE FROM oauth_transactions WHERE state = ?", (state,))
+        if not row or load_time(row["expires_at"]) < now():
+            return None
+        return dict(row)
 
     def update_chatgpt_tokens(
         self,

@@ -7,7 +7,15 @@ type Message = { id: string; role: string; content: string };
 type Run = { id: string; status: string; error: string | null };
 type Group = { id: string; name: string; description: string; members: Bot[] };
 type GroupMessage = { id: string; sender_type: string; sender_bot_id: string | null; content: string };
-type ChatGPTStatus = { connected: boolean; email?: string | null };
+type ChatGPTStatus = {
+  connected: boolean;
+  available?: boolean;
+  email?: string | null;
+  subscription_enabled?: boolean;
+  preferred_model?: string | null;
+  reason?: string | null;
+};
+type ChatGPTModel = { id: string; display_name: string };
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
 const quickPrompts = [
@@ -51,6 +59,7 @@ export default function GrokDashboard() {
   const [editInstructions, setEditInstructions] = useState("");
   const [editModel, setEditModel] = useState("");
   const [chatGPT, setChatGPT] = useState<ChatGPTStatus>({ connected: false });
+  const [chatGPTModels, setChatGPTModels] = useState<ChatGPTModel[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
@@ -73,7 +82,16 @@ export default function GrokDashboard() {
 
   useEffect(() => { void loadBots(); }, []);
   useEffect(() => {
-    void request<ChatGPTStatus>("/auth/chatgpt/status").then(setChatGPT).catch(() => undefined);
+    void request<ChatGPTStatus>("/auth/chatgpt/status").then(async (status) => {
+      setChatGPT(status);
+      if (status.connected && status.subscription_enabled) {
+        const result = await request<{ models: ChatGPTModel[] }>("/auth/chatgpt/models");
+        setChatGPTModels(result.models);
+      }
+      if (new URLSearchParams(window.location.search).has("chatgpt")) {
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+    }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -263,6 +281,10 @@ export default function GrokDashboard() {
   };
 
   const connectChatGPT = async () => {
+    if (chatGPT.available === false) {
+      setError(chatGPT.reason || "Sign in with ChatGPT belum tersedia untuk deployment ini.");
+      return;
+    }
     try {
       const result = await request<{ authorization_url: string }>("/auth/chatgpt/start");
       window.location.assign(result.authorization_url);
@@ -289,7 +311,7 @@ export default function GrokDashboard() {
           {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-icon">G</span><span><strong>{group.name}</strong><small>{group.members.length} agents</small></span></button>)}
           {groups.length === 0 && <button className="bandros-create-group" onClick={() => void createGroup()}>+ Create group</button>}
         </div>
-        <button className="bandros-marketplace" type="button" onClick={() => void connectChatGPT()}>{chatGPT.connected ? `ChatGPT · ${chatGPT.email || "Connected"}` : "Connect ChatGPT"}</button>
+        <button className="bandros-marketplace" type="button" onClick={() => void connectChatGPT()}>{chatGPT.connected ? `ChatGPT · ${chatGPT.email || "Connected"}` : "Sign in with ChatGPT"}</button>
         <div className="bandros-user"><span className="bandros-avatar">RA</span><span><strong>Rizky A.</strong><small>24.5k tokens</small></span></div>
       </aside>
       <section className="bandros-main">
@@ -308,7 +330,11 @@ export default function GrokDashboard() {
           <label htmlFor="agent-name">Name</label>
           <input id="agent-name" value={editName} onChange={(event) => setEditName(event.target.value)} required />
           <label htmlFor="agent-model">Model</label>
-          <input id="agent-model" value={editModel} onChange={(event) => setEditModel(event.target.value)} placeholder="chatgpt/gpt-5 atau openrouter/free" />
+          {chatGPTModels.length > 0 ? <select id="agent-model" value={editModel} onChange={(event) => setEditModel(event.target.value)}>
+            <option value="">Otomatis · {chatGPT.preferred_model || "ChatGPT"}</option>
+            {chatGPTModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}
+            <option value="openrouter/free">OpenRouter free</option>
+          </select> : <input id="agent-model" value={editModel} onChange={(event) => setEditModel(event.target.value)} placeholder="chatgpt/model atau openrouter/free" />}
           <label htmlFor="agent-description">Description</label>
           <textarea id="agent-description" value={editDescription} onChange={(event) => setEditDescription(event.target.value)} rows={5} />
           <label htmlFor="agent-instructions">Working instructions</label>

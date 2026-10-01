@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -165,3 +166,21 @@ def test_bot_workspace_tools_reject_path_escape(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert "inside" in result["error"]
+
+
+def test_oauth_transaction_is_persistent_and_one_time(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "oauth.db")
+    repository.create_oauth_transaction(
+        "state",
+        "verifier",
+        "nonce",
+        "oaiapp_test",
+        "urn:uuid:test",
+        datetime.now(UTC) + timedelta(minutes=10),
+    )
+
+    transaction = repository.consume_oauth_transaction("state")
+
+    assert transaction is not None
+    assert transaction["code_verifier"] == "verifier"
+    assert repository.consume_oauth_transaction("state") is None
