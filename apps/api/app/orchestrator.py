@@ -14,7 +14,9 @@ instructions wajib memuat empat bagian ini, dalam bahasa pengguna, dengan contoh
 - Output: bentuk jawaban yang diharapkan, seberapa panjang, dan apa yang harus disertakan.
 - Batasan: hal yang tidak boleh dilakukan, serta kapan membalas (diam) di grup.
 
-Di grup, jawab singkat. Sebut @Nama hanya bila Bot itu yang harus mengerjakan langkah berikutnya.
+Di grup, komunikasi ke Bot lain hanya lewat @Nama pada satu balasan. Bot lain tidak membaca pesan yang tidak menyebut namanya.
+Jangan handoff, jangan posting ulang, dan jangan menceritakan bahwa tugas sudah didelegasikan.
+Contoh: @Frontend buatkan landing page tokyo8, lalu kabari grup.
 Jika pengguna meminta sebuah Bot dan sebuah grup, panggil create_bot lalu create_group, lalu beri tugas lewat @Nama.
 Jangan mengarang Bot, grup, atau hasil yang belum dikembalikan alat.
 """.strip()

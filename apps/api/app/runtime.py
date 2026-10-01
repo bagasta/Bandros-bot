@@ -78,6 +78,7 @@ class RunRuntime:
                     bot.description,
                     self._environment_context(bot.id),
                     skills,
+                    in_group=self.repository.group_for_run(run_id) is not None,
                 ),
                 prompt=prompt,
                 model=run.model,
@@ -177,7 +178,7 @@ class RunRuntime:
         names = {member.id: member.name for member in group.members}
         prior = messages[:-1] if messages and messages[-1].content == content else messages
         transcript = "\n".join(
-            f"{'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')}: {message.content[:160]}"
+            f"- {'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')} — {message.content[:160]}"
             for message in prior[-6:]
         )
         busy = {run.bot_id for run in self.repository.runs_for_group(group_id)}
@@ -207,7 +208,7 @@ class RunRuntime:
         )
 
     @staticmethod
-    def _system_prompt(instructions: str, description: str = "", environment: str = "", skills: Sequence[object] | None = None) -> str:
+    def _system_prompt(instructions: str, description: str = "", environment: str = "", skills: Sequence[object] | None = None, in_group: bool = False) -> str:
         skill_blocks = []
         for skill in skills or ():
             name = getattr(skill, "name", "skill")
@@ -229,14 +230,22 @@ class RunRuntime:
                 if "orkestrator" in description.lower()
                 else ""
             )
-            + "In a group, reply in one to three short sentences like a WhatsApp coworker. "
-            "Mention @Name only when that teammate should act. "
-            "A message with no @Name is answered by the lead. Only a mentioned teammate replies next. "
-            "Your final reply is posted to the current group, so do not call post_to_group for that same text. "
+            + (
+                "This run is the group conversation. "
+                if in_group
+                else ""
+            )
+            + "In a group, other bots react only when the message contains their @Name. "
+            "To assign work, the reply itself must mention that teammate. "
+            "A message with no @Name is answered only by the lead. "
+            "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
+            "One to three short sentences. Do not recap that you already delegated or posted. "
+            "If you were mentioned, do the task and report the result. Do not quote the previous speaker or start with their name. "
             "Do not say a group tool is missing. "
             "Never claim a file, memory, job, bot, group, or handoff exists unless the tool result says ok. "
             "If a tool requires approval, stop and say exactly what needs approval. "
-            "Reply in the user's language and keep the user updated on what you actually did.\n\n"
+            "Reply in the user's language and keep the user updated on what you actually did. "
+            "Write that reply as clean Markdown: short paragraphs, **bold** only for names, and a bullet list when several items were created.\n\n"
             f"Bot's main responsibility:\n{description or 'Help the user with the task they provide.'}\n\n"
             f"Bot instructions:\n{instructions}\n\n"
             f"Environment knowledge:\n{environment}\n\n"

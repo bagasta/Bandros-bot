@@ -32,6 +32,17 @@ def test_each_workspace_starts_with_one_orchestrator(tmp_path: Path) -> None:
     assert "Batasan" in bots[0].instructions
 
 
+def test_existing_bandros_learns_group_mentions(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "refresh.db")
+    repository.create_bot("Bandros", "Orkestrator lama.", "Jawab singkat di grup.", None)
+
+    _seed_workspace(repository)
+
+    bandros = repository.list_bots()[0]
+    assert "jangan handoff" in bandros.instructions.lower()
+    assert "@Nama" in bandros.instructions
+
+
 def test_existing_team_still_receives_bandros(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "existing.db")
     repository.create_bot("Frontend", "Membuat antarmuka.", "Tugas UI.", None)

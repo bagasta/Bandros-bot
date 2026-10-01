@@ -79,6 +79,8 @@ class WorkspaceToolset:
             ToolDefinition("list_memory", "Recall durable facts saved for this Bot. payload: {query?}", self.list_memory, RiskClass.READ_ONLY),
             ToolDefinition("save_memory", "Save a durable preference or fact for future runs. payload: {kind, content}", self.save_memory, RiskClass.LOCAL_WRITE),
         ]
+        if self.repository.group_for_run(self.run_id):
+            definitions = [item for item in definitions if item.name not in {"handoff_to_bot", "post_to_group"}]
         return [self._audited(definition) for definition in definitions]
 
     def _audited(self, definition: ToolDefinition) -> ToolDefinition:
@@ -247,6 +249,8 @@ class WorkspaceToolset:
         return {"ok": True, "job_id": str(job.id), "status": job.status}
 
     async def handoff_to_bot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.repository.group_for_run(self.run_id):
+            return {"ok": False, "error": "Kamu sedang di grup. Minta rekan dengan @Nama di balasan grup, jangan handoff."}
         target_bot_id = UUID(self._text(payload, "target_bot_id"))
         task = self._text(payload, "task")
         target = self.repository.get_bot(target_bot_id)
@@ -263,6 +267,8 @@ class WorkspaceToolset:
 
     async def post_to_group(self, payload: dict[str, Any]) -> dict[str, Any]:
         group_id = UUID(self._text(payload, "group_id"))
+        if self.repository.group_for_run(self.run_id) == group_id:
+            return {"ok": False, "error": "Balasanmu otomatis masuk grup ini. Tulis @Nama di balasan, jangan posting ulang."}
         content = self._text(payload, "content")
         message = self.repository.append_group_message(group_id, "bot", content, self.bot_id)
         if self.on_group_post:

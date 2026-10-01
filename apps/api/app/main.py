@@ -178,8 +178,12 @@ def _seed_workspace(repo: Repository) -> None:
             skill_id = default_skill_ids.get(skill_name)
             if skill_id:
                 repo.assign_skill(orchestrator.id, skill_id)
-    elif existing.status is not BotStatus.ACTIVE:
-        repo.set_bot_status(existing.id, BotStatus.ACTIVE)
+    else:
+        if existing.status is not BotStatus.ACTIVE:
+            repo.set_bot_status(existing.id, BotStatus.ACTIVE)
+            existing = repo.get_bot(existing.id)
+        if "jangan handoff" not in existing.instructions.lower():
+            repo.update_bot(existing.id, {"description": ORCHESTRATOR_DESCRIPTION, "instructions": ORCHESTRATOR_INSTRUCTIONS})
 
 
 def activate_account(account_id: str) -> tuple[object, object]:

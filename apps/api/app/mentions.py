@@ -42,7 +42,10 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "") -> str:
     roster = ", ".join(f"@{member.name}" for member in group.members)
     lines = [
         f"Grup {group.name}. Anggota: {roster}.",
-        "Balas 1-3 kalimat seperti chat WhatsApp. Sebut @Nama hanya bila dia harus bertindak. Jika bukan untukmu, balas (diam).",
+        "Ini chat grup. Bot lain hanya bereaksi bila pesan memuat @Nama mereka.",
+        "Kalau kamu memberi tugas, satu balasan wajib menyebut @Nama dari daftar anggota. Jangan handoff dan jangan posting ulang.",
+        "Kalau kamu yang disebut, kerjakan tugasnya dan laporkan hasilnya. Jangan menyalin pesan sebelumnya dan jangan mulai dengan nama pengirim.",
+        "Kalau pesan ini bukan untukmu, balas (diam).",
     ]
     if transcript.strip():
         lines.append(f"Riwayat:\n{transcript.strip()}")

@@ -137,6 +137,27 @@ def test_create_group_tool_joins_the_caller_and_named_bot(tmp_path: Path) -> Non
     assert [member.name for member in group.members] == ["Manager", "Bot Riset"]
 
 
+def test_group_run_delegates_only_by_mention(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "group.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    group = repository.create_group("Tim Frontend & Backend", "", [bandros.id, frontend.id])
+    run = repository.create_run(bandros.id, repository.conversation_for_bot(bandros.id), "Buat landing page", "test-model")
+    repository.link_run_to_group(run.id, group.id)
+    toolset = WorkspaceToolset(repository, run.id, bandros.id, lambda _: None)
+    names = {tool.name for tool in toolset.definitions()}
+
+    handoff = asyncio.run(toolset.handoff_to_bot({"target_bot_id": str(frontend.id), "task": "Buat landing page"}))
+    posted = asyncio.run(toolset.post_to_group({"group_id": str(group.id), "content": "@Frontend buatkan landing page"}))
+
+    assert "handoff_to_bot" not in names
+    assert "post_to_group" not in names
+    assert handoff["ok"] is False
+    assert "@Nama" in handoff["error"]
+    assert posted["ok"] is False
+    assert repository.list_group_messages(group.id) == []
+
+
 def test_same_reply_is_not_posted_twice(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "group.db")
     manager = repository.create_bot("Manager", "", "TOKEN:manager", None)
