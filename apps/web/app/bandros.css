@@ -45,6 +45,7 @@
 .bandros-welcome { max-width: 560px; margin: 12vh auto 0; text-align: center; }
 .bandros-welcome h1 { margin: 0; font-size: 34px; letter-spacing: -.04em; font-weight: 560; }
 .bandros-welcome p { margin: 14px 0 0; color: #3f3f46; line-height: 1.5; }
+.bandros-welcome .bandros-signin { margin-top: 18px; padding: 10px 16px; color: #fff; background: var(--ink); border: 0; border-radius: 999px; font-weight: 650; }
 .bandros-quick-prompts { display: grid; gap: 8px; margin-top: 28px; text-align: left; }
 .bandros-quick-prompts button { min-height: 0; padding: 12px 14px; color: var(--ink); text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
 .bandros-message { max-width: 640px; margin: 0 auto 14px; }

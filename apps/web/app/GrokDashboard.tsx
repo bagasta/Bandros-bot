@@ -89,6 +89,7 @@ export default function GrokDashboard() {
   const [deviceFlow, setDeviceFlow] = useState<DeviceFlow | null>(null);
   const [deviceStatus, setDeviceStatus] = useState("");
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("list");
+  const [authReady, setAuthReady] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
@@ -99,9 +100,10 @@ export default function GrokDashboard() {
         request<Bot[]>("/bots"),
         request<Group[]>("/groups"),
       ]);
-      setBots((current) => (nextBots.length === 0 && current.length > 0 ? current : nextBots));
-      setGroups((current) => (nextGroups.length === 0 && current.length > 0 ? current : nextGroups));
-      if (!selectedBot && nextBots[0]) setSelectedBot(nextBots[0]);
+      setBots(nextBots);
+      setGroups(nextGroups);
+      setSelectedBot((current) => (current && nextBots.some((bot) => bot.id === current.id) ? current : nextBots[0] ?? null));
+      setSelectedGroup((current) => (current && nextGroups.some((group) => group.id === current.id) ? current : null));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Bot tidak dapat dimuat.");
     } finally {
@@ -109,7 +111,6 @@ export default function GrokDashboard() {
     }
   };
 
-  useEffect(() => { void loadBots(); }, []);
   useEffect(() => {
     try {
       const savedModels = JSON.parse(window.localStorage.getItem("bandros_bot_models") || "{}") as Record<string, string>;
@@ -136,10 +137,35 @@ export default function GrokDashboard() {
   };
 
   useEffect(() => {
-    void loadChatGPT().catch((cause) => {
-      setError(cause instanceof Error ? cause.message : "Model ChatGPT tidak dapat dimuat.");
-    });
+    const params = new URLSearchParams(window.location.search);
+    const session = params.get("session");
+    if (session) {
+      window.localStorage.setItem("bandros_chatgpt_session", session);
+      params.delete("session");
+      params.delete("chatgpt");
+      const query = params.toString();
+      window.history.replaceState({}, "", query ? `?${query}` : window.location.pathname);
+    }
+    void loadChatGPT()
+      .catch((cause) => {
+        setError(cause instanceof Error ? cause.message : "Model ChatGPT tidak dapat dimuat.");
+      })
+      .finally(() => setAuthReady(true));
   }, []);
+  useEffect(() => {
+    if (!authReady) return;
+    if (!chatGPT.connected) {
+      setBots([]);
+      setGroups([]);
+      setSelectedBot(null);
+      setSelectedGroup(null);
+      setMessages([]);
+      setGroupMessages([]);
+      setLoading(false);
+      return;
+    }
+    void loadBots();
+  }, [authReady, chatGPT.connected]);
 
   useEffect(() => {
     if (!deviceFlow) return;
@@ -156,6 +182,7 @@ export default function GrokDashboard() {
           setDeviceStatus("ChatGPT terhubung.");
           setDeviceFlow(null);
           await loadChatGPT();
+          await loadBots();
           return;
         }
         setDeviceStatus("Menunggu persetujuan di ChatGPT…");
@@ -379,6 +406,12 @@ export default function GrokDashboard() {
       window.localStorage.removeItem("bandros_chatgpt_session");
       setChatGPT({ connected: false, available: true });
       setChatGPTModels([]);
+      setBots([]);
+      setGroups([]);
+      setSelectedBot(null);
+      setSelectedGroup(null);
+      setMessages([]);
+      setGroupMessages([]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "ChatGPT tidak dapat diputus.");
     }
@@ -416,13 +449,14 @@ export default function GrokDashboard() {
   return (
     <main className={`bandros-app ${mobilePane === "chat" ? "is-chat" : "is-list"}`}>
       <aside className="bandros-sidebar">
-        <div className="bandros-brand"><strong>Bandros</strong><button type="button" onClick={() => void createBot()}>New</button></div>
+        <div className="bandros-brand"><strong>Bandros</strong><button type="button" onClick={() => void createBot()} disabled={!chatGPT.connected}>New</button></div>
         <div className="bandros-agent-list">
           {loading && <p className="bandros-muted">Memuat Bot…</p>}
           {activeBots.map((bot) => <button className={`bandros-agent ${selectedBot?.id === bot.id && !selectedGroup ? "is-selected" : ""}`} key={bot.id} onClick={() => openBot(bot)}><span className={`bandros-avatar ${working && selectedBot?.id === bot.id ? "is-live" : ""}`}>{bot.name.slice(0, 1).toUpperCase()}</span><span className="bandros-agent-copy"><strong>{bot.name}</strong><small>{bot.description || "Belum ada peran"}</small></span></button>)}
-          {!loading && bots.length === 0 && <p className="bandros-muted">Belum ada Bot. Buat Bot pertama.</p>}
+          {!loading && chatGPT.connected && bots.length === 0 && <p className="bandros-muted">Belum ada Bot. Buat Bot pertama.</p>}
+          {authReady && !chatGPT.connected && <p className="bandros-muted">Masuk dengan ChatGPT untuk membuka Bot kamu.</p>}
         </div>
-        <div className="bandros-groups-heading"><span>Groups</span><button aria-label="Buat grup" onClick={() => void createGroup()}>New</button></div>
+        <div className="bandros-groups-heading"><span>Groups</span><button aria-label="Buat grup" onClick={() => void createGroup()} disabled={!chatGPT.connected}>New</button></div>
         <div className="bandros-group-list">
           {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span><strong>{group.name}</strong><small>{group.members.length} Bots</small></span></button>)}
         </div>
@@ -438,20 +472,20 @@ export default function GrokDashboard() {
         </header>
         {error && <div className="bandros-alert" role="alert">{error}<button aria-label="Tutup notifikasi" onClick={() => setError(null)}>×</button></div>}
         <div className="bandros-chat" ref={chatRef}>
-          {!selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>Kirim satu tugas yang selesai jelas. {displayName} mengerjakannya di komputer bersama, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"}</span><p>{renderMentions(message.content, selectedGroup.members.map((member) => member.name))}</p></article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.role === "user" ? "Kamu" : displayName}</span><p>{message.content}</p></article>)}
+          {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>Kirim satu tugas yang selesai jelas. {displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"}</span><p>{renderMentions(message.content, selectedGroup.members.map((member) => member.name))}</p></article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.role === "user" ? "Kamu" : displayName}</span><p>{message.content}</p></article>)}
           {working && <p className="bandros-working">{selectedGroup ? `${selectedGroup.name} sedang membalas…` : "Sedang bekerja…"}</p>}
         </div>
-        <form className="bandros-composer" onSubmit={sendMessage}>
+        {chatGPT.connected && <form className="bandros-composer" onSubmit={sendMessage}>
           <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}. Sebut @Nama untuk menunjuk Bot` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
           <div className="bandros-composer-footer">
             <label className="bandros-model-picker">Model{chatGPT.connected ? modelSelect : <button type="button" onClick={() => void connectChatGPT()}>Sign in</button>}</label>
             {working ? <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button> : <button type="submit" disabled={!prompt.trim()} aria-label="Send message">Send</button>}
           </div>
-        </form>
+        </form>}
       </section>
       <aside className="bandros-computer" aria-label="Computer">
         <div className="bandros-computer-head"><span className={`bandros-status-dot ${working ? "is-live" : ""}`} /><strong>Computer</strong></div>
-        <p>{working ? `${displayName} sedang memakai layar ini.` : "Komputer bersama sedang diam. Semua Bot memakai berkas dan sesi yang sama."}</p>
+        <p>{working ? `${displayName} sedang memakai layar ini.` : "Komputer akun ini sedang diam. Bot milik akun ChatGPT lain tidak memakai berkas ini."}</p>
         <p>Hasil yang perlu disimpan taruh di workspace. Menutup halaman ini tidak menghentikan pekerjaan yang sudah berjalan di server.</p>
       </aside>
       {settingsOpen && selectedBot && <aside className="bandros-settings" aria-label="Bot settings">

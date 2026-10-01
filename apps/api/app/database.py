@@ -176,8 +176,9 @@ CREATE TABLE IF NOT EXISTS oauth_transactions (
 
 
 class Database:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, blob_path: str | None = None) -> None:
         self.path = path
+        self.blob_path = blob_path or _DATABASE_BLOB_PATH
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +198,7 @@ class Database:
 
         try:
             with BlobClient() as client:
-                result = client.get(_DATABASE_BLOB_PATH, access="private", use_cache=False)
+                result = client.get(self.blob_path, access="private", use_cache=False)
         except BlobNotFoundError:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,7 +211,7 @@ class Database:
 
         with BlobClient() as client:
             client.put(
-                _DATABASE_BLOB_PATH,
+                self.blob_path,
                 self.path.read_bytes(),
                 access="private",
                 content_type="application/vnd.sqlite3",
