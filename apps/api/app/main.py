@@ -115,10 +115,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Persistent Agent Workspace", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", settings.web_origin],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origins=["*"] if settings.cors_allow_all else ["http://localhost:3000", "http://127.0.0.1:3000", settings.web_origin],
+    allow_origin_regex=None if settings.cors_allow_all else r"https://.*\.vercel\.app",
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -126,7 +126,8 @@ app.add_middleware(
 @app.middleware("http")
 async def optional_auth(request: Request, call_next):
     public_oauth = request.url.path in {"/api/v1/auth/chatgpt/start", "/api/v1/auth/chatgpt/callback"}
-    if settings.api_auth_token and request.url.path != "/health" and not public_oauth and request.method != "OPTIONS":
+    public_health = request.url.path in {"/health", "/"}
+    if settings.api_auth_token and not public_health and not public_oauth and request.method != "OPTIONS":
         expected = f"Bearer {settings.api_auth_token}"
         provided = request.headers.get("Authorization")
         if provided != expected:
@@ -138,9 +139,17 @@ def not_found(error: KeyError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
 
 
+async def _start_run(run_id: UUID) -> None:
+    if settings.await_runs:
+        await runtime.start_and_wait(run_id)
+    else:
+        runtime.start(run_id)
+
+
+@app.get("/")
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "environment": "local"}
+    return {"status": "ok", "environment": settings.environment_name}
 
 
 @app.get("/api/v1/auth/chatgpt/start")
@@ -391,7 +400,7 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
             repository.append_message(conversation_id, "group", prompt)
             run = repository.create_run(member.id, conversation_id, prompt, member.model or settings.default_model)
             repository.link_run_to_group(run.id, group_id)
-            runtime.start(run.id)
+            await _start_run(run.id)
     return message
 
 
@@ -423,7 +432,7 @@ async def create_handoff(bot_id: UUID, payload: HandoffInput) -> Handoff:
     repository.append_message(conversation_id, f"bot:{source.id}", f"Delegasi dari {source.name}: {payload.task}")
     run = repository.create_run(target.id, conversation_id, payload.task, target.model or settings.default_model)
     handoff = repository.set_handoff_child(handoff.id, run.id)
-    runtime.start(run.id)
+    await _start_run(run.id)
     return handoff
 
 
@@ -494,8 +503,8 @@ async def regenerate(bot_id: UUID, payload: RegenerateInput | None = None) -> Ru
             latest_user.content,
             (payload.model if payload else None) or latest_user.model or bot.model or settings.default_model,
         )
-        runtime.start(run.id)
-        return run
+        await _start_run(run.id)
+        return repository.get_run(run.id)
     except KeyError as error:
         raise not_found(error) from error
 
@@ -522,8 +531,8 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         payload.content,
         payload.model or bot.model or settings.default_model,
     )
-    runtime.start(run.id)
-    return run
+    await _start_run(run.id)
+    return repository.get_run(run.id)
 
 
 @app.get("/api/v1/runs/{run_id}", response_model=Run)
@@ -615,7 +624,11 @@ async def approve(approval_id: UUID) -> Approval:
     try:
         approval = repository.decide_approval(approval_id, ApprovalStatus.APPROVED)
         runtime.resume_after_approval(approval_id)
-        return approval
+        if settings.await_runs:
+            task = runtime._tasks.get(approval.run_id)
+            if task is not None:
+                await task
+        return repository.get_approval(approval_id)
     except KeyError as error:
         raise not_found(error) from error
     except ValueError as error:
@@ -627,7 +640,11 @@ async def reject(approval_id: UUID) -> Approval:
     try:
         approval = repository.decide_approval(approval_id, ApprovalStatus.REJECTED)
         runtime.resume_after_approval(approval_id)
-        return approval
+        if settings.await_runs:
+            task = runtime._tasks.get(approval.run_id)
+            if task is not None:
+                await task
+        return repository.get_approval(approval_id)
     except KeyError as error:
         raise not_found(error) from error
     except ValueError as error:

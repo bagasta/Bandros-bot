@@ -27,6 +27,13 @@ class RunRuntime:
                 return
         self._tasks[run_id] = asyncio.create_task(self._execute(run_id), name=f"run-{run_id}")
 
+    async def start_and_wait(self, run_id: UUID) -> None:
+        """Run work in-process so serverless platforms can finish before freeze."""
+        self.start(run_id)
+        task = self._tasks.get(run_id)
+        if task is not None:
+            await task
+
     async def _execute(self, run_id: UUID) -> None:
         run = self.repository.get_run(run_id)
         if run.status not in {RunStatus.QUEUED, RunStatus.FAILED_RETRYABLE}:

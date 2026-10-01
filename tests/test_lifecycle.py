@@ -31,8 +31,7 @@ def test_run_completes_and_persists_message(tmp_path: Path) -> None:
     runtime = RunRuntime(repository, FakeGateway(), "test-model", 1)
 
     async def execute() -> None:
-        runtime.start(run.id)
-        await asyncio.sleep(0.02)
+        await runtime.start_and_wait(run.id)
 
     asyncio.run(execute())
 

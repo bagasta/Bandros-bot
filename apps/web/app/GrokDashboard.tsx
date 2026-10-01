@@ -61,8 +61,8 @@ export default function GrokDashboard() {
         request<Bot[]>("/bots"),
         request<Group[]>("/groups"),
       ]);
-      setBots(nextBots);
-      setGroups(nextGroups);
+      setBots((current) => (nextBots.length === 0 && current.length > 0 ? current : nextBots));
+      setGroups((current) => (nextGroups.length === 0 && current.length > 0 ? current : nextGroups));
       if (!selectedBot && nextBots[0]) setSelectedBot(nextBots[0]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Bot tidak dapat dimuat.");
@@ -126,6 +126,11 @@ export default function GrokDashboard() {
       if (!botId) return;
       const run = await request<Run>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content }) });
       setActiveRunId(run.id);
+      if (["completed", "failed", "failed_retryable", "cancelled"].includes(run.status)) {
+        if (run.error) throw new Error(run.error);
+        setMessages(await request<Message[]>(`/bots/${botId}/messages`));
+        return;
+      }
       const response = await fetch(`${apiBase}/runs/${run.id}/events/stream`);
       if (!response.ok || !response.body) throw new Error("Streaming Run tidak tersedia.");
       const reader = response.body.getReader();
@@ -251,7 +256,9 @@ export default function GrokDashboard() {
         description: "Bot baru dalam ekosistem Bandros.",
         instructions: "Bantu pengguna dengan jawaban yang jelas dan dapat ditinjau.",
       }) });
-      await loadBots(); setSelectedBot(bot);
+      setBots((current) => [bot, ...current.filter((item) => item.id !== bot.id)]);
+      setSelectedBot(bot);
+      void loadBots();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Bot tidak dapat dibuat."); }
   };
 
