@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from .database import Database
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotStatus, CreateBot, GroupInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
-from .model_gateway import ChatGPTGateway, CompositeGateway, OpenRouterGateway
+from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
 from .repository import Repository
 from .runtime import RunRuntime
@@ -30,9 +30,13 @@ settings = Settings.from_environment()
 repository = Repository(Database(settings.database_path))
 runtime = RunRuntime(
     repository=repository,
-    model_gateway=CompositeGateway(
-        OpenRouterGateway(settings.openrouter_api_key, settings.openrouter_base_url),
-        ChatGPTGateway(repository.chatgpt_connection, lambda connection: _refresh_chatgpt_token(connection)),
+    model_gateway=(
+        MockGateway()
+        if settings.model_gateway == "mock"
+        else CompositeGateway(
+            OpenRouterGateway(settings.openrouter_api_key, settings.openrouter_base_url),
+            ChatGPTGateway(repository.chatgpt_connection, lambda connection: _refresh_chatgpt_token(connection)),
+        )
     ),
     default_model=settings.default_model,
     max_model_calls=settings.max_model_calls_per_run,

@@ -17,6 +17,7 @@ class Settings:
     openrouter_api_key: str | None
     openrouter_base_url: str
     default_model: str
+    model_gateway: str
     max_model_calls_per_run: int
     api_auth_token: str | None
     openai_client_id: str | None
@@ -38,6 +39,7 @@ class Settings:
                 "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
             ).rstrip("/"),
             default_model=os.getenv("DEFAULT_MODEL", "openrouter/free"),
+            model_gateway=os.getenv("MODEL_GATEWAY", "openrouter"),
             max_model_calls_per_run=int(os.getenv("MAX_MODEL_CALLS_PER_RUN", "8")),
             api_auth_token=os.getenv("API_AUTH_TOKEN") or None,
             openai_client_id=os.getenv("OPENAI_CLIENT_ID") or None,

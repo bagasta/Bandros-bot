@@ -17,6 +17,14 @@ class ModelGateway(Protocol):
 
 
 @dataclass(slots=True)
+class MockGateway:
+    """Deterministic local gateway for browser and integration tests."""
+
+    async def complete(self, *, system: str, prompt: str, model: str, tools: Sequence[ToolDefinition] = ()) -> str:
+        return f"Mock response for: {prompt}"
+
+
+@dataclass(slots=True)
 class ChatGPTGateway:
     connection_provider: Callable[[], dict[str, Any] | None]
     refresh: Callable[[dict[str, Any]], Awaitable[str | None]] | None = None
