@@ -126,13 +126,36 @@ export default function GrokDashboard() {
       if (!botId) return;
       const run = await request<Run>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content }) });
       setActiveRunId(run.id);
-      let current = run;
-      for (let attempt = 0; attempt < 120 && ["queued", "running"].includes(current.status); attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        current = await request<Run>(`/runs/${run.id}`);
+      const response = await fetch(`${apiBase}/runs/${run.id}/events/stream`);
+      if (!response.ok || !response.body) throw new Error("Streaming Run tidak tersedia.");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed: Run | null = null;
+      while (!completed) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          const eventName = block.match(/^event: (.+)$/m)?.[1];
+          const data = block.match(/^data: (.+)$/m)?.[1];
+          if (!data) continue;
+          const parsed = JSON.parse(data) as { payload?: { content?: string } } & Run;
+          if (eventName === "assistant.delta") {
+            const streamedContent = parsed.payload?.content || "";
+            setMessages((current) => [
+              ...current.filter((message) => message.id !== `streaming-${run.id}`),
+              { id: `streaming-${run.id}`, role: "assistant", content: streamedContent },
+            ]);
+          } else if (eventName === "run.completed") {
+            completed = parsed;
+          }
+        }
       }
-      if (["queued", "running"].includes(current.status)) throw new Error("Run masih berjalan. Coba lagi sebentar.");
-      if (current.error) throw new Error(current.error);
+      if (!completed) throw new Error("Streaming berakhir sebelum Run selesai.");
+      if (completed.error) throw new Error(completed.error);
       if (selectedBot?.id !== botId) return;
       setMessages(await request<Message[]>(`/bots/${botId}/messages`));
     } catch (cause) {
