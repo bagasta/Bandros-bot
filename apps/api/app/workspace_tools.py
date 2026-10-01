@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -34,6 +35,7 @@ class WorkspaceToolset:
         start_child_run: Callable[[UUID], None],
         default_model: str = "openrouter/free",
         approved_tools: dict[str, list[dict[str, Any]]] | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.repository = repository
         self.run_id = run_id
@@ -42,6 +44,7 @@ class WorkspaceToolset:
         self.default_model = default_model
         self.policy = PolicyEngine()
         self.approved_tools = approved_tools or {}
+        self.workspace_root = (workspace_root or Path("/workspace")).resolve()
         self.skill_names = {skill.name for skill in repository.list_bot_skills(bot_id)}
 
     def definitions(self) -> list[ToolDefinition]:
@@ -55,6 +58,11 @@ class WorkspaceToolset:
             ToolDefinition("update_job", "Update a job. payload: {job_id, status?, title?, description?, priority?, assignee_bot_id?}", self.update_job, RiskClass.LOCAL_WRITE),
             ToolDefinition("handoff_to_bot", "Delegate a bounded task to another active Bot. payload: {target_bot_id, task}", self.handoff_to_bot, RiskClass.LOCAL_WRITE),
             ToolDefinition("post_to_group", "Post a work update to a group. payload: {group_id, content}", self.post_to_group, RiskClass.LOCAL_WRITE),
+            ToolDefinition("list_workspace_files", "List files under the persistent Bot workspace. payload: {path?}", self.list_workspace_files, RiskClass.READ_ONLY),
+            ToolDefinition("read_workspace_file", "Read a text file from the persistent Bot workspace. payload: {path}", self.read_workspace_file, RiskClass.READ_ONLY),
+            ToolDefinition("write_workspace_file", "Write a text file into the persistent Bot workspace. payload: {path, content}", self.write_workspace_file, RiskClass.LOCAL_WRITE),
+            ToolDefinition("list_memory", "Recall durable facts saved for this Bot. payload: {query?}", self.list_memory, RiskClass.READ_ONLY),
+            ToolDefinition("save_memory", "Save a durable preference or fact for future runs. payload: {kind, content}", self.save_memory, RiskClass.LOCAL_WRITE),
         ]
         return [self._audited(definition) for definition in definitions]
 
@@ -172,6 +180,52 @@ class WorkspaceToolset:
     async def post_to_group(self, payload: dict[str, Any]) -> dict[str, Any]:
         message = self.repository.append_group_message(UUID(self._text(payload, "group_id")), "bot", self._text(payload, "content"), self.bot_id)
         return {"ok": True, "message_id": str(message.id)}
+
+    def _workspace_path(self, value: str) -> Path:
+        candidate = (self.workspace_root / value).resolve()
+        if candidate != self.workspace_root and self.workspace_root not in candidate.parents:
+            raise ValueError("path must stay inside the Bot workspace")
+        return candidate
+
+    async def list_workspace_files(self, payload: dict[str, Any]) -> dict[str, Any]:
+        directory = self._workspace_path(str(payload.get("path", ".")))
+        if not directory.exists():
+            return {"ok": False, "error": "directory not found"}
+        if not directory.is_dir():
+            return {"ok": False, "error": "path is not a directory"}
+        entries = [
+            {"path": str(item.relative_to(self.workspace_root)), "type": "directory" if item.is_dir() else "file"}
+            for item in sorted(directory.iterdir(), key=lambda item: item.name.lower())[:200]
+        ]
+        return {"ok": True, "entries": entries}
+
+    async def read_workspace_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        path = self._workspace_path(self._text(payload, "path"))
+        if not path.is_file():
+            return {"ok": False, "error": "file not found"}
+        return {"ok": True, "path": str(path.relative_to(self.workspace_root)), "content": path.read_text(encoding="utf-8")[:100_000]}
+
+    async def write_workspace_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        path = self._workspace_path(self._text(payload, "path"))
+        content = str(payload.get("content", ""))
+        if len(content) > 100_000:
+            raise ValueError("file content exceeds 100000 characters")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return {"ok": True, "path": str(path.relative_to(self.workspace_root)), "characters": len(content)}
+
+    async def list_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
+        query = str(payload.get("query", "")).strip().lower()
+        memories = self.repository.list_memories(self.bot_id)
+        if query:
+            memories = [memory for memory in memories if query in f"{memory.kind} {memory.content}".lower()]
+        return {"ok": True, "memories": [{"id": str(memory.id), "kind": memory.kind, "content": memory.content} for memory in memories[:50]]}
+
+    async def save_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
+        kind = self._text(payload, "kind")[:100]
+        content = self._text(payload, "content")[:10_000]
+        memory = self.repository.add_memory(self.bot_id, kind, content)
+        return {"ok": True, "memory_id": str(memory.id), "kind": memory.kind}
 
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:

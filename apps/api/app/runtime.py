@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from uuid import UUID
 
 from .domain import ApprovalStatus, BotStatus, RunStatus
@@ -16,6 +17,7 @@ class RunRuntime:
     model_gateway: ModelGateway
     default_model: str
     max_model_calls: int
+    workspace_root: Path = Path("/workspace")
     _tasks: dict[UUID, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _approved_tools: dict[UUID, dict[str, list[dict[str, object]]]] = field(default_factory=dict, init=False)
 
@@ -43,6 +45,7 @@ class RunRuntime:
             self.start,
             self.default_model,
             self._approved_tools.pop(run_id, {}),
+            self.workspace_root,
         )
         try:
             history = self.repository.list_messages(run.conversation_id, limit=50)
@@ -126,13 +129,20 @@ class RunRuntime:
         colleagues = ", ".join(f"{item.name}: {item.description or 'tanpa peran'}" for item in bots if item.status is BotStatus.ACTIVE)
         job_list = ", ".join(f"{job.title} [{job.status}]" for job in jobs) or "tidak ada"
         group_list = ", ".join(groups) or "tidak ada"
-        return f"Rekan kerja aktif: {colleagues or 'tidak ada'}. Job Anda: {job_list}. Grup Anda: {group_list}."
+        memories = self.repository.list_memories(bot_id)
+        memory_list = "; ".join(f"{memory.kind}: {memory.content}" for memory in memories[:20]) or "belum ada"
+        return (
+            f"Rekan kerja aktif: {colleagues or 'tidak ada'}. Job Anda: {job_list}. "
+            f"Grup Anda: {group_list}. Memori Bot: {memory_list}."
+        )
 
     @staticmethod
     def _system_prompt(instructions: str, description: str = "", environment: str = "", skill_names: set[str] | None = None) -> str:
         return (
-            "You are a persistent AI teammate. Follow the Bot instructions and return a concise, "
-            "reviewable answer. Do not claim that you executed an action you did not execute.\n\n"
+            "You are a persistent AI teammate, similar to a durable Grok Bot teammate. "
+            "Follow the Bot instructions and return a concise, reviewable answer. "
+            "Use the workspace and memory tools when they help, and never claim an action "
+            "was completed unless a tool returned success.\n\n"
             f"Bot's main responsibility:\n{description or 'Help the user with the task they provide.'}\n\n"
             f"Bot instructions:\n{instructions}\n\n"
             f"Environment knowledge:\n{environment}\n\n"

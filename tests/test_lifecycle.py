@@ -135,3 +135,34 @@ def test_stop_marks_run_cancelled(tmp_path: Path) -> None:
     asyncio.run(execute())
     assert repository.get_run(run.id).status is RunStatus.CANCELLED
     assert repository.list_events(run.id)[-1].type == "run.cancelled"
+
+
+def test_bot_workspace_tools_persist_files_and_memory(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "workspace.db")
+    bot = repository.create_bot("Builder", "", "", None)
+    run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Build", "test-model")
+    tools = WorkspaceToolset(repository, run.id, bot.id, lambda _: None, workspace_root=tmp_path / "computer")
+    definitions = {tool.name: tool for tool in tools.definitions()}
+
+    saved = asyncio.run(definitions["write_workspace_file"].handler({"path": "notes/plan.md", "content": "Ship it"}))
+    loaded = asyncio.run(definitions["read_workspace_file"].handler({"path": "notes/plan.md"}))
+    memory = asyncio.run(definitions["save_memory"].handler({"kind": "preference", "content": "Use concise updates"}))
+    recalled = asyncio.run(definitions["list_memory"].handler({"query": "concise"}))
+
+    assert saved["ok"] is True
+    assert loaded["content"] == "Ship it"
+    assert memory["ok"] is True
+    assert recalled["memories"][0]["content"] == "Use concise updates"
+
+
+def test_bot_workspace_tools_reject_path_escape(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "workspace.db")
+    bot = repository.create_bot("Builder", "", "", None)
+    run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Build", "test-model")
+    tools = WorkspaceToolset(repository, run.id, bot.id, lambda _: None, workspace_root=tmp_path / "computer")
+    write = next(tool for tool in tools.definitions() if tool.name == "write_workspace_file")
+
+    result = asyncio.run(write.handler({"path": "../outside.txt", "content": "nope"}))
+
+    assert result["ok"] is False
+    assert "inside" in result["error"]

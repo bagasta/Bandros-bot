@@ -23,7 +23,7 @@ python -m venv .venv
 
 API tersedia di `http://127.0.0.1:8000`, dengan dokumentasi di `/docs`. Tambahkan `OPENROUTER_API_KEY` ke `.env`. Backend memuat `.env` dari root proyek otomatis (dan perintah di atas juga menyertakan `--env-file .env` untuk Uvicorn).
 
-The application never passes the OpenRouter credential into a sandbox. This initial slice does not execute shell commands or external actions; approval records and run recovery are in place before those tool executors are added.
+The application never passes the OpenRouter credential into a sandbox. Each Bot can use a persistent workspace rooted at `WORKSPACE_ROOT` to list, read, and write text files, and can save or recall durable Bot memory. External or destructive actions still require explicit approval.
 
 ## Jalankan frontend
 

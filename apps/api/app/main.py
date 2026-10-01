@@ -36,6 +36,7 @@ runtime = RunRuntime(
     ),
     default_model=settings.default_model,
     max_model_calls=settings.max_model_calls_per_run,
+    workspace_root=settings.workspace_root,
 )
 policy = PolicyEngine()
 oauth_states: dict[str, tuple[str, datetime, str, str, str]] = {}
