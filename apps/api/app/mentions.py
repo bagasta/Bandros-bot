@@ -27,6 +27,42 @@ def addresses_everyone(text: str) -> bool:
     return "@all" in lowered or "@semua" in lowered
 
 
+def asks_roll_call(text: str) -> bool:
+    """The user wants every other member to answer, as in a Grok group check-in."""
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "masing",
+            "tiap",
+            "setiap",
+            "semua bot",
+            "each bot",
+            "mention mereka",
+            "mention semua",
+            "sebut mereka",
+            "sebut semua",
+        )
+    )
+
+
+def is_status_report(text: str) -> bool:
+    lowered = text.strip().lower()
+    return lowered.startswith("siap") or lowered.startswith("idle") or "reply singkat status" in lowered
+
+
+def with_roll_call_mentions(answer: str, members: list[Bot], sender: Bot) -> str:
+    others = [member for member in members if member.id != sender.id]
+    mentioned = {member.id for member in mentioned_bots(answer, others)}
+    missing = [member for member in others if member.id not in mentioned]
+    if not missing:
+        return answer
+    tags = " ".join(f"@{member.name}" for member in missing)
+    if not mentioned:
+        return f"Cek siap — reply singkat status kamu: {tags}"
+    return f"{answer.rstrip()}\n{tags}"
+
+
 def lead_bot(members: list[Bot]) -> Bot:
     orchestrator = next((member for member in members if member.name.lower() == ORCHESTRATOR_NAME.lower()), None)
     if orchestrator is not None:
@@ -45,6 +81,9 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "") -> str:
         "Ini chat grup. Bot lain hanya bereaksi bila pesan memuat @Nama mereka.",
         "Kalau kamu memberi tugas, satu balasan wajib menyebut @Nama dari daftar anggota. Jangan handoff dan jangan posting ulang.",
         "Kalau kamu yang disebut, kerjakan tugasnya dan laporkan hasilnya. Jangan menyalin pesan sebelumnya dan jangan mulai dengan nama pengirim.",
+        "Kalau pengguna minta cek tiap bot, sebut setiap anggota lain dengan @Nama. Jangan mengarang status mereka.",
+        "Kalau kamu diminta reply status, satu kalimat: Siap @Bandros — status singkatmu.",
+        "Kalau rekan hanya mengirim status, balas (diam).",
         "Kalau pesan ini bukan untukmu, balas (diam).",
     ]
     if transcript.strip():

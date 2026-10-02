@@ -137,6 +137,33 @@ def test_create_group_tool_joins_the_caller_and_named_bot(tmp_path: Path) -> Non
     assert [member.name for member in group.members] == ["Manager", "Bot Riset"]
 
 
+def test_roll_call_mentions_every_teammate_and_their_status_does_not_bounce(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "rollcall.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    backend = repository.create_bot("Backend", "Membuat API.", "TOKEN:backend", None)
+    group = repository.create_group("Tim Frontend & Backend", "", [bandros.id, frontend.id, backend.id])
+    text = "@Bandros cek kesiapan masing2 bot"
+    repository.append_group_message(group.id, "user", text)
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:bandros": "Frontend aktif. Backend aktif.",
+            "TOKEN:frontend": "Siap @Bandros — antarmuka siap.",
+            "TOKEN:backend": "Siap @Bandros — API siap.",
+        }),
+        "test-model",
+        3,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    messages = repository.list_group_messages(group.id)
+    assert "@Frontend" in messages[1].content and "@Backend" in messages[1].content
+    assert "Frontend aktif" not in messages[1].content
+    assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, backend.id]
+
+
 def test_group_run_delegates_only_by_mention(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "group.db")
     bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)

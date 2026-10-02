@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from .domain import ApprovalStatus, BotStatus, RunStatus
-from .mentions import addresses_everyone, group_prompt, is_silence, lead_bot, mentioned_bots
+from .mentions import addresses_everyone, asks_roll_call, group_prompt, is_silence, is_status_report, lead_bot, mentioned_bots, with_roll_call_mentions
 from .model_gateway import ModelGateway
 from .repository import Repository
 from .workspace_tools import WorkspaceToolset
@@ -96,9 +96,11 @@ class RunRuntime:
         if current.stop_requested:
             self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
             return
+        group_id = self.repository.group_for_run(run_id)
+        if group_id and not is_silence(answer):
+            answer = self._mention_teammates_for_roll_call(group_id, bot, answer, self._group_depth.get(run_id, 0))
         self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
         self.repository.append_message(run.conversation_id, "assistant", answer, model=run.model)
-        group_id = self.repository.group_for_run(run_id)
         if group_id and not is_silence(answer):
             recent = self.repository.list_group_messages(group_id)
             already_posted = bool(recent) and recent[-1].sender_bot_id == bot.id and recent[-1].content.strip() == answer.strip()
@@ -172,6 +174,9 @@ class RunRuntime:
             targets = mentioned_bots(content, members)
         if sender_bot_id is not None:
             targets = [member for member in targets if member.id != sender_bot_id]
+            if is_status_report(content):
+                lead = lead_bot(members)
+                targets = [member for member in targets if member.id != lead.id]
         elif not targets and members:
             targets = [lead_bot(members)]
         messages = self.repository.list_group_messages(group_id)
@@ -192,6 +197,19 @@ class RunRuntime:
             self.repository.link_run_to_group(run.id, group_id)
             self._group_depth[run.id] = depth
             await self.start_and_wait(run.id)
+
+    def _mention_teammates_for_roll_call(self, group_id: UUID, bot, answer: str, depth: int) -> str:
+        if depth != 0:
+            return answer
+        group = self.repository.get_group(group_id)
+        members = [member for member in group.members if member.status is BotStatus.ACTIVE]
+        if not members or lead_bot(members).id != bot.id:
+            return answer
+        messages = self.repository.list_group_messages(group_id)
+        user_text = next((message.content for message in reversed(messages) if message.sender_type == "user"), "")
+        if not asks_roll_call(user_text):
+            return answer
+        return with_roll_call_mentions(answer, members, bot)
 
     def _environment_context(self, bot_id: UUID) -> str:
         bots = self.repository.list_bots()
@@ -241,6 +259,8 @@ class RunRuntime:
             "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
             "One to three short sentences. Do not recap that you already delegated or posted. "
             "If you were mentioned, do the task and report the result. Do not quote the previous speaker or start with their name. "
+            "When the user asks to check each bot or mention each bot, mention every other member with @Name and ask for a one-line status. Do not invent their status. "
+            "When a teammate only reports status, reply (diam). "
             "Do not say a group tool is missing. "
             "Never claim a file, memory, job, bot, group, or handoff exists unless the tool result says ok. "
             "If a tool requires approval, stop and say exactly what needs approval. "
