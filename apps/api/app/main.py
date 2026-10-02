@@ -888,6 +888,8 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
         raise not_found(error) from error
     activity: list[GroupActivity] = []
     for run in repository.runs_for_group(group_id):
+        if not _run_is_live(run.id):
+            continue
         bot = repository.get_bot(run.bot_id)
         activity.append(GroupActivity(bot_id=bot.id, name=bot.name, status=str(run.status)))
     return activity
@@ -951,9 +953,15 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
             release_snapshot(database_path)
 
     try:
+        scheduled = False
         if running_on_vercel():
-            await continue_after_response(speak())
-        else:
+            from vercel.cache.context import get_context
+            from vercel.functions import wait_until
+
+            if get_context().wait_until is not None:
+                wait_until(speak())
+                scheduled = True
+        if not scheduled:
             asyncio.create_task(speak())
     except Exception:
         release_snapshot(database_path)

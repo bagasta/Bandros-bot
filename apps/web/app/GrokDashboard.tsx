@@ -310,7 +310,11 @@ export default function GrokDashboard() {
           request<GroupActivity[]>(`/groups/${groupId}/activity`),
         ]);
         if (!active) return;
-        setGroupMessages((current) => (hasOlderMessages(current, nextMessages) ? current : nextMessages));
+        setGroupMessages((current) => {
+          if (hasOlderMessages(current, nextMessages)) return current;
+          const pending = current.filter((item) => item.id.startsWith("local-") && !nextMessages.some((message) => message.sender_type === item.sender_type && message.content === item.content));
+          return [...nextMessages, ...pending];
+        });
         setTypingNames(activity.map((item) => item.name));
       } catch {
         /* Poll lagi pada interval berikutnya. */
@@ -339,7 +343,7 @@ export default function GrokDashboard() {
     try {
       if (selectedGroup) {
         const groupId = selectedGroup.id;
-        setGroupMessages((current) => [...current, { id: `local-${Date.now()}`, sender_type: "user", sender_bot_id: null, content }]);
+        setGroupMessages((current) => [...current, { id: `local-${Date.now()}`, sender_type: "user", sender_bot_id: null, content, created_at: new Date().toISOString() }]);
         await request<GroupMessage>(`/groups/${groupId}/messages`, { method: "POST", body: JSON.stringify({ content }) });
         const [nextMessages, nextGroups] = await Promise.all([
           request<GroupMessage[]>(`/groups/${groupId}/messages`),

@@ -123,3 +123,45 @@ def test_old_snapshot_cannot_erase_a_reply(tmp_path: Path, monkeypatch) -> None:
     assert any(message["content"] == "Mock response for: halo" for message in stale.json())
     assert int(stale.headers["X-Bandros-Snapshot-Rev"]) > int(listed.headers["X-Bandros-Snapshot-Rev"])
     main._workspaces.clear()
+
+
+def test_group_message_is_accepted_before_bots_reply(tmp_path: Path, monkeypatch) -> None:
+    import time
+
+    monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.setattr(main, "running_on_vercel", lambda: True)
+
+    async def slow_reply(self, group_id, content, sender_bot_id, depth) -> None:
+        await asyncio.sleep(3)
+
+    monkeypatch.setattr(main.RunRuntime, "speak_in_group", slow_reply)
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(
+            main.settings,
+            database_path=tmp_path / "workspace.db",
+            workspace_root=tmp_path / "workspace",
+            await_runs=True,
+        ),
+    )
+    main._workspaces.clear()
+    asyncio.run(main.credential_store.put("sessions", "token-group", {"auth_mode": "codex", "account_id": "acct_group_send", "access_token": "a"}))
+    headers = {"X-Bandros-Session": "token-group"}
+
+    with TestClient(main.app) as client:
+        listed = client.get("/api/v1/bots", headers=headers)
+        bandros = next(bot["id"] for bot in listed.json() if bot["name"] == "Bandros")
+        created = client.post("/api/v1/groups", headers=headers, json={"name": "Tim", "description": "", "member_bot_ids": [bandros]})
+        started = time.perf_counter()
+        sent = client.post(f"/api/v1/groups/{created.json()['id']}/messages", headers=headers, json={"content": "halo tim"})
+        elapsed = time.perf_counter() - started
+        messages = client.get(f"/api/v1/groups/{created.json()['id']}/messages", headers=headers)
+
+    assert created.status_code == 201
+    assert sent.status_code == 201
+    assert sent.json()["content"] == "halo tim"
+    assert elapsed < 1.5
+    assert any(message["content"] == "halo tim" for message in messages.json())
+    main._workspaces.clear()
