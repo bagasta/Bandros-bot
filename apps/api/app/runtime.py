@@ -84,22 +84,25 @@ class RunRuntime:
                 if context else run.prompt
             )
             skills = self.repository.list_bot_skills(bot.id)
-            answer = await self.model_gateway.complete(
-                system=self._system_prompt(
-                    bot.instructions,
-                    bot.description,
-                    self._environment_context(bot.id),
-                    skills,
-                    in_group=self.repository.group_for_run(run_id) is not None,
+            answer = await asyncio.wait_for(
+                self.model_gateway.complete(
+                    system=self._system_prompt(
+                        bot.instructions,
+                        bot.description,
+                        self._environment_context(bot.id),
+                        skills,
+                        in_group=self.repository.group_for_run(run_id) is not None,
+                    ),
+                    prompt=prompt,
+                    model=run.model,
+                    tools=toolset.definitions(),
+                    request_limit=self.max_model_calls,
                 ),
-                prompt=prompt,
-                model=run.model,
-                tools=toolset.definitions(),
-                request_limit=self.max_model_calls,
+                timeout=150,
             )
         except Exception as error:
-            self.repository.update_run(run_id, RunStatus.FAILED_RETRYABLE, str(error))
-            self._resolve_handoffs(run_id, str(error), success=False)
+            message = "Balasan terlalu lama. Kirim ulang." if isinstance(error, TimeoutError) else (str(error).strip() or "Balasan gagal.")
+            self._finish_failed_run(run_id, run.conversation_id, message)
             return
 
         current = self.repository.get_run(run_id)
@@ -134,8 +137,18 @@ class RunRuntime:
         self._resolve_handoffs(run_id, answer, success=True)
         await self.drain_group_wakes()
 
-    def recover(self) -> int:
-        """Make interrupted work recoverable after an API restart."""
+    def _finish_failed_run(self, run_id: UUID, conversation_id: UUID, message: str) -> None:
+        try:
+            self.repository.append_message(conversation_id, "assistant", message[:500])
+            self.repository.update_run(run_id, RunStatus.FAILED, message[:500])
+        except Exception:
+            return
+        self._resolve_handoffs(run_id, message[:500], success=False)
+
+    def recover(self, *, resume: bool = True) -> int:
+        """Resume interrupted work locally. On a serverless copy, close it so the user can send again."""
+        if not resume:
+            return self.repository.fail_orphaned_runs()
         run_ids = self.repository.recover_incomplete_runs()
         for run_id in run_ids:
             self.start(run_id)

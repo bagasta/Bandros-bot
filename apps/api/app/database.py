@@ -7,12 +7,16 @@ import base64
 import gzip
 import os
 import sqlite3
+import tempfile
+import threading
 from typing import Iterator
 
 _LOADED_DATABASE: ContextVar[str | None] = ContextVar("bandros_loaded_database", default=None)
 _SNAPSHOT_READY: ContextVar[str | None] = ContextVar("bandros_snapshot_ready", default=None)
 _SNAPSHOT_LIMIT = 2_000_000
 _DATABASE_BLOB_PATH = "state/workspace.db"
+_HOLD_LOCK = threading.Lock()
+_SNAPSHOT_HOLDS: dict[str, int] = {}
 
 
 SCHEMA = """
@@ -176,6 +180,10 @@ CREATE TABLE IF NOT EXISTS oauth_transactions (
     host_id TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workspace_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -268,6 +276,8 @@ class Database:
             connection.execute("PRAGMA foreign_keys = ON")
             changes = connection.total_changes
             yield connection
+            if connection.total_changes != changes:
+                _bump_revision(connection)
             connection.commit()
             if connection.total_changes != changes:
                 self.push()
@@ -294,12 +304,90 @@ def decode_snapshot(value: str) -> bytes | None:
     return raw
 
 
+def _mark_snapshot_ready(path: Path) -> None:
+    _SNAPSHOT_READY.set(str(path))
+    _LOADED_DATABASE.set(None)
+
+
+def database_revision(path: Path) -> int:
+    if not path.is_file():
+        return -1
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return 0
+    try:
+        row = connection.execute("SELECT value FROM workspace_meta WHERE key = 'revision'").fetchone()
+    except sqlite3.Error:
+        return 0
+    finally:
+        connection.close()
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def snapshot_revision(raw: bytes) -> int:
+    handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    handle.close()
+    temp = Path(handle.name)
+    try:
+        temp.write_bytes(raw)
+        return database_revision(temp)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def snapshot_held(path: Path) -> bool:
+    with _HOLD_LOCK:
+        return _SNAPSHOT_HOLDS.get(str(path), 0) > 0
+
+
+def hold_snapshot(path: Path) -> None:
+    with _HOLD_LOCK:
+        key = str(path)
+        _SNAPSHOT_HOLDS[key] = _SNAPSHOT_HOLDS.get(key, 0) + 1
+
+
+def release_snapshot(path: Path) -> None:
+    with _HOLD_LOCK:
+        key = str(path)
+        remaining = _SNAPSHOT_HOLDS.get(key, 0) - 1
+        if remaining <= 0:
+            _SNAPSHOT_HOLDS.pop(key, None)
+        else:
+            _SNAPSHOT_HOLDS[key] = remaining
+
+
+def _bump_revision(connection: sqlite3.Connection) -> None:
+    connection.execute("CREATE TABLE IF NOT EXISTS workspace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    connection.execute(
+        """
+        INSERT INTO workspace_meta (key, value) VALUES ('revision', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST((CAST(value AS INTEGER) + 1) AS TEXT)
+        """
+    )
+
+
 def stage_snapshot(path: Path, encoded: str) -> bool:
     raw = decode_snapshot(encoded)
     if raw is None:
         return False
+    if snapshot_held(path):
+        _mark_snapshot_ready(path)
+        return False
+    if path.is_file():
+        disk_rev = database_revision(path)
+        snap_rev = snapshot_revision(raw)
+        # A legacy snapshot has no revision. Accept it when nothing is in flight.
+        # A numbered snapshot must never roll the file backwards.
+        if snap_rev > 0 and disk_rev > snap_rev:
+            _mark_snapshot_ready(path)
+            return False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
-    _SNAPSHOT_READY.set(str(path))
-    _LOADED_DATABASE.set(None)
+    _mark_snapshot_ready(path)
     return True

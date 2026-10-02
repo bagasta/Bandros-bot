@@ -231,7 +231,7 @@ async def run_pydantic_agent(
     from pydantic_ai import Agent
     from pydantic_ai.usage import UsageLimits
 
-    agent = Agent(model, instructions=system, retries=3)
+    agent = Agent(model, instructions=system, retries=0)
     for definition in tools:
         agent._function_toolset.add_tool(_tool(definition))
     result = await agent.run(

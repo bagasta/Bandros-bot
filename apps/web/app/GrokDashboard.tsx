@@ -50,10 +50,20 @@ function workspaceKey(session: string | null): string {
   return session ? `bandros_workspace:${session.slice(0, 80)}` : "";
 }
 
+function revisionKey(session: string | null): string {
+  return session ? `bandros_workspace_rev:${session.slice(0, 80)}` : "";
+}
+
 function rememberSnapshot(session: string | null, response: Response) {
   const key = workspaceKey(session);
+  const revKey = revisionKey(session);
   const snapshot = response.headers.get("X-Bandros-Snapshot");
-  if (key && snapshot) window.localStorage.setItem(key, snapshot);
+  if (!key || !snapshot) return;
+  const rev = Number(response.headers.get("X-Bandros-Snapshot-Rev") || "0");
+  const prev = Number(window.localStorage.getItem(revKey) || "0");
+  if (rev < prev) return;
+  window.localStorage.setItem(key, snapshot);
+  window.localStorage.setItem(revKey, String(rev));
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -114,7 +124,10 @@ export default function GrokDashboard() {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  const workingRef = useRef(false);
+  const shownRunError = useRef<string | null>(null);
   const selectedGroupId = useRef<string | null>(null);
+  workingRef.current = working;
   selectedGroupId.current = selectedGroup?.id ?? null;
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
@@ -246,12 +259,20 @@ export default function GrokDashboard() {
       try {
         const [nextMessages, activity] = await Promise.all([
           request<Message[]>(`/bots/${botId}/messages`),
-          request<{ working: boolean }>(`/bots/${botId}/activity`),
+          request<{ working: boolean; error?: string | null }>(`/bots/${botId}/activity`),
         ]);
         if (!active) return;
         const visible = nextMessages.filter((message) => message.role !== "group");
-        setMessages((current) => (hasOlderMessages(current, visible) ? current : visible));
+        setMessages((current) => {
+          if (hasOlderMessages(current, visible)) return current;
+          const pending = current.filter((item) => item.id.startsWith("local-") && !visible.some((message) => message.role === item.role && message.content === item.content));
+          return [...visible, ...pending];
+        });
         setBotWorking(activity.working);
+        if (activity.error && !workingRef.current && shownRunError.current !== activity.error) {
+          shownRunError.current = activity.error;
+          setError(activity.error);
+        }
       } catch {
         /* Poll lagi pada interval berikutnya. */
       }
@@ -321,11 +342,15 @@ export default function GrokDashboard() {
       const botId = selectedBot?.id;
       if (!botId) return;
       const model = modelByBot[botId] ?? selectedBot?.model ?? null;
+      setMessages((current) => [...current, { id: `local-${Date.now()}`, role: "user", content }]);
       const run = await request<Run>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content, model }) });
       setActiveRunId(run.id);
       if (["completed", "failed", "failed_retryable", "cancelled"].includes(run.status)) {
-        if (run.error) throw new Error(run.error);
-        setMessages(await request<Message[]>(`/bots/${botId}/messages`));
+        if (selectedBot?.id !== botId) return;
+        const nextMessages = await request<Message[]>(`/bots/${botId}/messages`);
+        setMessages(nextMessages.filter((message) => message.role !== "group"));
+        if (run.error) setError(run.error);
+        void loadBots();
         return;
       }
       const session = window.localStorage.getItem("bandros_chatgpt_session");

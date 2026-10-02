@@ -8,6 +8,7 @@ import json
 import base64
 import hashlib
 import secrets
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncIterator
 from uuid import UUID
@@ -22,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .database import Database, encode_snapshot, stage_snapshot
+from .database import Database, database_revision, encode_snapshot, hold_snapshot, release_snapshot, stage_snapshot
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
@@ -207,7 +208,7 @@ def activate_account(account_id: str) -> tuple[object, object]:
             max_model_calls=settings.max_model_calls_per_run,
             workspace_root=files,
         )
-        workspace_runtime.recover()
+        workspace_runtime.recover(resume=not settings.await_runs)
         pair = (repo, workspace_runtime)
         _workspaces[digest] = pair
     return current_repository.set(pair[0]), current_runtime.set(pair[1])
@@ -227,7 +228,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Bandros-Session", "X-Bandros-Snapshot"],
-    expose_headers=["X-Bandros-Snapshot"],
+    expose_headers=["X-Bandros-Snapshot", "X-Bandros-Snapshot-Rev"],
 )
 
 
@@ -240,6 +241,21 @@ _PUBLIC_PATHS = {
     "/api/v1/auth/chatgpt/start",
     "/api/v1/auth/chatgpt/callback",
 }
+
+
+_STAGE_LOCK = threading.Lock()
+
+
+def _account_database_path(account_id: str):
+    return tenant_locations(account_id, settings.database_path.parent, settings.workspace_root)[0]
+
+
+def _active_account_id() -> str:
+    connection = _chatgpt_connection()
+    account_id = connection.get("account_id") if connection else None
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise HTTPException(status_code=401, detail="Masuk dengan ChatGPT dulu.")
+    return account_id
 
 
 @app.middleware("http")
@@ -255,6 +271,7 @@ async def optional_auth(request: Request, call_next):
     runtime_token = None
     public_path = request.url.path in _PUBLIC_PATHS
     account_id = None
+    held_path = None
     try:
         if settings.api_auth_token and not public_path and request.method != "OPTIONS":
             expected = f"Bearer {settings.api_auth_token}"
@@ -265,28 +282,26 @@ async def optional_auth(request: Request, call_next):
             account_id = connection.get("account_id") if connection else None
             if not isinstance(account_id, str) or not account_id.strip():
                 return JSONResponse({"detail": "Masuk dengan ChatGPT dulu."}, status_code=401)
+            database_path = _account_database_path(account_id)
             snapshot = request.headers.get("X-Bandros-Snapshot")
-            if snapshot:
-                database_path, _, _ = tenant_locations(
-                    account_id,
-                    settings.database_path.parent,
-                    settings.workspace_root,
-                )
-                stage_snapshot(database_path, snapshot)
+            with _STAGE_LOCK:
+                if snapshot:
+                    stage_snapshot(database_path, snapshot)
+                hold_snapshot(database_path)
+                held_path = database_path
             repository_token, runtime_token = activate_account(account_id)
         response = await call_next(request)
         if not public_path and request.method != "OPTIONS" and isinstance(account_id, str) and account_id.strip():
-            database_path, _, _ = tenant_locations(
-                account_id,
-                settings.database_path.parent,
-                settings.workspace_root,
-            )
+            database_path = _account_database_path(account_id)
             if database_path.is_file():
                 encoded = encode_snapshot(database_path.read_bytes())
                 if len(encoded) <= 400_000:
                     response.headers["X-Bandros-Snapshot"] = encoded
+                    response.headers["X-Bandros-Snapshot-Rev"] = str(database_revision(database_path))
         return response
     finally:
+        if held_path is not None:
+            release_snapshot(held_path)
         if repository_token is not None:
             current_repository.reset(repository_token)
         if runtime_token is not None:
@@ -877,12 +892,33 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
 
 
 @app.get("/api/v1/bots/{bot_id}/activity", response_model=BotActivity)
+def _run_is_live(run_id: UUID) -> bool:
+    task = runtime._tasks.get(run_id)
+    return task is not None and not task.done()
+
+
 def bot_activity(bot_id: UUID) -> BotActivity:
     try:
         repository.get_bot(bot_id)
+        conversation_id = repository.conversation_for_bot(bot_id)
     except KeyError as error:
         raise not_found(error) from error
-    return BotActivity(working=bool(repository.active_runs_for_bot(bot_id)))
+    active = repository.active_runs_for_bot(bot_id)
+    if any(_run_is_live(run.id) for run in active):
+        return BotActivity(working=True)
+    if active:
+        return BotActivity(working=False, error="Balasan terputus. Kirim ulang pesan.")
+    messages = repository.list_messages(conversation_id)
+    latest = repository.latest_run_for_bot(bot_id)
+    if (
+        messages
+        and messages[-1].role == "user"
+        and latest is not None
+        and latest.status in {RunStatus.FAILED, RunStatus.FAILED_RETRYABLE, RunStatus.CANCELLED}
+        and latest.error
+    ):
+        return BotActivity(working=False, error=latest.error)
+    return BotActivity(working=False)
 
 
 @app.get("/api/v1/groups/{group_id}/messages", response_model=list[GroupMessage])
@@ -900,7 +936,20 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
         message = repository.append_group_message(group_id, "user", payload.content)
     except KeyError as error:
         raise not_found(error) from error
-    await continue_after_response(runtime.speak_in_group(group_id, payload.content, None, 0))
+    database_path = _account_database_path(_active_account_id())
+    hold_snapshot(database_path)
+
+    async def speak() -> None:
+        try:
+            await runtime.speak_in_group(group_id, payload.content, None, 0)
+        finally:
+            release_snapshot(database_path)
+
+    try:
+        await continue_after_response(speak())
+    except Exception:
+        release_snapshot(database_path)
+        raise
     return message
 
 

@@ -222,6 +222,27 @@ class Repository:
             ).fetchall()
         return [UUID(row["id"]) for row in rows]
 
+    def fail_orphaned_runs(self) -> int:
+        """Close runs whose server process is gone so the chat can show a reply instead of typing forever."""
+        notice = "Balasan terputus. Kirim ulang pesan."
+        with self.database.connection() as db:
+            rows = db.execute(
+                "SELECT id, conversation_id FROM runs WHERE status IN (?, ?)",
+                (RunStatus.QUEUED, RunStatus.RUNNING),
+            ).fetchall()
+        for row in rows:
+            self.append_message(UUID(row["conversation_id"]), "assistant", notice)
+            self.update_run(UUID(row["id"]), RunStatus.FAILED, notice)
+        return len(rows)
+
+    def latest_run_for_bot(self, bot_id: UUID) -> Run | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                "SELECT * FROM runs WHERE bot_id = ? ORDER BY created_at DESC LIMIT 1",
+                (str(bot_id),),
+            ).fetchone()
+        return self._run(row) if row else None
+
     def record_event(self, run_id: UUID, type_: str, payload: dict[str, Any]) -> RunEvent:
         timestamp = now()
         with self.database.connection() as db:
