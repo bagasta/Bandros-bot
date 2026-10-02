@@ -33,6 +33,12 @@ type DeviceFlow = {
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
 
+function hasOlderMessages<T extends { id: string }>(current: T[], next: T[]): boolean {
+  const nextIds = new Set(next.map((item) => item.id));
+  const kept = current.filter((item) => !item.id.startsWith("local-"));
+  return kept.some((item) => !nextIds.has(item.id)) && next.length < kept.length;
+}
+
 const quickPrompts = [
   "Analisis performa semua Bot",
   "Buat Bot baru untuk riset LinkedIn",
@@ -94,6 +100,7 @@ export default function GrokDashboard() {
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
 
@@ -218,7 +225,8 @@ export default function GrokDashboard() {
           request<{ working: boolean }>(`/bots/${botId}/activity`),
         ]);
         if (!active) return;
-        setMessages(nextMessages.filter((message) => message.role !== "group"));
+        const visible = nextMessages.filter((message) => message.role !== "group");
+        setMessages((current) => (hasOlderMessages(current, visible) ? current : visible));
         setBotWorking(activity.working);
       } catch {
         /* Poll lagi pada interval berikutnya. */
@@ -244,7 +252,7 @@ export default function GrokDashboard() {
           request<GroupActivity[]>(`/groups/${groupId}/activity`),
         ]);
         if (!active) return;
-        setGroupMessages(nextMessages);
+        setGroupMessages((current) => (hasOlderMessages(current, nextMessages) ? current : nextMessages));
         setTypingNames(activity.map((item) => item.name));
       } catch {
         /* Poll lagi pada interval berikutnya. */
@@ -256,13 +264,19 @@ export default function GrokDashboard() {
   }, [selectedGroup, chatGPT.connected]);
 
   useEffect(() => {
-    chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, groupMessages, working]);
+    stickToBottom.current = true;
+  }, [selectedBot?.id, selectedGroup?.id]);
+  useEffect(() => {
+    const node = chatRef.current;
+    if (!node || !stickToBottom.current) return;
+    node.scrollTop = node.scrollHeight;
+  }, [messages, groupMessages]);
 
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
     if ((!selectedBot && !selectedGroup) || !prompt.trim() || working || (selectedGroup && typingNames.length > 0)) return;
     const content = prompt.trim();
+    stickToBottom.current = true;
     setPrompt(""); setWorking(true); setError(null);
     try {
       if (selectedGroup) {
@@ -493,7 +507,10 @@ export default function GrokDashboard() {
   };
 
   const mentionSuggestions = selectedGroup && mentionQuery !== null
-    ? selectedGroup.members.filter((member) => member.name.toLowerCase().includes(mentionQuery.toLowerCase()))
+    ? [
+        ...("everyone".includes(mentionQuery.toLowerCase()) ? [{ id: "everyone", name: "everyone" }] : []),
+        ...selectedGroup.members.filter((member) => member.name.toLowerCase().includes(mentionQuery.toLowerCase())),
+      ]
     : [];
 
   const insertMention = (name: string) => {
@@ -562,7 +579,11 @@ export default function GrokDashboard() {
           </select>}
         </header>
         {error && <div className="bandros-alert" role="alert">{error}<button aria-label="Tutup notifikasi" onClick={() => setError(null)}>×</button></div>}
-        <div className="bandros-chat" ref={chatRef}>
+        <div className="bandros-chat" ref={chatRef} onScroll={() => {
+          const node = chatRef.current;
+          if (!node) return;
+          stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+        }}>
           {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>{selectedBot?.name.toLowerCase() === "bandros" ? "Bandros adalah orkestrator. Minta dia membuat Bot spesialis; dia yang menulis tugas, cara kerja, output, dan batasannya." : `Kirim satu tugas yang selesai jelas. ${displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.`}</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"}</span>{message.sender_type === "user" ? <p className="bandros-bubble">{message.content}</p> : <div className="bandros-bubble">{renderMarkdown(message.content, selectedGroup.members.map((member) => member.name))}</div>}</article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.role === "user" ? "Kamu" : displayName}</span>{message.role === "user" ? <p className="bandros-bubble">{message.content}</p> : <div className="bandros-bubble">{renderMarkdown(message.content)}</div>}</article>)}
           {typingLabel && <p className="bandros-working">{typingLabel}</p>}
         </div>
