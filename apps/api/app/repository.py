@@ -529,22 +529,18 @@ class Repository:
         message_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
             db.execute("INSERT INTO group_messages VALUES (?, ?, ?, ?, ?, ?)", (str(message_id), str(group_id), sender_type, str(sender_bot_id) if sender_bot_id else None, content, dump_time(timestamp)))
-        message = GroupMessage(id=message_id, group_id=group_id, sender_type=sender_type, sender_bot_id=sender_bot_id, content=content, created_at=timestamp)
-        self._share_group_context(message)
-        return message
+        return GroupMessage(id=message_id, group_id=group_id, sender_type=sender_type, sender_bot_id=sender_bot_id, content=content, created_at=timestamp)
 
-    def _share_group_context(self, message: GroupMessage) -> None:
-        """Every member reads the group, including bots who were not mentioned."""
-        group = self.get_group(message.group_id)
-        if message.sender_type == "user":
-            sender = "Pengguna"
-        else:
-            sender = next((member.name for member in group.members if member.id == message.sender_bot_id), "Bot")
-        line = f"[Grup {group.name}] {sender}: {message.content[:2000]}"
-        for member in group.members:
-            if member.id == message.sender_bot_id:
-                continue
-            self.append_message(self.conversation_for_bot(member.id), "group", line)
+    def drop_copied_group_context(self) -> None:
+        """Remove private copies of group lines. They made every later request carry a huge snapshot."""
+        with self.database.connection() as db:
+            found = db.execute(
+                "SELECT 1 FROM messages WHERE role = 'group' AND content LIKE '[Grup %' LIMIT 1"
+            ).fetchone()
+        if found is None:
+            return
+        with self.database.connection() as db:
+            db.execute("DELETE FROM messages WHERE role = 'group' AND content LIKE '[Grup %'")
 
     def list_group_messages(self, group_id: UUID) -> list[GroupMessage]:
         self.get_group(group_id)

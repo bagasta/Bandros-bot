@@ -94,7 +94,8 @@ def test_unmentioned_message_wakes_the_lead_then_the_mention(tmp_path: Path) -> 
     assert messages[2].sender_bot_id == worker.id
     assert "Riwayat:" in runtime.model_gateway.prompts[1]
     private = repository.list_messages(repository.conversation_for_bot(worker.id))
-    assert any(message.role == "group" and "Cek tim" in message.content for message in private)
+    assert all(not (message.role == "group" and message.content.startswith("[Grup ")) for message in private)
+    assert "Cek tim" in runtime.model_gateway.prompts[1]
     assert all("Anggota:" not in message.content for message in private)
 
 

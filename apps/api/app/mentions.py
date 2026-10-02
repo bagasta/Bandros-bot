@@ -199,13 +199,9 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
         "Satu tahap, satu pemilik. Orkestrator menyebut tepat satu @Nama yang mengerjakan sekarang, plus data yang ada di pesan bos ini.",
         "Pesan baru dari bos adalah tugas baru, kecuali ia menulis lanjut, revisi, atau menunjuk hasil yang baru dikirim.",
         "Tugas baru tidak mewarisi usaha, menu, harga, atau asumsi dari job yang sudah selesai. Kalau pesan itu tidak menjelaskan bisnisnya, tanyakan satu kalimat dan jangan menugaskan rekan.",
-        "Kamu sudah membaca seluruh percakapan grup, termasuk pesan yang tidak menyebutmu. Gunakan itu sebagai konteks, jangan mengulang pekerjaan yang sudah selesai.",
-        "Balas hanya jika pesan ini menyebutmu, atau kamu orkestrator dan tidak ada yang disebut. Kalau tidak disebut, balas (diam).",
-        "Kalau kamu disebut, pesan ini untukmu: kerjakan tuntas. Sebut statusnya: sedang dikerjakan atau selesai.",
-        "Untuk riset, panggil web_search atau fetch_url dulu. Untuk berkas, panggil write_workspace_file. Jangan hanya berjanji akan mencari.",
-        "Setelah tahapmu selesai, sebut tepat satu @Nama yang memiliki langkah berikutnya. Kalau hasil sudah utuh, sebut koordinatornya.",
-        "@everyone berarti setiap anggota menjawab sekali. Perintah berhenti menghentikan yang disebut, atau seluruh grup kalau tidak ada nama.",
-        "Jangan menulis @ di depan namamu sendiri, jangan handoff, dan jangan menyalin pesan orang lain.",
+        "Riwayat di bawah sudah kamu baca, termasuk pesan yang tidak menyebutmu. Jangan mengulang pekerjaan yang selesai.",
+        "Kalau pesan ini menyebutmu, itu untukmu: jawab sekarang, singkat. Kalau tidak menyebutmu dan kamu bukan orkestrator untuk pesan tanpa mention, balas (diam).",
+        "@everyone: setiap anggota menjawab sekali. Sebut satu @Nama hanya untuk langkah berikutnya.",
     ]
     if jobs.strip():
         lines.append(f"Status job: {jobs.strip()}. Job selesai bukan bahan tugas berikutnya.")

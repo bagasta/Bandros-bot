@@ -190,6 +190,7 @@ def _seed_workspace(repo: Repository) -> None:
             existing = repo.get_bot(existing.id)
         if "tugas baru tidak mewarisi" not in existing.instructions.lower():
             repo.update_bot(existing.id, {"description": ORCHESTRATOR_DESCRIPTION, "instructions": ORCHESTRATOR_INSTRUCTIONS})
+    repo.drop_copied_group_context()
 
 
 def activate_account(account_id: str) -> tuple[object, object]:
@@ -407,15 +408,18 @@ async def optional_auth(request: Request, call_next):
                     stage_snapshot(database_path, snapshot)
                 hold_snapshot(database_path)
                 held_path = database_path
+            incoming_rev = database_revision(database_path) if database_path.is_file() else -1
             repository_token, runtime_token = activate_account(account_id)
         response = await call_next(request)
         if not public_path and request.method != "OPTIONS" and isinstance(account_id, str) and account_id.strip():
             database_path = _account_database_path(account_id)
             if database_path.is_file():
-                encoded = encode_snapshot(database_path.read_bytes())
-                if len(encoded) <= 400_000:
-                    response.headers["X-Bandros-Snapshot"] = encoded
-                    response.headers["X-Bandros-Snapshot-Rev"] = str(database_revision(database_path))
+                revision = database_revision(database_path)
+                response.headers["X-Bandros-Snapshot-Rev"] = str(revision)
+                if revision != incoming_rev:
+                    encoded = encode_snapshot(database_path.read_bytes())
+                    if len(encoded) <= 400_000:
+                        response.headers["X-Bandros-Snapshot"] = encoded
         return response
     finally:
         if held_path is not None:
