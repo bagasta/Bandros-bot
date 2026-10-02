@@ -386,28 +386,39 @@ def ensure_latest_codex_models(models: list[dict[str, str]]) -> list[dict[str, s
 
 
 async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, str]]:
+    """Return the Codex catalog, or GPT-6 Luna when ChatGPT's catalog is unreachable.
+
+    Login must not depend on this call. From Vercel the catalog often times out or
+    returns 401 even after a valid device login, while the same call works locally.
+    """
     headers = {
         "Authorization": f"Bearer {connection['access_token']}",
         "ChatGPT-Account-Id": str(connection["account_id"]),
         "originator": "codex_cli_rs",
-        "User-Agent": "codex_cli_rs",
+        "User-Agent": f"codex_cli_rs/{CODEX_CLIENT_VERSION}",
     }
-    last_detail = "katalog kosong"
-    async with httpx.AsyncClient(timeout=30) as client:
-        for version in (CODEX_CLIENT_VERSION, "0.157.0", "0.149.0"):
-            response = await client.get(
-                "https://chatgpt.com/backend-api/codex/models",
-                params={"client_version": version},
-                headers=headers,
-            )
-            if response.is_error:
-                last_detail = f"{response.status_code}: {response.text[:180]}"
-                continue
-            models = ensure_latest_codex_models(listed_codex_models(response.json()))
-            if models:
-                return models
-            last_detail = "katalog tidak memuat model yang bisa dipilih"
-    raise HTTPException(status_code=502, detail=f"Katalog model Codex gagal ({last_detail})")
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            for version in (CODEX_CLIENT_VERSION, "0.157.0", "0.149.0"):
+                try:
+                    response = await client.get(
+                        "https://chatgpt.com/backend-api/codex/models",
+                        params={"client_version": version},
+                        headers=headers,
+                    )
+                except httpx.HTTPError:
+                    continue
+                if response.is_error:
+                    continue
+                try:
+                    models = ensure_latest_codex_models(listed_codex_models(response.json()))
+                except ValueError:
+                    continue
+                if models:
+                    return models
+    except Exception:
+        return [dict(LATEST_CODEX_MODEL)]
+    return [dict(LATEST_CODEX_MODEL)]
 
 
 async def continue_after_response(work: Awaitable[object]) -> None:
@@ -629,7 +640,10 @@ async def chatgpt_device_poll(payload: DevicePollInput) -> dict[str, object]:
                 "user_code": flow["user_code"],
             },
         )
-    poll = poll_response.json() if poll_response.content else {}
+    try:
+        poll = poll_response.json() if poll_response.content else {}
+    except ValueError:
+        poll = {}
     error = poll.get("error") if isinstance(poll, dict) else None
     error_code = error if isinstance(error, str) else (
         str(error.get("code") or error.get("type") or error.get("message"))
@@ -637,7 +651,7 @@ async def chatgpt_device_poll(payload: DevicePollInput) -> dict[str, object]:
         else None
     )
     if not poll_response.is_success:
-        if poll_response.status_code in {403, 404} or error_code in {
+        if poll_response.status_code in {403, 404, 408, 429} or poll_response.status_code >= 500 or error_code in {
             "authorization_pending",
             "slow_down",
         }:
@@ -660,7 +674,8 @@ async def chatgpt_device_poll(payload: DevicePollInput) -> dict[str, object]:
             },
         )
     if token_response.is_error:
-        raise HTTPException(status_code=502, detail="Token device ChatGPT tidak dapat ditukar")
+        detail = token_response.text[:160].replace("\n", " ")
+        raise HTTPException(status_code=502, detail=f"Token device ChatGPT tidak dapat ditukar ({detail})")
     tokens = token_response.json()
     access_token = tokens.get("access_token")
     refresh_token = tokens.get("refresh_token")
@@ -691,8 +706,10 @@ async def chatgpt_device_poll(payload: DevicePollInput) -> dict[str, object]:
         else None,
     }
     models = await _list_codex_models(connection)
-    connection["models"] = models
     connection["preferred_model"] = models[0]["id"] if models else LATEST_CODEX_MODEL["id"]
+    # Keep the browser session header small. The model list is fetched again and
+    # must not be sealed into X-Bandros-Session (Vercel rejects oversized headers).
+    connection.pop("id_token", None)
     session_token = credential_store.seal(connection)
     await credential_store.put("sessions", session_token, connection)
     await credential_store.delete("flows", payload.flow_id)
@@ -1289,7 +1306,12 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         payload.content,
         _model_for_bot(bot, payload.model),
     )
-    return repository.get_run(runtime.queue_dm(bot_id, run.id, payload.content))
+    run_id = runtime.queue_dm(bot_id, run.id, payload.content)
+    if settings.await_runs:
+        task = runtime._burst_tasks.get(("dm", bot_id))
+        if task is not None:
+            await task
+    return repository.get_run(run_id)
 
 
 @app.get("/api/v1/runs/{run_id}", response_model=Run)

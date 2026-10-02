@@ -47,6 +47,57 @@ class _Client:
         return _Response(403, {"error": {"message": "authorization pending", "type": "invalid_request_error"}})
 
 
+def _jwt(payload: dict[str, object]) -> str:
+    import base64
+    import json
+
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"header.{body}.sig"
+
+
+class _ApprovedClient(_Client):
+    async def post(self, url: str, **kwargs):
+        if url.endswith("/usercode"):
+            return await super().post(url, **kwargs)
+        if url.endswith("/token") and "oauth" not in url:
+            return _Response(200, {"authorization_code": "code", "code_verifier": "verifier"})
+        return _Response(
+            200,
+            {
+                "access_token": _jwt({"https://api.openai.com/auth": {"chatgpt_account_id": "acct_test"}}),
+                "refresh_token": "refresh",
+                "id_token": _jwt({"email": "owner@example.com", "sub": "user"}),
+                "expires_in": 3600,
+            },
+        )
+
+    async def get(self, url: str, **kwargs):
+        return _Response(401, {"detail": "Unauthorized"})
+
+
+def test_device_poll_connects_when_model_catalog_fails(monkeypatch) -> None:
+    monkeypatch.setattr("apps.api.app.main.httpx.AsyncClient", _ApprovedClient)
+    with TestClient(app) as client:
+        started = client.post("/api/v1/auth/chatgpt/device/start")
+        polled = client.post(
+            "/api/v1/auth/chatgpt/device/poll",
+            json={"flow_id": started.json()["flow_id"]},
+        )
+
+    assert polled.status_code == 200
+    body = polled.json()
+    assert body["status"] == "connected"
+    assert body["preferred_model"] == "gpt-6-luna"
+    assert body["email"] == "owner@example.com"
+    from apps.api.app.credential_store import CredentialStore
+
+    sealed = CredentialStore().unseal(body["session_token"])
+    assert sealed is not None
+    assert sealed["account_id"] == "acct_test"
+    assert "models" not in sealed
+    assert "id_token" not in sealed
+
+
 def test_device_poll_treats_pending_error_object_as_pending(monkeypatch) -> None:
     monkeypatch.setattr("apps.api.app.main.httpx.AsyncClient", _Client)
     with TestClient(app) as client:

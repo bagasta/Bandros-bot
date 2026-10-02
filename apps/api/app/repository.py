@@ -176,6 +176,10 @@ class Repository:
         self.record_event(run_id, "run.queued", {"model": model})
         return self.get_run(run_id)
 
+    def set_run_prompt(self, run_id: UUID, prompt: str) -> None:
+        with self.database.connection() as db:
+            db.execute("UPDATE runs SET prompt = ? WHERE id = ?", (prompt, str(run_id)))
+
     def get_run(self, run_id: UUID) -> Run:
         with self.database.connection() as db:
             row = db.execute("SELECT * FROM runs WHERE id = ?", (str(run_id),)).fetchone()

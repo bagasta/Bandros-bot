@@ -342,8 +342,12 @@ export default function GrokDashboard() {
     setChatGPT(status);
     if (status.models?.length) rememberModels(status.models);
     if (status.connected && status.subscription_enabled) {
-      const result = await request<{ models: ChatGPTModel[] }>("/auth/chatgpt/models");
-      rememberModels(result.models);
+      try {
+        const result = await request<{ models: ChatGPTModel[] }>("/auth/chatgpt/models");
+        rememberModels(result.models);
+      } catch {
+        if (!status.models?.length) rememberModels([latestCodexModel]);
+      }
     }
   };
 
@@ -403,6 +407,7 @@ export default function GrokDashboard() {
       } catch (cause) {
         if (!active) return;
         setDeviceStatus(cause instanceof Error ? cause.message : "Device login gagal.");
+        window.setTimeout(poll, deviceFlow.interval * 1000);
       }
     };
     const timer = window.setTimeout(poll, deviceFlow.interval * 1000);
