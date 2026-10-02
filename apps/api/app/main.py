@@ -183,7 +183,7 @@ def _seed_workspace(repo: Repository) -> None:
         if existing.status is not BotStatus.ACTIVE:
             repo.set_bot_status(existing.id, BotStatus.ACTIVE)
             existing = repo.get_bot(existing.id)
-        if "reply singkat status" not in existing.instructions.lower():
+        if "jangan menulis @bandros" not in existing.instructions.lower():
             repo.update_bot(existing.id, {"description": ORCHESTRATOR_DESCRIPTION, "instructions": ORCHESTRATOR_INSTRUCTIONS})
 
 

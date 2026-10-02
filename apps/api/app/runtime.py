@@ -17,6 +17,7 @@ from .mentions import (
     mentioned_bots,
     with_roll_call_mentions,
     without_peer_mentions,
+    without_self_mention,
 )
 from .model_gateway import ModelGateway
 from .repository import Repository
@@ -110,6 +111,7 @@ class RunRuntime:
         if group_id and not is_silence(answer):
             answer = self._mention_teammates_for_roll_call(group_id, bot, answer, self._group_depth.get(run_id, 0))
             answer = self._drop_answered_peer_mentions(group_id, bot, answer)
+            answer = without_self_mention(answer, bot)
         self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
         self.repository.append_message(run.conversation_id, "assistant", answer, model=run.model)
         if group_id and not is_silence(answer):

@@ -58,6 +58,11 @@ def is_status_report(text: str) -> bool:
     )
 
 
+def without_self_mention(answer: str, sender: Bot) -> str:
+    """A bot never wakes itself. @OwnName becomes the plain name."""
+    return re.sub(rf"@{re.escape(sender.name)}(?!\w)", sender.name, answer, flags=re.IGNORECASE)
+
+
 def without_peer_mentions(answer: str, members: list[Bot], sender: Bot) -> str:
     """A specialist reports its own status. It does not @mention teammates who already spoke."""
     lead = lead_bot(members)
@@ -100,7 +105,7 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
         "Ini chat grup. Bot lain hanya bereaksi bila pesan memuat @Nama mereka.",
         "Kalau kamu memberi tugas, satu balasan wajib menyebut @Nama dari daftar anggota. Jangan handoff dan jangan posting ulang.",
         "Kalau kamu yang disebut, kerjakan tugasnya dan laporkan hasilnya. Jangan menyalin pesan sebelumnya dan jangan mulai dengan nama pengirim.",
-        "Kalau pengguna minta cek tiap bot, sebut setiap anggota lain dengan @Nama. Jangan mengarang status mereka.",
+        "Kalau pengguna minta cek tiap bot, sebut setiap anggota lain dengan @Nama. Jangan menulis @ di depan namamu sendiri.",
         "Kalau kamu diminta reply status, satu kalimat: Siap @Bandros — status singkatmu.",
         "Kalau rekan hanya mengirim status, balas (diam).",
         "Kalau pesan ini bukan untukmu, balas (diam).",

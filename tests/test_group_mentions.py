@@ -164,6 +164,33 @@ def test_roll_call_mentions_every_teammate_and_their_status_does_not_bounce(tmp_
     assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, backend.id]
 
 
+def test_bandros_does_not_mention_himself(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "self-mention.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    group = repository.create_group("Tim Produk", "", [bandros.id, frontend.id])
+    text = "@Bandros cek kesiapan masing2 bot"
+    repository.append_group_message(group.id, "user", text)
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:bandros": "@Frontend balas status. @Bandros akan ikut menilai.",
+            "TOKEN:frontend": "Siap @Bandros — siap tugas baru.",
+        }),
+        "test-model",
+        3,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    messages = repository.list_group_messages(group.id)
+    bandros_message = next(message for message in messages if message.sender_bot_id == bandros.id)
+    assert "@Bandros" not in bandros_message.content
+    assert "Bandros akan ikut menilai" in bandros_message.content
+    assert "@Frontend" in bandros_message.content
+    assert [message.sender_bot_id for message in messages].count(bandros.id) == 1
+
+
 def test_next_bot_sees_who_already_replied_and_does_not_ping_them(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "context.db")
     bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
