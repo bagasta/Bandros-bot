@@ -104,7 +104,7 @@ def test_silence_is_not_posted_and_does_not_wake_anyone(tmp_path: Path) -> None:
     assert [message.content for message in repository.list_group_messages(group.id)] == ["Ping"]
 
 
-def test_mention_chain_stops_after_three_replies(tmp_path: Path) -> None:
+def test_lead_does_not_send_a_second_message_when_mentioned_back(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "group.db")
     manager = repository.create_bot("Manager", "", "TOKEN:manager", None)
     worker = repository.create_bot("Worker", "", "TOKEN:worker", None)
@@ -120,8 +120,7 @@ def test_mention_chain_stops_after_three_replies(tmp_path: Path) -> None:
     asyncio.run(runtime.speak_in_group(group.id, "Gas", None, 0))
 
     bot_messages = [message for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
-    assert len(bot_messages) == 4
-    assert bot_messages[-1].sender_bot_id == worker.id
+    assert [message.sender_bot_id for message in bot_messages] == [manager.id, worker.id]
 
 
 def test_create_group_tool_joins_the_caller_and_named_bot(tmp_path: Path) -> None:
@@ -162,6 +161,29 @@ def test_roll_call_mentions_every_teammate_and_their_status_does_not_bounce(tmp_
     assert "@Frontend" in messages[1].content and "@Backend" in messages[1].content
     assert "Frontend aktif" not in messages[1].content
     assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, backend.id]
+
+
+def test_bandros_posts_once_even_if_a_teammate_mentions_him(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "once.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    group = repository.create_group("Tim Produk", "", [bandros.id, frontend.id])
+    text = "Cek kesiapan semua tim @Bandros"
+    repository.append_group_message(group.id, "user", text)
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:bandros": "@Frontend balas status. Lalu saya nilai lagi.",
+            "TOKEN:frontend": "Selesai @Bandros, landing page sudah jadi. Ada lagi?",
+        }),
+        "test-model",
+        3,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    messages = repository.list_group_messages(group.id)
+    assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id]
 
 
 def test_bandros_does_not_mention_himself(tmp_path: Path) -> None:
