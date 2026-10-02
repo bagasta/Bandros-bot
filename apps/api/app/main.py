@@ -30,7 +30,7 @@ from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
-from .mentions import is_stop_request
+from .mentions import bots_to_stop, is_stop_request
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
 from .repository import Repository
 from .runtime import RunRuntime
@@ -1234,12 +1234,17 @@ def list_group_messages(group_id: UUID) -> list[GroupMessage]:
 @app.post("/api/v1/groups/{group_id}/messages", response_model=GroupMessage, status_code=status.HTTP_201_CREATED)
 async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> GroupMessage:
     try:
-        repository.get_group(group_id)
+        group = repository.get_group(group_id)
         message = repository.append_group_message(group_id, "user", payload.content)
     except KeyError as error:
         raise not_found(error) from error
-    if is_stop_request(payload.content):
-        runtime.interrupt_group(group_id)
+    stopped = bots_to_stop(payload.content, group.members)
+    if stopped is not None:
+        if stopped:
+            for bot in stopped:
+                runtime.interrupt_bot(bot.id)
+        else:
+            runtime.interrupt_group(group_id)
         return message
     database_path = _account_database_path(_active_account_id())
     hold_snapshot(database_path)

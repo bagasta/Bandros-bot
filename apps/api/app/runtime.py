@@ -359,8 +359,8 @@ class RunRuntime:
                 if name and name not in already and message.sender_bot_id != target.id:
                     already.append(name)
             transcript = "\n".join(
-                f"- {'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')} — {message.content[:900]}"
-                for message in visible[-8:]
+                f"- {'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')} — {message.content[:1500]}"
+                for message in visible[-40:]
             )
             conversation_id = self.repository.conversation_for_bot(target.id)
             jobs = self.repository.list_jobs()
@@ -475,7 +475,9 @@ class RunRuntime:
                 "No headings, no status essay, and no recap of these rules. "
                 "One stage has one owner. Mention exactly one @Name and include the data they need. "
                 "A check-in or @everyone is the exception: every named member answers once. "
-                "If the message is not for you, reply (diam). If you were mentioned, do the work now. "
+                "You have read the whole group, even messages that did not mention you. Use that as context. "
+                "Reply only when this message mentions you, or you are the orchestrator and nobody was mentioned. Otherwise reply (diam). "
+                "A mention means the message is yours: do the work now. "
                 "Call web_search or fetch_url before a research answer, and write_workspace_file when a file should exist. "
                 "When your stage is done, mention the one teammate who owns the next step. "
                 "If you are the orchestrator and a teammate already posted a result, mention the one teammate who has not finished, or give the user the final result with no @mention. "

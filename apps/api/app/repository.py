@@ -529,7 +529,22 @@ class Repository:
         message_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
             db.execute("INSERT INTO group_messages VALUES (?, ?, ?, ?, ?, ?)", (str(message_id), str(group_id), sender_type, str(sender_bot_id) if sender_bot_id else None, content, dump_time(timestamp)))
-        return GroupMessage(id=message_id, group_id=group_id, sender_type=sender_type, sender_bot_id=sender_bot_id, content=content, created_at=timestamp)
+        message = GroupMessage(id=message_id, group_id=group_id, sender_type=sender_type, sender_bot_id=sender_bot_id, content=content, created_at=timestamp)
+        self._share_group_context(message)
+        return message
+
+    def _share_group_context(self, message: GroupMessage) -> None:
+        """Every member reads the group, including bots who were not mentioned."""
+        group = self.get_group(message.group_id)
+        if message.sender_type == "user":
+            sender = "Pengguna"
+        else:
+            sender = next((member.name for member in group.members if member.id == message.sender_bot_id), "Bot")
+        line = f"[Grup {group.name}] {sender}: {message.content[:2000]}"
+        for member in group.members:
+            if member.id == message.sender_bot_id:
+                continue
+            self.append_message(self.conversation_for_bot(member.id), "group", line)
 
     def list_group_messages(self, group_id: UUID) -> list[GroupMessage]:
         self.get_group(group_id)

@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from apps.api.app.database import Database
 from apps.api.app.domain import Bot
-from apps.api.app.mentions import is_stop_request, mentioned_bots, without_peer_mentions
+from apps.api.app.mentions import bots_to_stop, is_stop_request, mentioned_bots, without_peer_mentions
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime
 from apps.api.app.workspace_tools import WorkspaceToolset, parse_search_results, public_https_url
@@ -26,6 +26,11 @@ def test_stop_request_is_a_direct_phrase() -> None:
     assert is_stop_request("Stop now")
     assert is_stop_request("berhenti")
     assert not is_stop_request("jangan berhenti dulu")
+    worker = bot("Lamaran Kerja")
+    assert is_stop_request("@Lamaran Kerja berhenti", [worker])
+    assert [item.name for item in bots_to_stop("@Lamaran Kerja berhenti", [worker])] == ["Lamaran Kerja"]
+    assert bots_to_stop("berhenti", [worker]) == []
+    assert bots_to_stop("lanjut kerja", [worker]) is None
 
 
 def test_unfinished_teammate_stays_mentioned() -> None:
@@ -89,7 +94,7 @@ def test_unmentioned_message_wakes_the_lead_then_the_mention(tmp_path: Path) -> 
     assert messages[2].sender_bot_id == worker.id
     assert "Riwayat:" in runtime.model_gateway.prompts[1]
     private = repository.list_messages(repository.conversation_for_bot(worker.id))
-    assert all(message.role != "group" for message in private)
+    assert any(message.role == "group" and "Cek tim" in message.content for message in private)
     assert all("Anggota:" not in message.content for message in private)
 
 

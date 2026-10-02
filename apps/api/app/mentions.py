@@ -50,9 +50,41 @@ def burst_prompt(lines: list[str]) -> str:
     return "Pesan beruntun dari bos untuk satu tugas yang sama. Jawab sekali dan mencakup semuanya.\n" + body
 
 
-def is_stop_request(text: str) -> bool:
-    """A direct stop ends the current turn, the same way a Grok Bot stops on 'Stop now'."""
-    return text.strip().lower() in {"stop", "stop now", "berhenti", "berhenti sekarang"}
+_STOP_PHRASES = {
+    "stop",
+    "stop now",
+    "stop semua",
+    "berhenti",
+    "berhenti sekarang",
+    "berhenti semua",
+    "kalian berhenti",
+    "kalian stop",
+    "semua berhenti",
+    "tolong berhenti",
+    "tolong stop",
+}
+
+
+def is_stop_request(text: str, bots: list[Bot] | None = None) -> bool:
+    """A direct stop ends the turn, including '@Nama berhenti'."""
+    lowered = text.strip().lower()
+    if lowered in _STOP_PHRASES:
+        return True
+    cleaned = lowered
+    for bot in sorted(bots or [], key=lambda item: len(item.name), reverse=True):
+        cleaned = re.sub(rf"@{re.escape(bot.name)}(?!\w)", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"@\S+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,!")
+    return cleaned in _STOP_PHRASES
+
+
+def bots_to_stop(text: str, bots: list[Bot]) -> list[Bot] | None:
+    """None means this is not a stop. An empty list stops the whole group."""
+    if not is_stop_request(text, bots):
+        return None
+    if addresses_everyone(text):
+        return []
+    return mentioned_bots(text, bots)
 
 
 def addresses_everyone(text: str) -> bool:
@@ -167,16 +199,18 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
         "Satu tahap, satu pemilik. Orkestrator menyebut tepat satu @Nama yang mengerjakan sekarang, plus data yang ada di pesan bos ini.",
         "Pesan baru dari bos adalah tugas baru, kecuali ia menulis lanjut, revisi, atau menunjuk hasil yang baru dikirim.",
         "Tugas baru tidak mewarisi usaha, menu, harga, atau asumsi dari job yang sudah selesai. Kalau pesan itu tidak menjelaskan bisnisnya, tanyakan satu kalimat dan jangan menugaskan rekan.",
-        "Kalau kamu disebut dan datanya sudah cukup: kerjakan tuntas. Sebut statusnya: sedang dikerjakan atau selesai.",
+        "Kamu sudah membaca seluruh percakapan grup, termasuk pesan yang tidak menyebutmu. Gunakan itu sebagai konteks, jangan mengulang pekerjaan yang sudah selesai.",
+        "Balas hanya jika pesan ini menyebutmu, atau kamu orkestrator dan tidak ada yang disebut. Kalau tidak disebut, balas (diam).",
+        "Kalau kamu disebut, pesan ini untukmu: kerjakan tuntas. Sebut statusnya: sedang dikerjakan atau selesai.",
         "Untuk riset, panggil web_search atau fetch_url dulu. Untuk berkas, panggil write_workspace_file. Jangan hanya berjanji akan mencari.",
         "Setelah tahapmu selesai, sebut tepat satu @Nama yang memiliki langkah berikutnya. Kalau hasil sudah utuh, sebut koordinatornya.",
-        "Kalau pesan ini bukan untukmu, balas (diam). @everyone berarti setiap anggota menjawab sekali.",
+        "@everyone berarti setiap anggota menjawab sekali. Perintah berhenti menghentikan yang disebut, atau seluruh grup kalau tidak ada nama.",
         "Jangan menulis @ di depan namamu sendiri, jangan handoff, dan jangan menyalin pesan orang lain.",
     ]
     if jobs.strip():
         lines.append(f"Status job: {jobs.strip()}. Job selesai bukan bahan tugas berikutnya.")
     if transcript.strip():
-        lines.append("Riwayat di bawah adalah pekerjaan lama, bukan brief tugas baru.")
+        lines.append("Riwayat ini konteks yang sudah kamu baca, bukan tugas terpisah.")
         lines.append(f"Riwayat:\n{transcript.strip()}")
     if already_replied:
         lines.append(
