@@ -10,10 +10,12 @@ from .domain import ApprovalStatus, BotStatus, RunStatus
 from .mentions import (
     addresses_everyone,
     asks_roll_call,
+    continues_the_work,
     group_prompt,
     is_silence,
     lead_bot,
     mentioned_bots,
+    route_next_owner,
     with_roll_call_mentions,
     without_peer_mentions,
     without_self_mention,
@@ -34,7 +36,7 @@ class RunRuntime:
     _approved_tools: dict[UUID, dict[str, list[dict[str, object]]]] = field(default_factory=dict, init=False)
     _group_depth: dict[UUID, int] = field(default_factory=dict, init=False)
     _pending_wakes: list[tuple[UUID, str, UUID, int]] = field(default_factory=list, init=False)
-    _wake_budget: int = field(default=8, init=False)
+    _wake_budget: int = field(default=12, init=False)
 
     def start(self, run_id: UUID) -> None:
         if task := self._tasks.get(run_id):
@@ -111,7 +113,9 @@ class RunRuntime:
             if self._lead_already_replied(group_id, bot.id):
                 answer = "(diam)"
             else:
-                answer = self._mention_teammates_for_roll_call(group_id, bot, answer, self._group_depth.get(run_id, 0))
+                depth = self._group_depth.get(run_id, 0)
+                answer = self._mention_teammates_for_roll_call(group_id, bot, answer, depth)
+                answer = self._route_next_owner(group_id, bot, answer)
                 answer = self._drop_answered_peer_mentions(group_id, bot, answer)
                 answer = without_self_mention(answer, bot)
         self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
@@ -122,7 +126,7 @@ class RunRuntime:
             if not already_posted:
                 self.repository.append_group_message(group_id, "bot", answer, bot.id)
             depth = self._group_depth.get(run_id, 0)
-            if depth < 3:
+            if depth < 5:
                 self.queue_group_wake(group_id, answer, bot.id, depth + 1)
         self.repository.record_event(run_id, "assistant.message", {"characters": len(answer)})
         self.repository.record_event(run_id, "model.request.completed", {"model": run.model, "call": 1})
@@ -167,7 +171,7 @@ class RunRuntime:
             self.repository.append_message(source_conversation, "bot", f"Hasil dari {target_name} ({status}):\n{result}")
 
     def queue_group_wake(self, group_id: UUID, content: str, sender_bot_id: UUID, depth: int = 1) -> None:
-        if depth > 3 or self._wake_budget <= 0 or is_silence(content):
+        if depth > 5 or self._wake_budget <= 0 or is_silence(content):
             return
         wake = (group_id, content, sender_bot_id, depth)
         if wake not in self._pending_wakes:
@@ -179,7 +183,7 @@ class RunRuntime:
             await self.speak_in_group(group_id, content, sender_bot_id, depth)
 
     async def speak_in_group(self, group_id: UUID, content: str, sender_bot_id: UUID | None, depth: int) -> None:
-        if depth > 3 or self._wake_budget <= 0:
+        if depth > 5 or self._wake_budget <= 0:
             return
         group = self.repository.get_group(group_id)
         members = [member for member in group.members if member.status is BotStatus.ACTIVE]
@@ -189,9 +193,10 @@ class RunRuntime:
             targets = mentioned_bots(content, members)
         if sender_bot_id is not None:
             targets = [member for member in targets if member.id != sender_bot_id]
-            # A teammate mentioning the lead must not make the lead send a second message.
-            lead = lead_bot(members)
-            targets = [member for member in targets if member.id != lead.id]
+            # Status pings do not wake the lead. A result or a blocker does, so the job keeps moving.
+            if not continues_the_work(content):
+                lead = lead_bot(members)
+                targets = [member for member in targets if member.id != lead.id]
         elif not targets and members:
             targets = [lead_bot(members)]
         for target in targets:
@@ -208,7 +213,7 @@ class RunRuntime:
                 if name and name not in already and message.sender_bot_id != target.id:
                     already.append(name)
             transcript = "\n".join(
-                f"- {'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')} — {message.content[:160]}"
+                f"- {'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')} — {message.content[:900]}"
                 for message in visible[-8:]
             )
             conversation_id = self.repository.conversation_for_bot(target.id)
@@ -227,8 +232,7 @@ class RunRuntime:
         if not members or lead_bot(members).id != bot_id:
             return False
         messages = self.repository.list_group_messages(group_id)
-        last_user = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].sender_type == "user"), -1)
-        return any(message.sender_bot_id == bot_id for message in messages[last_user + 1 :])
+        return bool(messages) and messages[-1].sender_bot_id == bot_id
 
     def _mention_teammates_for_roll_call(self, group_id: UUID, bot, answer: str, depth: int) -> str:
         if depth != 0:
@@ -242,6 +246,22 @@ class RunRuntime:
         if not asks_roll_call(user_text):
             return answer
         return with_roll_call_mentions(answer, members, bot)
+
+    def _route_next_owner(self, group_id: UUID, bot, answer: str) -> str:
+        group = self.repository.get_group(group_id)
+        members = [member for member in group.members if member.status is BotStatus.ACTIVE]
+        if not members:
+            return answer
+        messages = self.repository.list_group_messages(group_id)
+        last_user = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].sender_type == "user"), -1)
+        user_text = messages[last_user].content if last_user >= 0 else ""
+        finished = {
+            message.sender_bot_id
+            for message in messages[last_user + 1 :]
+            if message.sender_bot_id and continues_the_work(message.content)
+        }
+        allow_many = asks_roll_call(user_text) or addresses_everyone(user_text)
+        return route_next_owner(answer, members, bot, finished, allow_many)
 
     def _drop_answered_peer_mentions(self, group_id: UUID, bot, answer: str) -> str:
         group = self.repository.get_group(group_id)
@@ -304,14 +324,17 @@ class RunRuntime:
                 if in_group
                 else ""
             )
-            + "In a group, write like a coworker on WhatsApp: one to three short sentences, posted in the group. "
-            "Other bots react only when the message contains their @Name. @everyone asks every member to answer once. "
-            "To assign work, the reply itself must mention that teammate. "
-            "A message with no @Name is answered only by the lead. "
+            + "In a group, work like a Grok Bot team: finish the task and post the result. These rules win if they conflict with the Bot instructions. "
+            "The user receives the outcome. Do not wait for the user to manage the next step, and do not ask for scope you can assume. "
+            "State one assumption, then deliver the work in this same reply. "
+            "One stage has one owner. To assign work, mention exactly one @Name and include the data they need. "
+            "A check-in or @everyone is the exception: every named member answers once. "
+            "If you are the orchestrator and a teammate already posted a result, either mention the one teammate who has not finished or give the user the final result with no @mention. "
+            "Do not answer a short ready/status ping. "
+            "If you were mentioned, do the work now. Call web_search or fetch_url before a research answer, and write_workspace_file when a file should exist. "
+            "End a specialist result with @Bandros so the next stage starts. Do not reply (diam) when you were mentioned. "
             "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
-            "Do not recap that you already delegated or posted. "
-            "If you were mentioned or the message says @everyone, answer. Do not reply (diam) in that case. "
-            "Do not quote the previous speaker or start with their name. Do not write @ before your own name. "
+            "Do not recap that you already delegated. Do not quote the previous speaker or write @ before your own name. "
             "Do not say a group tool is missing. "
             "Never claim a file, memory, job, bot, group, or handoff exists unless the tool result says ok. "
             "If a tool requires approval, stop and say exactly what needs approval. "

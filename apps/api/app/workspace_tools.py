@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import ipaddress
+import re
+import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from html import unescape
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 from .repository import Repository
@@ -78,6 +83,8 @@ class WorkspaceToolset:
             ToolDefinition("write_workspace_file", "Write a text file into the persistent Bot workspace. payload: {path, content}", self.write_workspace_file, RiskClass.LOCAL_WRITE),
             ToolDefinition("list_memory", "Recall durable facts saved for this Bot. payload: {query?}", self.list_memory, RiskClass.READ_ONLY),
             ToolDefinition("save_memory", "Save a durable preference or fact for future runs. payload: {kind, content}", self.save_memory, RiskClass.LOCAL_WRITE),
+            ToolDefinition("web_search", "Search the public web before a research answer. payload: {query}", self.web_search, RiskClass.READ_ONLY, timeout_seconds=25),
+            ToolDefinition("fetch_url", "Read a public https page. payload: {url}", self.fetch_url, RiskClass.READ_ONLY, timeout_seconds=25),
         ]
         if self.repository.group_for_run(self.run_id):
             definitions = [item for item in definitions if item.name not in {"handoff_to_bot", "post_to_group"}]
@@ -339,3 +346,73 @@ class WorkspaceToolset:
         if not value:
             raise ValueError(f"{key} is required")
         return value
+
+    async def web_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        query = self._text(payload, "query")[:300]
+        import httpx
+
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": "BandrosBot/1.0"}) as client:
+            response = await client.post("https://html.duckduckgo.com/html/", data={"q": query})
+        if response.status_code >= 400:
+            return {"ok": False, "error": f"pencarian gagal ({response.status_code}). Lanjut dengan pengetahuan yang ada dan tulis asumsinya."}
+        results = parse_search_results(response.text)
+        if not results:
+            return {"ok": False, "error": "pencarian tidak mengembalikan hasil. Lanjut dengan pengetahuan yang ada dan tulis asumsinya."}
+        return {"ok": True, "results": results}
+
+    async def fetch_url(self, payload: dict[str, Any]) -> dict[str, Any]:
+        url = self._text(payload, "url")
+        if not await public_https_url(url):
+            return {"ok": False, "error": "hanya halaman https publik yang bisa dibaca"}
+        import httpx
+
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False, headers={"User-Agent": "BandrosBot/1.0"}) as client:
+            response = await client.get(url)
+        if response.status_code >= 400:
+            return {"ok": False, "error": f"halaman gagal ({response.status_code})"}
+        text = visible_page_text(response.text)
+        return {"ok": True, "url": url, "text": text[:4000]}
+
+def parse_search_results(html: str) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    for match in re.finditer(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, flags=re.IGNORECASE | re.DOTALL):
+        url = unescape(match.group(1))
+        parsed = urlparse(url)
+        target = parse_qs(parsed.query).get("uddg", [url])[0]
+        title = re.sub(r"<[^>]+>", "", unescape(match.group(2)))
+        title = re.sub(r"\s+", " ", title).strip()
+        if title and target.startswith("https://"):
+            results.append({"title": title[:180], "url": target[:500]})
+        if len(results) == 5:
+            break
+    return results
+
+
+def visible_page_text(html: str) -> str:
+    without_blocks = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", unescape(without_blocks))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+async def public_https_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    if host in {"localhost", "metadata.google.internal"} or host.endswith(".local"):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    addresses = {info[4][0] for info in infos}
+    if not addresses:
+        return False
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            return False
+        if not ip.is_global:
+            return False
+    return True

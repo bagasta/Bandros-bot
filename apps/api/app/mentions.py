@@ -58,6 +58,32 @@ def is_status_report(text: str) -> bool:
     )
 
 
+def continues_the_work(text: str) -> bool:
+    """A specialist moved the job forward, so the lead should route the next step."""
+    if is_silence(text) or is_status_report(text):
+        return False
+    lowered = text.lower()
+    if any(token in lowered for token in ("selesai", "hasil", "berikut", "temuan", "draft", "sudah", "laporan", "rekomendasi")):
+        return True
+    if "?" in text:
+        return True
+    return len(text.strip()) >= 180
+
+
+def route_next_owner(answer: str, members: list[Bot], sender: Bot, finished_ids: set, allow_many: bool) -> str:
+    """The lead keeps one unfinished owner. A finished teammate is not mentioned again."""
+    if sender.id != lead_bot(members).id:
+        return answer
+    for member in sorted(members, key=lambda item: len(item.name), reverse=True):
+        if member.id in finished_ids:
+            answer = re.sub(rf"@{re.escape(member.name)}(?!\w)", member.name, answer, flags=re.IGNORECASE)
+    if not allow_many:
+        mentioned = [member for member in mentioned_bots(answer, members) if member.id != sender.id]
+        for extra in mentioned[1:]:
+            answer = re.sub(rf"@{re.escape(extra.name)}(?!\w)", extra.name, answer, flags=re.IGNORECASE)
+    return re.sub(r"[ \t]{2,}", " ", answer).strip()
+
+
 def without_self_mention(answer: str, sender: Bot) -> str:
     """A bot never wakes itself. @OwnName becomes the plain name."""
     return re.sub(rf"@{re.escape(sender.name)}(?!\w)", sender.name, answer, flags=re.IGNORECASE)
@@ -102,18 +128,21 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
     roster = ", ".join(f"@{member.name}" for member in group.members)
     lines = [
         f"Grup {group.name}. Anggota: {roster}.",
-        "Ini chat grup seperti WhatsApp. Balas 1-3 kalimat, dari dirimu sendiri, dan pesan itu masuk ke grup.",
-        "Bot lain hanya bereaksi bila disebut @Nama. @everyone memanggil semua anggota.",
-        "Kalau kamu disebut atau pesan berisi @everyone, wajib balas. Jangan (diam).",
+        "Ini tim Grok Bot. Pengguna hanya menerima hasil. Jangan menunggu pengguna mengatur langkah.",
+        "Satu tahap, satu pemilik. Orkestrator menyebut tepat satu @Nama yang mengerjakan sekarang, plus data yang sudah ada.",
+        "Kalau kamu disebut: kerjakan tuntas di balasan ini. Jangan bertanya scope. Tulis satu kalimat asumsi, lalu hasilnya.",
+        "Untuk riset, panggil web_search atau fetch_url dulu. Untuk berkas, panggil write_workspace_file. Jangan hanya berjanji akan mencari.",
+        "Setelah hasil ada, akhiri dengan @Bandros dan apa yang selesai. Jangan hanya bilang siap.",
+        "Kalau pesan ini bukan untukmu, balas (diam). @everyone berarti setiap anggota menjawab sekali.",
         "Jangan menulis @ di depan namamu sendiri, jangan handoff, dan jangan menyalin pesan orang lain.",
-        "Kalau pesan ini bukan untukmu, balas (diam).",
     ]
     if transcript.strip():
         lines.append(f"Riwayat:\n{transcript.strip()}")
     if already_replied:
         lines.append(
             f"Sudah membalas: {', '.join(already_replied)}. "
-            "Jangan mention mereka dan jangan menyuruh mereka balas lagi. Balas hanya statusmu, sebut hanya @Bandros."
+            "Jangan menyuruh mereka mengulang. Kalau kamu orkestrator dan masih ada tahap berikutnya, sebut satu rekan yang belum selesai. "
+            "Kalau pekerjaan sudah selesai, balas ke pengguna tanpa @mention."
         )
     lines.append(content.strip())
     return "\n".join(lines)

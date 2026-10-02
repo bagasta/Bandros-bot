@@ -9,7 +9,7 @@ from apps.api.app.domain import Bot
 from apps.api.app.mentions import mentioned_bots
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime
-from apps.api.app.workspace_tools import WorkspaceToolset
+from apps.api.app.workspace_tools import WorkspaceToolset, parse_search_results, public_https_url
 
 
 def make_repository(path: Path) -> Repository:
@@ -38,7 +38,7 @@ class ScriptedGateway:
         self.prompts.append(prompt)
         for token, reply in self.replies.items():
             if f"Bot instructions:\n{token}" in system:
-                return reply
+                return reply(prompt) if callable(reply) else reply
         return "(diam)"
 
 
@@ -188,18 +188,24 @@ def test_everyone_mention_posts_a_reply_from_each_member(tmp_path: Path) -> None
     assert posted == [bandros.id, frontend.id, backend.id]
 
 
-def test_bandros_posts_once_even_if_a_teammate_mentions_him(tmp_path: Path) -> None:
+def test_a_result_wakes_bandros_once_without_reassigning_the_same_bot(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "once.db")
     bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
     frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
     group = repository.create_group("Tim Produk", "", [bandros.id, frontend.id])
-    text = "Cek kesiapan semua tim @Bandros"
+    text = "Buatkan landing page rental mobil"
     repository.append_group_message(group.id, "user", text)
+
+    def bandros_reply(prompt: str) -> str:
+        if "landing page sudah jadi" in prompt:
+            return "Hasil akhir: landing page rental mobil sudah disusun."
+        return "@Frontend buat landing page dari riset ini."
+
     runtime = RunRuntime(
         repository,
         ScriptedGateway({
-            "TOKEN:bandros": "@Frontend balas status. Lalu saya nilai lagi.",
-            "TOKEN:frontend": "Selesai @Bandros, landing page sudah jadi. Ada lagi?",
+            "TOKEN:bandros": bandros_reply,
+            "TOKEN:frontend": "Selesai @Bandros, landing page sudah jadi.",
         }),
         "test-model",
         3,
@@ -208,7 +214,46 @@ def test_bandros_posts_once_even_if_a_teammate_mentions_him(tmp_path: Path) -> N
     asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
 
     messages = repository.list_group_messages(group.id)
-    assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id]
+    assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, bandros.id]
+    assert messages[-1].content == "Hasil akhir: landing page rental mobil sudah disusun."
+    assert "@Frontend" not in messages[-1].content
+
+
+def test_bandros_hands_a_result_to_the_next_specialist(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "pipeline.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    market = repository.create_bot("MarketRiset", "Mencari usaha.", "TOKEN:market", None)
+    landing = repository.create_bot("LandingPage", "Menyusun halaman.", "TOKEN:landing", None)
+    group = repository.create_group("Riset", "", [bandros.id, market.id, landing.id])
+    text = "Cari usaha rental mobil lalu buatkan landing page"
+    repository.append_group_message(group.id, "user", text)
+
+    def bandros_reply(prompt: str) -> str:
+        if "Draft halaman" in prompt:
+            return "Hasil akhir: lima usaha rental dan landing page-nya sudah ada."
+        if "temuan rental" in prompt:
+            return "@LandingPage susun halamannya dari temuan ini. @MarketRiset sudah selesai."
+        return "@MarketRiset @LandingPage kerjakan sekarang."
+
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:bandros": bandros_reply,
+            "TOKEN:market": "Hasil temuan rental: lima usaha di Indonesia. @Bandros",
+            "TOKEN:landing": "Draft halaman selesai. @Bandros",
+        }),
+        "test-model",
+        4,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    messages = repository.list_group_messages(group.id)
+    assert [message.sender_bot_id for message in messages] == [None, bandros.id, market.id, bandros.id, landing.id, bandros.id]
+    assert "@LandingPage" not in messages[1].content
+    assert "@MarketRiset" in messages[1].content
+    assert "@LandingPage" in messages[3].content
+    assert "@" not in messages[-1].content
 
 
 def test_bandros_does_not_mention_himself(tmp_path: Path) -> None:
@@ -278,6 +323,8 @@ def test_group_run_delegates_only_by_mention(tmp_path: Path) -> None:
 
     assert "handoff_to_bot" not in names
     assert "post_to_group" not in names
+    assert "web_search" in names
+    assert "fetch_url" in names
     assert handoff["ok"] is False
     assert "@Nama" in handoff["error"]
     assert posted["ok"] is False
@@ -301,3 +348,14 @@ def test_same_reply_is_not_posted_twice(tmp_path: Path) -> None:
     contents = [message.content for message in repository.list_group_messages(group.id)]
     assert contents.count("Siap @Worker") == 1
     assert contents == ["Siap @Worker", "Siap."]
+
+
+def test_search_results_keep_the_public_target() -> None:
+    html = '<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Frent">Rental <b>mobil</b></a>'
+    assert parse_search_results(html) == [{"title": "Rental mobil", "url": "https://example.com/rent"}]
+
+
+def test_fetch_rejects_private_and_non_https_urls() -> None:
+    assert asyncio.run(public_https_url("http://example.com")) is False
+    assert asyncio.run(public_https_url("https://127.0.0.1/secret")) is False
+    assert asyncio.run(public_https_url("https://169.254.169.254/latest")) is False
