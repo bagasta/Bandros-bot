@@ -3,11 +3,15 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+import base64
+import gzip
 import os
 import sqlite3
 from typing import Iterator
 
 _LOADED_DATABASE: ContextVar[str | None] = ContextVar("bandros_loaded_database", default=None)
+_SNAPSHOT_READY: ContextVar[str | None] = ContextVar("bandros_snapshot_ready", default=None)
+_SNAPSHOT_LIMIT = 2_000_000
 _DATABASE_BLOB_PATH = "state/workspace.db"
 
 
@@ -191,7 +195,7 @@ class Database:
         return bool(os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN"))
 
     def pull(self) -> None:
-        if not self._durable():
+        if _SNAPSHOT_READY.get() == str(self.path) or not self._durable():
             return
         from vercel.blob import BlobClient
         from vercel.blob.errors import BlobNotFoundError
@@ -272,3 +276,30 @@ class Database:
             raise
         finally:
             connection.close()
+
+
+def encode_snapshot(data: bytes) -> str:
+    return base64.urlsafe_b64encode(gzip.compress(data, mtime=0)).decode().rstrip("=")
+
+
+def decode_snapshot(value: str) -> bytes | None:
+    if not value or len(value) > 400_000:
+        return None
+    try:
+        raw = gzip.decompress(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)))
+    except (ValueError, OSError, EOFError):
+        return None
+    if len(raw) > _SNAPSHOT_LIMIT or not raw.startswith(b"SQLite format 3\x00"):
+        return None
+    return raw
+
+
+def stage_snapshot(path: Path, encoded: str) -> bool:
+    raw = decode_snapshot(encoded)
+    if raw is None:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    _SNAPSHOT_READY.set(str(path))
+    _LOADED_DATABASE.set(None)
+    return True

@@ -46,9 +46,20 @@ const quickPrompts = [
   "Tunjukkan pekerjaan yang sedang tertunda",
 ];
 
+function workspaceKey(session: string | null): string {
+  return session ? `bandros_workspace:${session.slice(0, 80)}` : "";
+}
+
+function rememberSnapshot(session: string | null, response: Response) {
+  const key = workspaceKey(session);
+  const snapshot = response.headers.get("X-Bandros-Snapshot");
+  if (key && snapshot) window.localStorage.setItem(key, snapshot);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE_URL belum diatur.");
   const session = typeof window !== "undefined" ? window.localStorage.getItem("bandros_chatgpt_session") : null;
+  const snapshot = session ? window.localStorage.getItem(workspaceKey(session)) : null;
   let response: Response;
   try {
     response = await fetch(`${apiBase}${path}`, {
@@ -56,6 +67,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       headers: {
         "Content-Type": "application/json",
         ...(session ? { "X-Bandros-Session": session } : {}),
+        ...(snapshot ? { "X-Bandros-Snapshot": snapshot } : {}),
         ...init?.headers,
       },
     });
@@ -63,6 +75,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (cause instanceof TypeError) throw new Error("Koneksi ke server terputus. Kirim ulang sebentar lagi.");
     throw cause;
   }
+  rememberSnapshot(session, response);
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     throw new Error(typeof body?.detail === "string" ? body.detail : `Request gagal (${response.status}).`);
@@ -480,6 +493,9 @@ export default function GrokDashboard() {
     try {
       await request<{ disconnected: boolean }>("/auth/chatgpt/disconnect", { method: "POST" });
       window.localStorage.removeItem("bandros_chatgpt_session");
+      for (const key of Object.keys(window.localStorage)) {
+        if (key.startsWith("bandros_workspace:")) window.localStorage.removeItem(key);
+      }
       setChatGPT({ connected: false, available: true });
       setChatGPTModels([]);
       setBots([]);

@@ -55,3 +55,33 @@ def test_two_chatgpt_accounts_do_not_share_bots(tmp_path: Path, monkeypatch) -> 
     assert [bot["name"] for bot in own.json()] == ["Bandros", "Riset A"]
     assert [bot["name"] for bot in other.json()] == ["Bandros"]
     main._workspaces.clear()
+
+
+def test_snapshot_keeps_the_same_bot_on_a_fresh_server(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, database_path=tmp_path / "workspace.db", workspace_root=tmp_path / "workspace"),
+    )
+    main._workspaces.clear()
+    asyncio.run(main.credential_store.put("sessions", "token-a", {"auth_mode": "codex", "account_id": "acct_snap", "access_token": "a"}))
+    headers = {"X-Bandros-Session": "token-a"}
+
+    with TestClient(main.app) as client:
+        first = client.get("/api/v1/bots", headers=headers)
+        snapshot = first.headers["X-Bandros-Snapshot"]
+        bot_id = next(bot["id"] for bot in first.json() if bot["name"] == "Bandros")
+        database_path, _, _ = tenant_locations("acct_snap", tmp_path, tmp_path / "workspace")
+        database_path.unlink()
+        main._workspaces.clear()
+        missing = client.get(f"/api/v1/bots/{bot_id}", headers=headers)
+        restored = client.get(f"/api/v1/bots/{bot_id}", headers={**headers, "X-Bandros-Snapshot": snapshot})
+
+    assert first.status_code == 200
+    assert len(snapshot) < 100_000
+    assert missing.status_code == 404
+    assert restored.status_code == 200
+    assert restored.json()["id"] == bot_id
+    main._workspaces.clear()

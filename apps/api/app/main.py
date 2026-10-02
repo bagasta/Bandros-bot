@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .database import Database
+from .database import Database, encode_snapshot, stage_snapshot
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
@@ -226,7 +226,8 @@ app.add_middleware(
     allow_origin_regex=None if settings.cors_allow_all else r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Bandros-Session"],
+    allow_headers=["Content-Type", "Authorization", "X-Bandros-Session", "X-Bandros-Snapshot"],
+    expose_headers=["X-Bandros-Snapshot"],
 )
 
 
@@ -253,6 +254,7 @@ async def optional_auth(request: Request, call_next):
     repository_token = None
     runtime_token = None
     public_path = request.url.path in _PUBLIC_PATHS
+    account_id = None
     try:
         if settings.api_auth_token and not public_path and request.method != "OPTIONS":
             expected = f"Bearer {settings.api_auth_token}"
@@ -263,8 +265,27 @@ async def optional_auth(request: Request, call_next):
             account_id = connection.get("account_id") if connection else None
             if not isinstance(account_id, str) or not account_id.strip():
                 return JSONResponse({"detail": "Masuk dengan ChatGPT dulu."}, status_code=401)
+            snapshot = request.headers.get("X-Bandros-Snapshot")
+            if snapshot:
+                database_path, _, _ = tenant_locations(
+                    account_id,
+                    settings.database_path.parent,
+                    settings.workspace_root,
+                )
+                stage_snapshot(database_path, snapshot)
             repository_token, runtime_token = activate_account(account_id)
-        return await call_next(request)
+        response = await call_next(request)
+        if not public_path and request.method != "OPTIONS" and isinstance(account_id, str) and account_id.strip():
+            database_path, _, _ = tenant_locations(
+                account_id,
+                settings.database_path.parent,
+                settings.workspace_root,
+            )
+            if database_path.is_file():
+                encoded = encode_snapshot(database_path.read_bytes())
+                if len(encoded) <= 400_000:
+                    response.headers["X-Bandros-Snapshot"] = encoded
+        return response
     finally:
         if repository_token is not None:
             current_repository.reset(repository_token)
