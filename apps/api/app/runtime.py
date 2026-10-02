@@ -7,7 +7,17 @@ from pathlib import Path
 from uuid import UUID
 
 from .domain import ApprovalStatus, BotStatus, RunStatus
-from .mentions import addresses_everyone, asks_roll_call, group_prompt, is_silence, is_status_report, lead_bot, mentioned_bots, with_roll_call_mentions
+from .mentions import (
+    addresses_everyone,
+    asks_roll_call,
+    group_prompt,
+    is_silence,
+    is_status_report,
+    lead_bot,
+    mentioned_bots,
+    with_roll_call_mentions,
+    without_peer_mentions,
+)
 from .model_gateway import ModelGateway
 from .repository import Repository
 from .workspace_tools import WorkspaceToolset
@@ -99,6 +109,7 @@ class RunRuntime:
         group_id = self.repository.group_for_run(run_id)
         if group_id and not is_silence(answer):
             answer = self._mention_teammates_for_roll_call(group_id, bot, answer, self._group_depth.get(run_id, 0))
+            answer = self._drop_answered_peer_mentions(group_id, bot, answer)
         self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
         self.repository.append_message(run.conversation_id, "assistant", answer, model=run.model)
         if group_id and not is_silence(answer):
@@ -179,20 +190,26 @@ class RunRuntime:
                 targets = [member for member in targets if member.id != lead.id]
         elif not targets and members:
             targets = [lead_bot(members)]
-        messages = self.repository.list_group_messages(group_id)
-        names = {member.id: member.name for member in group.members}
-        prior = messages[:-1] if messages and messages[-1].content == content else messages
-        transcript = "\n".join(
-            f"- {'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')} — {message.content[:160]}"
-            for message in prior[-6:]
-        )
         busy = {run.bot_id for run in self.repository.runs_for_group(group_id)}
         for target in targets:
             if target.id in busy or self._wake_budget <= 0:
                 continue
             self._wake_budget -= 1
+            messages = self.repository.list_group_messages(group_id)
+            names = {member.id: member.name for member in group.members}
+            trigger_at = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].content == content), len(messages))
+            visible = messages[:trigger_at] + messages[trigger_at + 1 :]
+            already = []
+            for message in messages[trigger_at + 1 :]:
+                name = names.get(message.sender_bot_id)
+                if name and name not in already and message.sender_bot_id != target.id:
+                    already.append(name)
+            transcript = "\n".join(
+                f"- {'Pengguna' if message.sender_type == 'user' else names.get(message.sender_bot_id, 'Bot')} — {message.content[:160]}"
+                for message in visible[-8:]
+            )
             conversation_id = self.repository.conversation_for_bot(target.id)
-            prompt = group_prompt(group, content, transcript)
+            prompt = group_prompt(group, content, transcript, already)
             run = self.repository.create_run(target.id, conversation_id, prompt, target.model or self.default_model)
             self.repository.link_run_to_group(run.id, group_id)
             self._group_depth[run.id] = depth
@@ -210,6 +227,25 @@ class RunRuntime:
         if not asks_roll_call(user_text):
             return answer
         return with_roll_call_mentions(answer, members, bot)
+
+    def _drop_answered_peer_mentions(self, group_id: UUID, bot, answer: str) -> str:
+        group = self.repository.get_group(group_id)
+        members = [member for member in group.members if member.status is BotStatus.ACTIVE]
+        if not members or lead_bot(members).id == bot.id:
+            return answer
+        lowered = answer.lower()
+        asks_again = "mohon balas" in lowered or "balas status" in lowered or "reply singkat" in lowered
+        messages = self.repository.list_group_messages(group_id)
+        last_user = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].sender_type == "user"), -1)
+        replied = {
+            message.sender_bot_id
+            for message in messages[last_user + 1 :]
+            if message.sender_type == "bot" and message.sender_bot_id not in {None, bot.id}
+        }
+        mentions_someone_who_replied = any(member.id in replied for member in mentioned_bots(answer, members))
+        if not asks_again and not mentions_someone_who_replied:
+            return answer
+        return without_peer_mentions(answer, members, bot)
 
     def _environment_context(self, bot_id: UUID) -> str:
         bots = self.repository.list_bots()

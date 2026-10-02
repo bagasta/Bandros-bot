@@ -164,6 +164,31 @@ def test_roll_call_mentions_every_teammate_and_their_status_does_not_bounce(tmp_
     assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, backend.id]
 
 
+def test_next_bot_sees_who_already_replied_and_does_not_ping_them(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "context.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    backend = repository.create_bot("Backend", "Membuat API.", "TOKEN:backend", None)
+    group = repository.create_group("Tim Produk", "", [bandros.id, frontend.id, backend.id])
+    text = "Cek kesiapan semua tim @Bandros"
+    repository.append_group_message(group.id, "user", text)
+    gateway = ScriptedGateway({
+        "TOKEN:bandros": "Saya cek sendiri.",
+        "TOKEN:frontend": "Siap @Bandros — landingpage tokyo8 selesai.",
+        "TOKEN:backend": "@Frontend @Backend — mohon balas status satu kalimat. @Bandros akan menilai.",
+    })
+    runtime = RunRuntime(repository, gateway, "test-model", 3)
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    assert any("Sudah membalas: Frontend" in prompt and "landingpage tokyo8 selesai" in prompt for prompt in gateway.prompts)
+    messages = repository.list_group_messages(group.id)
+    backend_message = next(message for message in messages if message.sender_bot_id == backend.id)
+    assert "@Frontend" not in backend_message.content
+    assert [message.sender_bot_id for message in messages].count(frontend.id) == 1
+    assert [message.sender_bot_id for message in messages].count(bandros.id) == 1
+
+
 def test_group_run_delegates_only_by_mention(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "group.db")
     bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)

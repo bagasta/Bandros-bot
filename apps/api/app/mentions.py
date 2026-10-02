@@ -37,6 +37,7 @@ def asks_roll_call(text: str) -> bool:
             "tiap",
             "setiap",
             "semua bot",
+            "semua tim",
             "each bot",
             "mention mereka",
             "mention semua",
@@ -48,7 +49,25 @@ def asks_roll_call(text: str) -> bool:
 
 def is_status_report(text: str) -> bool:
     lowered = text.strip().lower()
-    return lowered.startswith("siap") or lowered.startswith("idle") or "reply singkat status" in lowered
+    return (
+        lowered.startswith("siap")
+        or lowered.startswith("idle")
+        or "reply singkat status" in lowered
+        or "mohon balas" in lowered
+        or "balas status" in lowered
+    )
+
+
+def without_peer_mentions(answer: str, members: list[Bot], sender: Bot) -> str:
+    """A specialist reports its own status. It does not @mention teammates who already spoke."""
+    lead = lead_bot(members)
+    if sender.id == lead.id:
+        return answer
+    for member in sorted(members, key=lambda item: len(item.name), reverse=True):
+        if member.id in {sender.id, lead.id}:
+            continue
+        answer = re.sub(rf"@{re.escape(member.name)}(?!\w)", "", answer, flags=re.IGNORECASE)
+    return re.sub(r"[ \t]{2,}", " ", answer).strip()
 
 
 def with_roll_call_mentions(answer: str, members: list[Bot], sender: Bot) -> str:
@@ -74,7 +93,7 @@ def lead_bot(members: list[Bot]) -> Bot:
     return members[0]
 
 
-def group_prompt(group: WorkGroup, content: str, transcript: str = "") -> str:
+def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_replied: list[str] | None = None) -> str:
     roster = ", ".join(f"@{member.name}" for member in group.members)
     lines = [
         f"Grup {group.name}. Anggota: {roster}.",
@@ -88,5 +107,10 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "") -> str:
     ]
     if transcript.strip():
         lines.append(f"Riwayat:\n{transcript.strip()}")
+    if already_replied:
+        lines.append(
+            f"Sudah membalas: {', '.join(already_replied)}. "
+            "Jangan mention mereka dan jangan menyuruh mereka balas lagi. Balas hanya statusmu, sebut hanya @Bandros."
+        )
     lines.append(content.strip())
     return "\n".join(lines)
