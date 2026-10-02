@@ -16,6 +16,7 @@ from .mentions import (
     group_prompt,
     is_silence,
     lead_bot,
+    visible_reply,
     mentioned_bots,
     route_next_owner,
     with_roll_call_mentions,
@@ -147,6 +148,8 @@ class RunRuntime:
             self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
             return
         group_id = self.repository.group_for_run(run_id)
+        if group_id:
+            answer = visible_reply(answer)
         if group_id and not is_silence(answer):
             if self._lead_already_replied(group_id, bot.id):
                 answer = "(diam)"
@@ -336,7 +339,16 @@ class RunRuntime:
                 lead = lead_bot(members)
                 targets = [member for member in targets if member.id != lead.id]
         elif not targets and members:
-            targets = [lead_bot(members)]
+            lead = lead_bot(members)
+            targets = [lead]
+            history = self.repository.list_group_messages(group_id)
+            for message in reversed(history):
+                if message.sender_type != "bot" or message.sender_bot_id in {None, lead.id}:
+                    continue
+                speaker = next((member for member in members if member.id == message.sender_bot_id), None)
+                if speaker is not None:
+                    targets.append(speaker)
+                break
         self._anticipated[group_id] = [member.name for member in targets]
         try:
             await self._speak_to_targets(group_id, content, targets, depth)

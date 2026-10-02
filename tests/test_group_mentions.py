@@ -22,6 +22,13 @@ def bot(name: str) -> Bot:
     return Bot.model_construct(id=uuid4(), name=name, status="active")
 
 
+def test_trailing_silence_token_is_removed_from_a_real_answer() -> None:
+    from apps.api.app.mentions import visible_reply
+
+    assert visible_reply("File ada di workspace. (diam)") == "File ada di workspace."
+    assert visible_reply("(diam)") == ""
+
+
 def test_stop_request_is_a_direct_phrase() -> None:
     assert is_stop_request("Stop now")
     assert is_stop_request("berhenti")
@@ -97,6 +104,33 @@ def test_unmentioned_message_wakes_the_lead_then_the_mention(tmp_path: Path) -> 
     assert all(not (message.role == "group" and message.content.startswith("[Grup ")) for message in private)
     assert "Cek tim" in runtime.model_gateway.prompts[1]
     assert all("Anggota:" not in message.content for message in private)
+
+
+def test_follow_up_without_mention_reaches_the_last_speaker(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "group.db")
+    lead = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:lead", None)
+    worker = repository.create_bot("IT Aplikasi", "", "TOKEN:worker", None)
+    group = repository.create_group("Divisi IT", "", [lead.id, worker.id])
+    repository.append_group_message(group.id, "user", "Mana udh jadi blm?")
+    repository.append_group_message(group.id, "bot", "File ada di workspace.", worker.id)
+    repository.append_group_message(group.id, "user", "Mana")
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:lead": "Filenya di workspace.",
+            "TOKEN:worker": "File tokyo8 ada di workspace. (diam)",
+        }),
+        "test-model",
+        3,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, "Mana", None, 0))
+
+    messages = repository.list_group_messages(group.id)
+    speakers = {message.sender_bot_id for message in messages if message.sender_type == "bot"}
+    assert lead.id in speakers
+    assert worker.id in speakers
+    assert all("(diam)" not in message.content for message in messages)
 
 
 def test_explicit_mention_skips_the_other_bot(tmp_path: Path) -> None:

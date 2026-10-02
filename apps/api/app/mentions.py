@@ -18,8 +18,22 @@ def mentioned_bots(text: str, bots: list[Bot]) -> list[Bot]:
     return found
 
 
+_SILENCE_TAIL = re.compile(
+    r"(?:\s*[\(\[](?:diam|no_reply)[\)\]]|\s+(?:diam|no_reply))+$",
+    re.IGNORECASE,
+)
+
+
 def is_silence(text: str) -> bool:
     return text.strip().lower() in {"", "(diam)", "diam", "[diam]", "no_reply"}
+
+
+def visible_reply(text: str) -> str:
+    """Drop a trailing silence token so a real answer is not posted as '(diam)'."""
+    cleaned = _SILENCE_TAIL.sub("", text).strip()
+    if is_silence(cleaned):
+        return ""
+    return cleaned
 
 
 def same_task(previous: str, nxt: str) -> bool:
@@ -200,7 +214,8 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
         "Pesan baru dari bos adalah tugas baru, kecuali ia menulis lanjut, revisi, atau menunjuk hasil yang baru dikirim.",
         "Tugas baru tidak mewarisi usaha, menu, harga, atau asumsi dari job yang sudah selesai. Kalau pesan itu tidak menjelaskan bisnisnya, tanyakan satu kalimat dan jangan menugaskan rekan.",
         "Riwayat di bawah sudah kamu baca, termasuk pesan yang tidak menyebutmu. Jangan mengulang pekerjaan yang selesai.",
-        "Kalau pesan ini menyebutmu, itu untukmu: jawab sekarang, singkat. Kalau tidak menyebutmu dan kamu bukan orkestrator untuk pesan tanpa mention, balas (diam).",
+        "Kalau pesan ini menyebutmu, jawab sekarang, singkat, tanpa menulis (diam).",
+        "Kalau pengguna menulis tanpa @ dan kamu orkestrator atau kamu yang terakhir bicara, jawab juga. Kalau bukan urusanmu, seluruh balasanmu hanya (diam), tanpa kalimat lain.",
         "@everyone: setiap anggota menjawab sekali. Sebut satu @Nama hanya untuk langkah berikutnya.",
     ]
     if jobs.strip():

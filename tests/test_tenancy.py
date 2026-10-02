@@ -171,10 +171,12 @@ def test_group_message_is_accepted_before_bots_reply(tmp_path: Path, monkeypatch
     monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)
     monkeypatch.setattr(main, "running_on_vercel", lambda: True)
 
-    async def slow_reply(self, group_id, content, sender_bot_id, depth) -> None:
-        await asyncio.sleep(3)
+    called: list[str] = []
 
-    monkeypatch.setattr(main.RunRuntime, "speak_in_group", slow_reply)
+    async def record_reply(self, group_id, content, sender_bot_id, depth) -> None:
+        called.append(content)
+
+    monkeypatch.setattr(main.RunRuntime, "speak_in_group", record_reply)
     monkeypatch.setattr(
         main,
         "settings",
@@ -201,6 +203,7 @@ def test_group_message_is_accepted_before_bots_reply(tmp_path: Path, monkeypatch
     assert created.status_code == 201
     assert sent.status_code == 201
     assert sent.json()["content"] == "halo tim"
+    assert called == ["halo tim"]
     assert elapsed < 1.5
     assert any(message["content"] == "halo tim" for message in messages.json())
     main._workspaces.clear()

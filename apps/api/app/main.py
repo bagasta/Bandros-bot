@@ -1259,20 +1259,11 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
         finally:
             release_snapshot(database_path)
 
-    try:
-        scheduled = False
-        if running_on_vercel():
-            from vercel.cache.context import get_context
-            from vercel.functions import wait_until
-
-            if get_context().wait_until is not None:
-                wait_until(speak())
-                scheduled = True
-        if not scheduled:
-            asyncio.create_task(speak())
-    except Exception:
-        release_snapshot(database_path)
-        raise
+    if running_on_vercel():
+        # A background task on this runtime was ending before any bot called the model.
+        await speak()
+    else:
+        asyncio.create_task(speak())
     return message
 
 
