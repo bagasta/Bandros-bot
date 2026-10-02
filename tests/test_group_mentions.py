@@ -163,6 +163,31 @@ def test_roll_call_mentions_every_teammate_and_their_status_does_not_bounce(tmp_
     assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, backend.id]
 
 
+def test_everyone_mention_posts_a_reply_from_each_member(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "everyone.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    backend = repository.create_bot("Backend", "Membuat API.", "TOKEN:backend", None)
+    group = repository.create_group("Tim Produk", "", [bandros.id, frontend.id, backend.id])
+    text = "@everyone kabar hari ini?"
+    repository.append_group_message(group.id, "user", text)
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:bandros": "Saya standby.",
+            "TOKEN:frontend": "Landing page selesai.",
+            "TOKEN:backend": "API siap.",
+        }),
+        "test-model",
+        4,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    posted = [message.sender_bot_id for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
+    assert posted == [bandros.id, frontend.id, backend.id]
+
+
 def test_bandros_posts_once_even_if_a_teammate_mentions_him(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "once.db")
     bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)

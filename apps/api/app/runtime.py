@@ -194,9 +194,8 @@ class RunRuntime:
             targets = [member for member in targets if member.id != lead.id]
         elif not targets and members:
             targets = [lead_bot(members)]
-        busy = {run.bot_id for run in self.repository.runs_for_group(group_id)}
         for target in targets:
-            if target.id in busy or self._wake_budget <= 0:
+            if self._wake_budget <= 0:
                 continue
             self._wake_budget -= 1
             messages = self.repository.list_group_messages(group_id)
@@ -217,7 +216,10 @@ class RunRuntime:
             run = self.repository.create_run(target.id, conversation_id, prompt, target.model or self.default_model)
             self.repository.link_run_to_group(run.id, group_id)
             self._group_depth[run.id] = depth
-            await self.start_and_wait(run.id)
+            try:
+                await self.start_and_wait(run.id)
+            except Exception:
+                continue
 
     def _lead_already_replied(self, group_id: UUID, bot_id: UUID) -> bool:
         group = self.repository.get_group(group_id)
@@ -302,14 +304,14 @@ class RunRuntime:
                 if in_group
                 else ""
             )
-            + "In a group, other bots react only when the message contains their @Name. "
+            + "In a group, write like a coworker on WhatsApp: one to three short sentences, posted in the group. "
+            "Other bots react only when the message contains their @Name. @everyone asks every member to answer once. "
             "To assign work, the reply itself must mention that teammate. "
             "A message with no @Name is answered only by the lead. "
             "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
-            "One to three short sentences. Do not recap that you already delegated or posted. "
-            "If you were mentioned, do the task and report the result. Do not quote the previous speaker or start with their name. "
-            "When the user asks to check each bot or mention each bot, mention every other member with @Name and ask for a one-line status. Do not invent their status. "
-            "When a teammate only reports status, reply (diam). "
+            "Do not recap that you already delegated or posted. "
+            "If you were mentioned or the message says @everyone, answer. Do not reply (diam) in that case. "
+            "Do not quote the previous speaker or start with their name. Do not write @ before your own name. "
             "Do not say a group tool is missing. "
             "Never claim a file, memory, job, bot, group, or handoff exists unless the tool result says ok. "
             "If a tool requires approval, stop and say exactly what needs approval. "

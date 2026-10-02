@@ -24,7 +24,7 @@ def is_silence(text: str) -> bool:
 
 def addresses_everyone(text: str) -> bool:
     lowered = text.lower()
-    return "@all" in lowered or "@semua" in lowered
+    return "@everyone" in lowered or "@all" in lowered or "@semua" in lowered
 
 
 def asks_roll_call(text: str) -> bool:
@@ -102,12 +102,10 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
     roster = ", ".join(f"@{member.name}" for member in group.members)
     lines = [
         f"Grup {group.name}. Anggota: {roster}.",
-        "Ini chat grup. Bot lain hanya bereaksi bila pesan memuat @Nama mereka.",
-        "Kalau kamu memberi tugas, satu balasan wajib menyebut @Nama dari daftar anggota. Jangan handoff dan jangan posting ulang.",
-        "Kalau kamu yang disebut, kerjakan tugasnya dan laporkan hasilnya. Jangan menyalin pesan sebelumnya dan jangan mulai dengan nama pengirim.",
-        "Kalau pengguna minta cek tiap bot, sebut setiap anggota lain dengan @Nama. Jangan menulis @ di depan namamu sendiri.",
-        "Kalau kamu diminta reply status, satu kalimat: Siap @Bandros — status singkatmu.",
-        "Kalau rekan hanya mengirim status, balas (diam).",
+        "Ini chat grup seperti WhatsApp. Balas 1-3 kalimat, dari dirimu sendiri, dan pesan itu masuk ke grup.",
+        "Bot lain hanya bereaksi bila disebut @Nama. @everyone memanggil semua anggota.",
+        "Kalau kamu disebut atau pesan berisi @everyone, wajib balas. Jangan (diam).",
+        "Jangan menulis @ di depan namamu sendiri, jangan handoff, dan jangan menyalin pesan orang lain.",
         "Kalau pesan ini bukan untukmu, balas (diam).",
     ]
     if transcript.strip():
