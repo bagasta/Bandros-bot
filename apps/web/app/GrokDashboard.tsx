@@ -164,11 +164,34 @@ function revisionKey(session: string | null): string {
   return session ? `bandros_workspace_rev:${session.slice(0, 80)}` : "";
 }
 
+const HEADER_BUDGET = 20_000;
+
+function dropWorkspaceCache() {
+  for (const key of Object.keys(window.localStorage)) {
+    if (key.startsWith("bandros_workspace")) window.localStorage.removeItem(key);
+  }
+}
+
+function forgetOversizedCache() {
+  const session = window.localStorage.getItem("bandros_chatgpt_session");
+  if (session && session.length > HEADER_BUDGET) {
+    window.localStorage.removeItem("bandros_chatgpt_session");
+    dropWorkspaceCache();
+    return;
+  }
+  const key = workspaceKey(session);
+  const snapshot = key ? window.localStorage.getItem(key) : null;
+  if (snapshot && snapshot.length > HEADER_BUDGET) {
+    window.localStorage.removeItem(key);
+    window.localStorage.removeItem(revisionKey(session));
+  }
+}
+
 function rememberSnapshot(session: string | null, response: Response) {
   const key = workspaceKey(session);
   const revKey = revisionKey(session);
   const snapshot = response.headers.get("X-Bandros-Snapshot");
-  if (!key || !snapshot) return;
+  if (!key || !snapshot || snapshot.length > HEADER_BUDGET) return;
   const rev = Number(response.headers.get("X-Bandros-Snapshot-Rev") || "0");
   const prev = Number(window.localStorage.getItem(revKey) || "0");
   if (rev < prev) return;
@@ -190,25 +213,39 @@ function desktopUrl(ticket: string): string | null {
   return `${apiBase}/computer/view/${encodeURIComponent(ticket)}/vnc_lite.html?${params}`;
 }
 
+function requestHeaders(path: string, init?: RequestInit, includeSnapshot = true): HeadersInit {
+  const deviceLogin = path.startsWith("/auth/chatgpt/device/");
+  const session = deviceLogin ? null : window.localStorage.getItem("bandros_chatgpt_session");
+  const snapshot = includeSnapshot && session ? window.localStorage.getItem(workspaceKey(session)) : null;
+  const safeSnapshot = snapshot && snapshot.length <= HEADER_BUDGET ? snapshot : null;
+  return {
+    "Content-Type": "application/json",
+    ...(session ? { "X-Bandros-Session": session } : {}),
+    ...(safeSnapshot ? { "X-Bandros-Snapshot": safeSnapshot } : {}),
+    ...init?.headers,
+  };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE_URL belum diatur.");
-  const session = typeof window !== "undefined" ? window.localStorage.getItem("bandros_chatgpt_session") : null;
-  const snapshot = session ? window.localStorage.getItem(workspaceKey(session)) : null;
+  forgetOversizedCache();
   let response: Response;
   try {
-    response = await fetch(`${apiBase}${path}`, {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(session ? { "X-Bandros-Session": session } : {}),
-        ...(snapshot ? { "X-Bandros-Snapshot": snapshot } : {}),
-        ...init?.headers,
-      },
-    });
+    response = await fetch(`${apiBase}${path}`, { ...init, headers: requestHeaders(path, init) });
   } catch (cause) {
-    if (cause instanceof TypeError) throw new Error("Koneksi ke server terputus. Kirim ulang sebentar lagi.");
-    throw cause;
+    if (!(cause instanceof TypeError)) throw cause;
+    dropWorkspaceCache();
+    try {
+      response = await fetch(`${apiBase}${path}`, { ...init, headers: requestHeaders(path, init, false) });
+    } catch {
+      throw new Error("Koneksi ke server terputus. Kirim ulang sebentar lagi.");
+    }
   }
+  if (response.status === 494) {
+    dropWorkspaceCache();
+    response = await fetch(`${apiBase}${path}`, { ...init, headers: requestHeaders(path, init, false) });
+  }
+  const session = window.localStorage.getItem("bandros_chatgpt_session");
   rememberSnapshot(session, response);
   if (!response.ok) {
     const body = await response.json().catch(() => null);

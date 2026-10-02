@@ -307,7 +307,7 @@ async def optional_auth(request: Request, call_next):
             database_path = _account_database_path(account_id)
             if database_path.is_file():
                 encoded = encode_snapshot(database_path.read_bytes())
-                if len(encoded) <= 400_000:
+                if len(encoded) <= 20_000:
                     response.headers["X-Bandros-Snapshot"] = encoded
                     response.headers["X-Bandros-Snapshot-Rev"] = str(database_revision(database_path))
         return response
