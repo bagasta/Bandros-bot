@@ -28,6 +28,7 @@ from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
+from .mentions import is_stop_request
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
 from .repository import Repository
 from .runtime import RunRuntime
@@ -937,6 +938,9 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
         message = repository.append_group_message(group_id, "user", payload.content)
     except KeyError as error:
         raise not_found(error) from error
+    runtime.interrupt_group(group_id)
+    if is_stop_request(payload.content):
+        return message
     database_path = _account_database_path(_active_account_id())
     hold_snapshot(database_path)
 
@@ -947,7 +951,10 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
             release_snapshot(database_path)
 
     try:
-        await continue_after_response(speak())
+        if running_on_vercel():
+            await continue_after_response(speak())
+        else:
+            asyncio.create_task(speak())
     except Exception:
         release_snapshot(database_path)
         raise
@@ -1083,6 +1090,17 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         model=payload.model,
         attachments=payload.attachments,
     )
+    runtime.interrupt_bot(bot_id)
+    if is_stop_request(payload.content):
+        run = repository.create_run(
+            bot_id,
+            conversation_id,
+            payload.content,
+            _model_for_bot(bot, payload.model),
+        )
+        repository.append_message(conversation_id, "assistant", "Dihentikan.")
+        repository.update_run(run.id, RunStatus.CANCELLED)
+        return repository.get_run(run.id)
     run = repository.create_run(
         bot_id,
         conversation_id,

@@ -154,6 +154,17 @@ class RunRuntime:
             self.start(run_id)
         return len(run_ids)
 
+    def interrupt_bot(self, bot_id: UUID) -> None:
+        """A new direct message takes priority over work already running for that Bot."""
+        for run in self.repository.active_runs_for_bot(bot_id):
+            self.stop(run.id)
+
+    def interrupt_group(self, group_id: UUID) -> None:
+        """A new group message redirects the team and drops wakes from the previous turn."""
+        self._pending_wakes = [wake for wake in self._pending_wakes if wake[0] != group_id]
+        for run in self.repository.runs_for_group(group_id):
+            self.stop(run.id)
+
     def stop(self, run_id: UUID) -> None:
         task = self._tasks.get(run_id)
         if task and not task.done():
@@ -293,7 +304,7 @@ class RunRuntime:
         mentions_someone_who_replied = any(member.id in replied for member in mentioned_bots(answer, members))
         if not asks_again and not mentions_someone_who_replied:
             return answer
-        return without_peer_mentions(answer, members, bot)
+        return without_peer_mentions(answer, members, bot, replied)
 
     def _environment_context(self, bot_id: UUID) -> str:
         bots = self.repository.list_bots()
@@ -317,42 +328,50 @@ class RunRuntime:
             content = getattr(skill, "content", "")
             skill_blocks.append(f"## {name}\n{content}")
         skill_text = "\n\n".join(skill_blocks) or "none"
+        orchestrator = (
+            "You are the primary orchestrator, Bandros. Delegate specialist work to a Bot you create. "
+            "A new Bot needs a specific description plus instructions with the sections Tugas, Cara kerja, Output, and Batasan. "
+            "Rewrite the instructions until create_bot returns ok. "
+            if "orkestrator" in description.lower()
+            else ""
+        )
+        if in_group:
+            mode = (
+                "This run is the group conversation. These rules win if they conflict with the Bot instructions. "
+                "You are an expert human in a WhatsApp group. The boss gives the direction. "
+                "Reply in a short chat message: the result first, then exactly one @Name if someone else owns the next step. "
+                "No headings, no status essay, and no recap of these rules. "
+                "One stage has one owner. Mention exactly one @Name and include the data they need. "
+                "A check-in or @everyone is the exception: every named member answers once. "
+                "If the message is not for you, reply (diam). If you were mentioned, do the work now. "
+                "Call web_search or fetch_url before a research answer, and write_workspace_file when a file should exist. "
+                "When your stage is done, mention the one teammate who owns the next step. "
+                "If you are the orchestrator and a teammate already posted a result, mention the one teammate who has not finished, or give the user the final result with no @mention. "
+                "Do not answer a short ready/status ping. Do not reply (diam) when you were mentioned. "
+                "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
+                "Do not recap that you already delegated. Do not quote the previous speaker or write @ before your own name. "
+            )
+        else:
+            mode = (
+                "This is your private conversation with the user. "
+                "Reply like an expert texting the boss on WhatsApp: the result first, short, and in their language. "
+                "Do the work yourself on the shared computer. "
+                "Use handoff_to_bot when another Bot owns a bounded part, and post_to_group when the team should see an update. "
+                "Every Bot can list, create, update, archive, and restore Bots, and can list, create, and edit groups. "
+                "When asked to make a Bot and a group with it, call create_bot and then create_group. "
+            )
         return (
             "You are a persistent named teammate on a shared computer, in the style of a Grok Bot. "
             "Finish the task with tools instead of only drafting advice. "
             "Keep durable project files in the shared workspace. "
             "Memory is for stable preferences, role facts, and short work summaries; "
             "it is not the source of truth for data that changes. "
-            "Every Bot can list, create, update, archive, and restore Bots, and can list, create, and edit groups. "
-            "When asked to make a Bot and a group with it, call create_bot and then create_group. "
-            + (
-                "You are the primary orchestrator, Bandros. Delegate specialist work to a Bot you create. "
-                "A new Bot needs a specific description plus instructions with the sections Tugas, Cara kerja, Output, and Batasan. "
-                "Rewrite the instructions until create_bot returns ok. "
-                if "orkestrator" in description.lower()
-                else ""
-            )
-            + (
-                "This run is the group conversation. "
-                if in_group
-                else ""
-            )
-            + "In a group, work like a Grok Bot team: finish the task and post the result. These rules win if they conflict with the Bot instructions. "
-            "The user receives the outcome. Do not wait for the user to manage the next step, and do not ask for scope you can assume. "
-            "State one assumption, then deliver the work in this same reply. "
-            "One stage has one owner. To assign work, mention exactly one @Name and include the data they need. "
-            "A check-in or @everyone is the exception: every named member answers once. "
-            "If you are the orchestrator and a teammate already posted a result, either mention the one teammate who has not finished or give the user the final result with no @mention. "
-            "Do not answer a short ready/status ping. "
-            "If you were mentioned, do the work now. Call web_search or fetch_url before a research answer, and write_workspace_file when a file should exist. "
-            "End a specialist result with @Bandros so the next stage starts. Do not reply (diam) when you were mentioned. "
-            "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
-            "Do not recap that you already delegated. Do not quote the previous speaker or write @ before your own name. "
-            "Do not say a group tool is missing. "
+            "A newer user message replaces the task you were doing. "
             "Never claim a file, memory, job, bot, group, or handoff exists unless the tool result says ok. "
             "If a tool requires approval, stop and say exactly what needs approval. "
             "Reply in the user's language and keep the user updated on what you actually did. "
             "Write that reply as clean Markdown: short paragraphs, **bold** only for names, and a bullet list when several items were created.\n\n"
+            f"{mode}{orchestrator}\n"
             f"Bot's main responsibility:\n{description or 'Help the user with the task they provide.'}\n\n"
             f"Bot instructions:\n{instructions}\n\n"
             f"Environment knowledge:\n{environment}\n\n"

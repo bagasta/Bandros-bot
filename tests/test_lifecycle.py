@@ -61,6 +61,8 @@ def test_run_prompt_includes_skill_and_shared_computer(tmp_path: Path) -> None:
     asyncio.run(runtime.start_and_wait(run.id))
 
     assert "shared computer" in captured["system"]
+    assert "private conversation" in captured["system"]
+    assert "This run is the group conversation" not in captured["system"]
     assert "Buka sumber" in captured["system"]
     assert captured["request_limit"] == "3"
     assert "save_memory" in captured["tools"]

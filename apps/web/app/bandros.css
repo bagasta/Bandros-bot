@@ -55,9 +55,11 @@
 .bandros-quick-prompts button { min-height: 0; padding: 12px 14px; color: var(--ink); text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
 .bandros-message { max-width: 640px; margin: 0 auto 14px; }
 .bandros-message.from-user { margin-right: 0; margin-left: auto; }
-.bandros-message span { color: var(--muted); font-size: 12px; font-weight: 650; }
-.bandros-bubble { margin: 6px 0 0; padding: 12px 14px; background: var(--panel); border-radius: 16px; line-height: 1.55; }
-.bandros-message.from-user .bandros-bubble { background: #1c1c1e; color: #fff; white-space: pre-wrap; }
+.bandros-message span, .bandros-message > button { color: var(--muted); font-size: 12px; font-weight: 650; background: transparent; border: 0; padding: 0; }
+.bandros-bubble { margin: 6px 0 0; padding: 10px 12px 8px; background: #fff; border: 1px solid var(--line); border-radius: 4px 16px 16px 16px; line-height: 1.5; }
+.bandros-bubble time { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; text-align: right; }
+.bandros-message.from-user .bandros-bubble { background: #1c1c1e; color: #fff; white-space: pre-wrap; border-color: #1c1c1e; border-radius: 16px 16px 4px 16px; }
+.bandros-message.from-user .bandros-bubble time { color: rgba(255, 255, 255, .62); }
 .bandros-rich p { margin: 0 0 8px; }
 .bandros-rich p:last-child, .bandros-rich ul:last-child, .bandros-rich ol:last-child, .bandros-rich pre:last-child { margin-bottom: 0; }
 .bandros-rich strong { font-weight: 700; }
@@ -70,6 +72,8 @@
 .bandros-rich pre { margin: 8px 0; padding: 10px 12px; overflow: auto; background: #f4f3ef; border-radius: 10px; }
 .bandros-rich pre code { padding: 0; background: transparent; }
 .bandros-message.from-user .bandros-rich code { background: rgba(255, 255, 255, .14); }
+.bandros-typing-bar { margin: 0 28px 8px; color: var(--muted); font-size: 12px; }
+.bandros-message > button { cursor: pointer; }
 .bandros-typing-bubble { display: flex; align-items: center; gap: 5px; width: fit-content; min-height: 38px; padding: 14px 16px; }
 .bandros-typing-bubble i { width: 7px; height: 7px; border-radius: 50%; background: #8e8e93; animation: bandros-typing 1.2s infinite ease-in-out; }
 .bandros-typing-bubble i:nth-child(2) { animation-delay: .15s; }

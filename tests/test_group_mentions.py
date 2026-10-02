@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from apps.api.app.database import Database
 from apps.api.app.domain import Bot
-from apps.api.app.mentions import mentioned_bots
+from apps.api.app.mentions import is_stop_request, mentioned_bots, without_peer_mentions
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime
 from apps.api.app.workspace_tools import WorkspaceToolset, parse_search_results, public_https_url
@@ -19,7 +19,26 @@ def make_repository(path: Path) -> Repository:
 
 
 def bot(name: str) -> Bot:
-    return Bot.model_construct(name=name)
+    return Bot.model_construct(id=uuid4(), name=name, status="active")
+
+
+def test_stop_request_is_a_direct_phrase() -> None:
+    assert is_stop_request("Stop now")
+    assert is_stop_request("berhenti")
+    assert not is_stop_request("jangan berhenti dulu")
+
+
+def test_unfinished_teammate_stays_mentioned() -> None:
+    bandros = bot("Bandros")
+    market = bot("MarketRiset")
+    landing = bot("LandingPage")
+    answer = without_peer_mentions(
+        "@LandingPage susun halaman dari temuan ini.",
+        [bandros, market, landing],
+        market,
+        set(),
+    )
+    assert "@LandingPage" in answer
 
 
 def test_mention_prefers_the_longest_bot_name() -> None:
@@ -186,6 +205,32 @@ def test_everyone_mention_posts_a_reply_from_each_member(tmp_path: Path) -> None
 
     posted = [message.sender_bot_id for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
     assert posted == [bandros.id, frontend.id, backend.id]
+
+
+def test_specialist_wakes_the_next_owner_directly(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "peer.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    market = repository.create_bot("MarketRiset", "Mencari usaha.", "TOKEN:market", None)
+    landing = repository.create_bot("LandingPage", "Menyusun halaman.", "TOKEN:landing", None)
+    group = repository.create_group("Riset", "", [bandros.id, market.id, landing.id])
+    text = "@MarketRiset cari usaha rental"
+    repository.append_group_message(group.id, "user", text)
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:market": "@LandingPage susun halaman dari temuan rental ini.",
+            "TOKEN:landing": "Draft halaman selesai. @Bandros",
+            "TOKEN:bandros": "Hasil akhir: rental dan halamannya sudah ada.",
+        }),
+        "test-model",
+        4,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    messages = repository.list_group_messages(group.id)
+    assert [message.sender_bot_id for message in messages] == [None, market.id, landing.id, bandros.id]
+    assert "@LandingPage" in messages[1].content
 
 
 def test_a_result_wakes_bandros_once_without_reassigning_the_same_bot(tmp_path: Path) -> None:

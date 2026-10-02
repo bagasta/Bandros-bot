@@ -22,6 +22,11 @@ def is_silence(text: str) -> bool:
     return text.strip().lower() in {"(diam)", "diam", "[diam]", "no_reply"}
 
 
+def is_stop_request(text: str) -> bool:
+    """A direct stop ends the current turn, the same way a Grok Bot stops on 'Stop now'."""
+    return text.strip().lower() in {"stop", "stop now", "berhenti", "berhenti sekarang"}
+
+
 def addresses_everyone(text: str) -> bool:
     lowered = text.lower()
     return "@everyone" in lowered or "@all" in lowered or "@semua" in lowered
@@ -89,13 +94,15 @@ def without_self_mention(answer: str, sender: Bot) -> str:
     return re.sub(rf"@{re.escape(sender.name)}(?!\w)", sender.name, answer, flags=re.IGNORECASE)
 
 
-def without_peer_mentions(answer: str, members: list[Bot], sender: Bot) -> str:
-    """A specialist reports its own status. It does not @mention teammates who already spoke."""
+def without_peer_mentions(answer: str, members: list[Bot], sender: Bot, only_ids: set | None = None) -> str:
+    """Drop @mentions of teammates who already answered. A new owner stays mentioned."""
     lead = lead_bot(members)
     if sender.id == lead.id:
         return answer
     for member in sorted(members, key=lambda item: len(item.name), reverse=True):
         if member.id in {sender.id, lead.id}:
+            continue
+        if only_ids is not None and member.id not in only_ids:
             continue
         answer = re.sub(rf"@{re.escape(member.name)}(?!\w)", "", answer, flags=re.IGNORECASE)
     return re.sub(r"[ \t]{2,}", " ", answer).strip()
@@ -128,11 +135,11 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
     roster = ", ".join(f"@{member.name}" for member in group.members)
     lines = [
         f"Grup {group.name}. Anggota: {roster}.",
-        "Ini tim Grok Bot. Pengguna hanya menerima hasil. Jangan menunggu pengguna mengatur langkah.",
+        "Ini grup WhatsApp. Bos memberi arahan. Kamu ahli di bidangmu dan membalas seperti manusia: 2-6 kalimat, hasilnya dulu, tanpa judul atau laporan.",
         "Satu tahap, satu pemilik. Orkestrator menyebut tepat satu @Nama yang mengerjakan sekarang, plus data yang sudah ada.",
         "Kalau kamu disebut: kerjakan tuntas di balasan ini. Jangan bertanya scope. Tulis satu kalimat asumsi, lalu hasilnya.",
         "Untuk riset, panggil web_search atau fetch_url dulu. Untuk berkas, panggil write_workspace_file. Jangan hanya berjanji akan mencari.",
-        "Setelah hasil ada, akhiri dengan @Bandros dan apa yang selesai. Jangan hanya bilang siap.",
+        "Setelah tahapmu selesai, sebut tepat satu @Nama yang memiliki langkah berikutnya. Kalau hasil sudah utuh, sebut koordinatornya.",
         "Kalau pesan ini bukan untukmu, balas (diam). @everyone berarti setiap anggota menjawab sekali.",
         "Jangan menulis @ di depan namamu sendiri, jangan handoff, dan jangan menyalin pesan orang lain.",
     ]
