@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 import asyncio
@@ -359,6 +360,17 @@ async def _list_codex_models(connection: dict[str, object]) -> list[dict[str, st
                 return models
             last_detail = "katalog tidak memuat model yang bisa dipilih"
     raise HTTPException(status_code=502, detail=f"Katalog model Codex gagal ({last_detail})")
+
+
+async def continue_after_response(work: Awaitable[object]) -> None:
+    """Return the HTTP response before long group work, when Vercel can keep the invocation alive."""
+    from vercel.cache.context import get_context
+    from vercel.functions import wait_until
+
+    if get_context().wait_until is None:
+        await work
+        return
+    wait_until(work)
 
 
 async def _start_run(run_id: UUID) -> None:
@@ -873,7 +885,7 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
         message = repository.append_group_message(group_id, "user", payload.content)
     except KeyError as error:
         raise not_found(error) from error
-    await runtime.speak_in_group(group_id, payload.content, None, 0)
+    await continue_after_response(runtime.speak_in_group(group_id, payload.content, None, 0))
     return message
 
 

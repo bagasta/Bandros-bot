@@ -43,14 +43,20 @@ const quickPrompts = [
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE_URL belum diatur.");
   const session = typeof window !== "undefined" ? window.localStorage.getItem("bandros_chatgpt_session") : null;
-  const response = await fetch(`${apiBase}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(session ? { "X-Bandros-Session": session } : {}),
-      ...init?.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(session ? { "X-Bandros-Session": session } : {}),
+        ...init?.headers,
+      },
+    });
+  } catch (cause) {
+    if (cause instanceof TypeError) throw new Error("Koneksi ke server terputus. Kirim ulang sebentar lagi.");
+    throw cause;
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     throw new Error(typeof body?.detail === "string" ? body.detail : `Request gagal (${response.status}).`);
@@ -255,7 +261,7 @@ export default function GrokDashboard() {
 
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
-    if ((!selectedBot && !selectedGroup) || !prompt.trim() || working) return;
+    if ((!selectedBot && !selectedGroup) || !prompt.trim() || working || (selectedGroup && typingNames.length > 0)) return;
     const content = prompt.trim();
     setPrompt(""); setWorking(true); setError(null);
     try {
@@ -565,7 +571,7 @@ export default function GrokDashboard() {
           <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}. Ketik @ untuk menyebut Bot` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
           <div className="bandros-composer-footer">
             <label className="bandros-model-picker">Model{chatGPT.connected ? modelSelect : <button type="button" onClick={() => void connectChatGPT()}>Sign in</button>}</label>
-            {working ? <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button> : <button type="submit" disabled={!prompt.trim()} aria-label="Send message">Send</button>}
+            {working || (selectedGroup && typingNames.length > 0) ? <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button> : <button type="submit" disabled={!prompt.trim()} aria-label="Send message">Send</button>}
           </div>
         </form>}
       </section>
