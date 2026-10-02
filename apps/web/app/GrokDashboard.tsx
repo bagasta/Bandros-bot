@@ -257,10 +257,7 @@ export default function GrokDashboard() {
     const botId = selectedBot.id;
     const tick = async () => {
       try {
-        const [nextMessages, activity] = await Promise.all([
-          request<Message[]>(`/bots/${botId}/messages`),
-          request<{ working: boolean; error?: string | null }>(`/bots/${botId}/activity`),
-        ]);
+        const nextMessages = await request<Message[]>(`/bots/${botId}/messages`);
         if (!active) return;
         const visible = nextMessages.filter((message) => message.role !== "group");
         setMessages((current) => {
@@ -268,6 +265,8 @@ export default function GrokDashboard() {
           const pending = current.filter((item) => item.id.startsWith("local-") && !visible.some((message) => message.role === item.role && message.content === item.content));
           return [...visible, ...pending];
         });
+        const activity = await request<{ working: boolean; error?: string | null }>(`/bots/${botId}/activity`);
+        if (!active) return;
         setBotWorking(activity.working);
         if (activity.error && !workingRef.current && shownRunError.current !== activity.error) {
           shownRunError.current = activity.error;

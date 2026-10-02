@@ -114,7 +114,10 @@ def test_old_snapshot_cannot_erase_a_reply(tmp_path: Path, monkeypatch) -> None:
             f"/api/v1/bots/{bot_id}/messages",
             headers={**headers, "X-Bandros-Snapshot": old_snapshot},
         )
+        activity = client.get(f"/api/v1/bots/{bot_id}/activity", headers=headers)
 
+    assert activity.status_code == 200
+    assert activity.json()["working"] is False
     assert sent.status_code == 202
     assert sent.json()["status"] == "completed"
     assert any(message["content"] == "Mock response for: halo" for message in stale.json())

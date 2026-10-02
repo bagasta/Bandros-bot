@@ -169,9 +169,10 @@ def _seed_workspace(repo: Repository) -> None:
     default_skill_ids = {skill.name: skill.id for skill in repo.list_skills()}
     for bot in repo.list_bots():
         if "manager" in bot.name.lower() or bot.name.lower() == ORCHESTRATOR_NAME.lower():
+            assigned = {skill.name for skill in repo.list_bot_skills(bot.id)}
             for skill_name in ("workspace_admin", "job_manager", "coordination"):
                 skill_id = default_skill_ids.get(skill_name)
-                if skill_id:
+                if skill_id and skill_name not in assigned:
                     repo.assign_skill(bot.id, skill_id)
     existing = next((bot for bot in repo.list_bots() if bot.name.lower() == ORCHESTRATOR_NAME.lower()), None)
     if existing is None:
@@ -891,12 +892,12 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
     return activity
 
 
-@app.get("/api/v1/bots/{bot_id}/activity", response_model=BotActivity)
 def _run_is_live(run_id: UUID) -> bool:
     task = runtime._tasks.get(run_id)
     return task is not None and not task.done()
 
 
+@app.get("/api/v1/bots/{bot_id}/activity", response_model=BotActivity)
 def bot_activity(bot_id: UUID) -> BotActivity:
     try:
         repository.get_bot(bot_id)
