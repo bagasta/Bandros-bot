@@ -403,16 +403,13 @@ async def chatgpt_device_start() -> dict[str, object]:
     user_code = device.get("user_code")
     if not device_code or not user_code:
         raise HTTPException(status_code=502, detail="Response device OAuth tidak lengkap")
-    flow_id = secrets.token_urlsafe(32)
-    await credential_store.put(
-        "flows",
-        flow_id,
-        {
-            "device_code": device_code,
-            "user_code": user_code,
-            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
-        },
-    )
+    flow = {
+        "device_code": device_code,
+        "user_code": user_code,
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+    }
+    flow_id = credential_store.seal(flow)
+    await credential_store.put("flows", flow_id, flow)
     return {
         "flow_id": flow_id,
         "user_code": user_code,
@@ -503,7 +500,7 @@ async def chatgpt_device_poll(payload: DevicePollInput) -> dict[str, object]:
     models = await _list_codex_models(connection)
     connection["models"] = models
     connection["preferred_model"] = models[0]["id"] if models else LATEST_CODEX_MODEL["id"]
-    session_token = secrets.token_urlsafe(48)
+    session_token = credential_store.seal(connection)
     await credential_store.put("sessions", session_token, connection)
     await credential_store.delete("flows", payload.flow_id)
     return {
@@ -641,25 +638,22 @@ async def chatgpt_auth_callback(code: str | None = None, state: str | None = Non
     account_id = auth_claims.get("chatgpt_account_id") or claims.get("sub")
     if not isinstance(account_id, str) or not account_id:
         raise HTTPException(status_code=502, detail="Account ID ChatGPT tidak ada pada token")
-    session_token = secrets.token_urlsafe(48)
-    await credential_store.put(
-        "sessions",
-        session_token,
-        {
-            "auth_mode": "siwc",
-            "client_id": issued_client_id,
-            "host_id": host_id,
-            "access_token": access_token,
-            "refresh_token": tokens.get("refresh_token"),
-            "id_token": id_token,
-            "account_id": account_id,
-            "email": claims.get("email"),
-            "subject": claims.get("sub"),
-            "scope": granted_scope,
-            "preferred_model": preferred_model,
-            "expires_at": (datetime.now(UTC) + timedelta(seconds=int(expires))).isoformat() if expires else None,
-        },
-    )
+    connection = {
+        "auth_mode": "siwc",
+        "client_id": issued_client_id,
+        "host_id": host_id,
+        "access_token": access_token,
+        "refresh_token": tokens.get("refresh_token"),
+        "id_token": id_token,
+        "account_id": account_id,
+        "email": claims.get("email"),
+        "subject": claims.get("sub"),
+        "scope": granted_scope,
+        "preferred_model": preferred_model,
+        "expires_at": (datetime.now(UTC) + timedelta(seconds=int(expires))).isoformat() if expires else None,
+    }
+    session_token = credential_store.seal(connection)
+    await credential_store.put("sessions", session_token, connection)
     return RedirectResponse(
         url=f"{settings.web_origin}?chatgpt=connected&session={quote(session_token)}",
         status_code=303,

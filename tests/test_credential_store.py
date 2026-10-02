@@ -26,3 +26,33 @@ def test_memory_credential_store_round_trip(monkeypatch) -> None:
 def test_credential_store_is_durable_with_blob_token(monkeypatch) -> None:
     monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_token")
     assert CredentialStore().durable is True
+
+
+def test_sealed_session_survives_a_suspended_blob_store(monkeypatch) -> None:
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_token")
+    monkeypatch.setenv("BANDROS_TOKEN_SECRET", "test-secret")
+
+    class SuspendedBlob:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def put(self, *args, **kwargs):
+            raise RuntimeError("Vercel Blob: This store has been suspended.")
+
+        async def get(self, *args, **kwargs):
+            raise RuntimeError("Vercel Blob: This store has been suspended.")
+
+    monkeypatch.setattr("vercel.blob.AsyncBlobClient", lambda: SuspendedBlob())
+    store = CredentialStore()
+    payload = {"account_id": "acct_a", "access_token": "token"}
+    token = store.seal(payload)
+
+    async def exercise() -> None:
+        await store.put("sessions", token, payload)
+        assert await store.get("sessions", token) == payload
+        assert await CredentialStore().get("sessions", token) == payload
+
+    asyncio.run(exercise())

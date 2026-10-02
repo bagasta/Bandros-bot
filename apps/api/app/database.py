@@ -201,6 +201,8 @@ class Database:
                 result = client.get(self.blob_path, access="private", use_cache=False)
         except BlobNotFoundError:
             return
+        except Exception:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_bytes(result.content)
 
@@ -209,14 +211,17 @@ class Database:
             return
         from vercel.blob import BlobClient
 
-        with BlobClient() as client:
-            client.put(
-                self.blob_path,
-                self.path.read_bytes(),
-                access="private",
-                content_type="application/vnd.sqlite3",
-                overwrite=True,
-            )
+        try:
+            with BlobClient() as client:
+                client.put(
+                    self.blob_path,
+                    self.path.read_bytes(),
+                    access="private",
+                    content_type="application/vnd.sqlite3",
+                    overwrite=True,
+                )
+        except Exception:
+            return
 
     @staticmethod
     def _migrate(connection: sqlite3.Connection) -> None:
