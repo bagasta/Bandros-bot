@@ -544,7 +544,7 @@ export default function GrokDashboard() {
       </aside>
       <section className="bandros-main">
         <header className="bandros-topbar">
-          <button className="bandros-back" type="button" onClick={() => { setMobilePane("list"); setSettingsOpen(false); }} aria-label="Kembali ke daftar Bot">Bots</button>
+          <button className="bandros-back" type="button" onClick={() => { setMobilePane("list"); setSettingsOpen(false); }} aria-label="Kembali ke daftar Bot">‹</button>
           {chatGPT.connected && (selectedBot || selectedGroup) && <button className="bandros-title" type="button" onClick={openSettings} disabled={!selectedBot}>
             <span className={`bandros-status-dot ${working || botWorking || typingNames.length > 0 ? "is-live" : ""}`} />
             <span><strong>{displayName}</strong><small>{selectedGroup ? selectedGroup.members.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
