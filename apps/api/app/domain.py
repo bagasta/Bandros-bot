@@ -226,6 +226,7 @@ class GroupActivity(APIModel):
 class BotActivity(APIModel):
     working: bool
     error: str | None = None
+    approvals: list[Approval] = Field(default_factory=list)
 
 
 class GroupMessageInput(APIModel):

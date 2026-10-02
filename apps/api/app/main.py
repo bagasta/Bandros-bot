@@ -9,6 +9,7 @@ import base64
 import hashlib
 import secrets
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncIterator
 from uuid import UUID
@@ -18,12 +19,13 @@ import httpx
 import jwt
 from jwt import PyJWKClient
 
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from .database import Database, database_revision, encode_snapshot, hold_snapshot, release_snapshot, stage_snapshot
+from .computer import DaytonaComputer
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
@@ -186,7 +188,7 @@ def _seed_workspace(repo: Repository) -> None:
         if existing.status is not BotStatus.ACTIVE:
             repo.set_bot_status(existing.id, BotStatus.ACTIVE)
             existing = repo.get_bot(existing.id)
-        if "satu tahap, satu pemilik" not in existing.instructions.lower():
+        if "tugas baru tidak mewarisi" not in existing.instructions.lower():
             repo.update_bot(existing.id, {"description": ORCHESTRATOR_DESCRIPTION, "instructions": ORCHESTRATOR_INSTRUCTIONS})
 
 
@@ -209,6 +211,12 @@ def activate_account(account_id: str) -> tuple[object, object]:
             default_model=settings.default_model,
             max_model_calls=settings.max_model_calls_per_run,
             workspace_root=files,
+            computer=DaytonaComputer(
+                api_key=settings.daytona_api_key,
+                api_url=settings.daytona_api_url,
+                account_id=digest,
+                target=settings.daytona_target,
+            ) if settings.daytona_api_key else None,
         )
         workspace_runtime.recover(resume=not settings.await_runs)
         pair = (repo, workspace_runtime)
@@ -262,6 +270,8 @@ def _active_account_id() -> str:
 
 @app.middleware("http")
 async def optional_auth(request: Request, call_next):
+    if request.url.path.startswith("/api/v1/computer/view/"):
+        return await call_next(request)
     session_token = request.headers.get("X-Bandros-Session")
     connection = (
         await credential_store.get("sessions", session_token) if session_token else None
@@ -416,6 +426,151 @@ async def _start_run(run_id: UUID) -> None:
         await runtime.start_and_wait(run_id)
     else:
         runtime.start(run_id)
+
+
+@app.get("/api/v1/computer")
+async def computer_status() -> dict[str, str | None]:
+    computer = _account_computer()
+    if computer is None:
+        return {"state": "unavailable", "screen_url": None}
+    return await asyncio.to_thread(computer.status)
+
+
+@app.post("/api/v1/computer/start")
+async def computer_start() -> dict[str, str | None]:
+    computer = _account_computer()
+    if computer is None:
+        raise HTTPException(status_code=503, detail="Komputer Daytona belum dikonfigurasi.")
+    runtime = current_runtime.get()
+    if runtime is not None:
+        runtime._computer_held = True
+    try:
+        return await asyncio.to_thread(computer.wake)
+    except Exception as error:
+        if runtime is not None:
+            runtime._computer_held = False
+        raise HTTPException(status_code=502, detail=str(error)[:300]) from error
+
+
+@app.post("/api/v1/computer/stop")
+async def computer_stop() -> dict[str, str | None]:
+    computer = _account_computer()
+    runtime = current_runtime.get()
+    if runtime is not None:
+        runtime._computer_held = False
+    if computer is not None:
+        await asyncio.to_thread(computer.park)
+    return {"state": "off", "screen_url": None}
+
+
+_SCREEN_TICKETS: dict[str, tuple[str, float]] = {}
+
+
+@app.get("/api/v1/computer/ticket")
+async def computer_ticket() -> dict[str, str]:
+    account_id = _active_account_id()
+    ticket = secrets.token_urlsafe(24)
+    _SCREEN_TICKETS[ticket] = (account_id, time.time() + 3600)
+    return {"ticket": ticket}
+
+
+@app.get("/api/v1/computer/view/{ticket}/{asset_path:path}")
+async def computer_view(ticket: str, asset_path: str) -> Response:
+    if ".." in asset_path.split("/"):
+        raise HTTPException(status_code=400, detail="path is invalid")
+    origin = await _preview_origin(ticket)
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        upstream = await client.get(
+            f"{origin}/{asset_path}",
+            headers={"X-Daytona-Skip-Preview-Warning": "true"},
+        )
+    media_type = upstream.headers.get("content-type", "application/octet-stream").split(";")[0]
+    return Response(content=upstream.content, status_code=upstream.status_code, media_type=media_type)
+
+
+@app.websocket("/api/v1/computer/view/{ticket}/websockify")
+async def computer_view_socket(websocket: WebSocket, ticket: str) -> None:
+    try:
+        account_id = _ticket_account(ticket)
+    except HTTPException:
+        await websocket.close(code=4401)
+        return
+    computer = DaytonaComputer(
+        api_key=settings.daytona_api_key or "",
+        api_url=settings.daytona_api_url,
+        account_id=tenant_digest(account_id),
+        target=settings.daytona_target,
+    )
+    origin = await asyncio.to_thread(computer.preview_origin)
+    if not origin:
+        await websocket.close(code=4404)
+        return
+    import websockets
+
+    upstream = origin.replace("https://", "wss://").replace("http://", "ws://") + "/websockify"
+    await websocket.accept(subprotocol="binary")
+    try:
+        async with websockets.connect(
+            upstream,
+            subprotocols=["binary"],
+            max_size=None,
+            additional_headers={"X-Daytona-Skip-Preview-Warning": "true"},
+        ) as remote:
+            async def from_browser() -> None:
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        break
+                    if message.get("bytes") is not None:
+                        await remote.send(message["bytes"])
+                    elif message.get("text") is not None:
+                        await remote.send(message["text"])
+
+            async def from_desktop() -> None:
+                async for data in remote:
+                    if isinstance(data, bytes):
+                        await websocket.send_bytes(data)
+                    else:
+                        await websocket.send_text(data)
+
+            done, pending = await asyncio.wait(
+                {asyncio.create_task(from_browser()), asyncio.create_task(from_desktop())},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                task.result()
+    except Exception:
+        await websocket.close()
+
+
+def _ticket_account(ticket: str) -> str:
+    found = _SCREEN_TICKETS.get(ticket)
+    if found is None or found[1] < time.time():
+        raise HTTPException(status_code=401, detail="Layar kedaluwarsa. Buka lagi.")
+    return found[0]
+
+
+async def _preview_origin(ticket: str) -> str:
+    if not settings.daytona_api_key:
+        raise HTTPException(status_code=503, detail="Komputer Daytona belum dikonfigurasi.")
+    computer = DaytonaComputer(
+        api_key=settings.daytona_api_key,
+        api_url=settings.daytona_api_url,
+        account_id=tenant_digest(_ticket_account(ticket)),
+        target=settings.daytona_target,
+    )
+    origin = await asyncio.to_thread(computer.preview_origin)
+    if not origin:
+        raise HTTPException(status_code=404, detail="Nyalakan komputer dulu.")
+    return origin
+
+
+def _account_computer() -> DaytonaComputer | None:
+    runtime = current_runtime.get()
+    computer = getattr(runtime, "computer", None)
+    return computer if isinstance(computer, DaytonaComputer) else None
 
 
 @app.get("/")
@@ -887,11 +1042,20 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
     except KeyError as error:
         raise not_found(error) from error
     activity: list[GroupActivity] = []
+    seen: set[str] = set()
     for run in repository.runs_for_group(group_id):
         if not _run_is_live(run.id):
             continue
         bot = repository.get_bot(run.bot_id)
+        seen.add(bot.name)
         activity.append(GroupActivity(bot_id=bot.id, name=bot.name, status=str(run.status)))
+    group = repository.get_group(group_id)
+    for name in runtime.typing_names(group_id):
+        if name in seen:
+            continue
+        member = next((item for item in group.members if item.name == name), None)
+        if member is not None:
+            activity.append(GroupActivity(bot_id=member.id, name=member.name, status="running"))
     return activity
 
 
@@ -908,10 +1072,18 @@ def bot_activity(bot_id: UUID) -> BotActivity:
     except KeyError as error:
         raise not_found(error) from error
     active = repository.active_runs_for_bot(bot_id)
+    latest = repository.latest_run_for_bot(bot_id)
+    pending = [
+        approval
+        for approval in repository.list_approvals(ApprovalStatus.PENDING)
+        if latest is not None and approval.run_id == latest.id and latest.status is RunStatus.WAITING_APPROVAL
+    ]
     if any(_run_is_live(run.id) for run in active):
-        return BotActivity(working=True)
+        return BotActivity(working=True, approvals=pending)
     if active:
-        return BotActivity(working=False, error="Balasan terputus. Kirim ulang pesan.")
+        return BotActivity(working=False, error="Balasan terputus. Kirim ulang pesan.", approvals=pending)
+    if pending:
+        return BotActivity(working=False, approvals=pending)
     messages = repository.list_messages(conversation_id)
     latest = repository.latest_run_for_bot(bot_id)
     if (
@@ -940,8 +1112,8 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
         message = repository.append_group_message(group_id, "user", payload.content)
     except KeyError as error:
         raise not_found(error) from error
-    runtime.interrupt_group(group_id)
     if is_stop_request(payload.content):
+        runtime.interrupt_group(group_id)
         return message
     database_path = _account_database_path(_active_account_id())
     hold_snapshot(database_path)
@@ -1098,8 +1270,8 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         model=payload.model,
         attachments=payload.attachments,
     )
-    runtime.interrupt_bot(bot_id)
     if is_stop_request(payload.content):
+        runtime.interrupt_bot(bot_id)
         run = repository.create_run(
             bot_id,
             conversation_id,
@@ -1109,14 +1281,15 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         repository.append_message(conversation_id, "assistant", "Dihentikan.")
         repository.update_run(run.id, RunStatus.CANCELLED)
         return repository.get_run(run.id)
+    if pending := runtime.pending_dm_run(bot_id):
+        return repository.get_run(runtime.queue_dm(bot_id, pending, payload.content))
     run = repository.create_run(
         bot_id,
         conversation_id,
         payload.content,
         _model_for_bot(bot, payload.model),
     )
-    await _start_run(run.id)
-    return repository.get_run(run.id)
+    return repository.get_run(runtime.queue_dm(bot_id, run.id, payload.content))
 
 
 @app.get("/api/v1/runs/{run_id}", response_model=Run)

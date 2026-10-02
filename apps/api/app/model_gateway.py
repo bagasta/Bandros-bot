@@ -9,6 +9,21 @@ import httpx
 from .workspace_tools import ToolDefinition
 
 
+class ApprovalRequired(Exception):
+    """Raised so a destructive tool stops the model loop and waits for the user."""
+
+
+def _find_approval(error: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ApprovalRequired):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class ModelGateway(Protocol):
     async def complete(
         self,
@@ -234,11 +249,18 @@ async def run_pydantic_agent(
     agent = Agent(model, instructions=system, retries=0)
     for definition in tools:
         agent._function_toolset.add_tool(_tool(definition))
-    result = await agent.run(
-        prompt,
-        model_settings=model_settings,
-        usage_limits=UsageLimits(request_limit=request_limit),
-    )
+    try:
+        result = await agent.run(
+            prompt,
+            model_settings=model_settings,
+            usage_limits=UsageLimits(request_limit=request_limit),
+        )
+    except ApprovalRequired as error:
+        return str(error)
+    except Exception as error:
+        if _find_approval(error):
+            return "Butuh persetujuanmu sebelum langkah ini dijalankan."
+        raise
     answer = str(result.output).strip()
     if not answer:
         raise RuntimeError("Model mengembalikan response kosong.")
@@ -249,7 +271,10 @@ def _tool(definition: ToolDefinition) -> Any:
     from pydantic_ai.tools import Tool
 
     async def invoke(**payload: object) -> dict[str, object]:
-        return await definition.handler(dict(payload))
+        result = await definition.handler(dict(payload))
+        if result.get("requires_approval"):
+            raise ApprovalRequired("Butuh persetujuanmu sebelum langkah ini dijalankan.")
+        return result
 
     tool = Tool.from_schema(
         invoke,
@@ -257,6 +282,6 @@ def _tool(definition: ToolDefinition) -> Any:
         description=definition.description,
         json_schema={"type": "object", "additionalProperties": True},
     )
-    tool.max_retries = 2
+    tool.max_retries = 0
     tool.timeout = definition.timeout_seconds
     return tool

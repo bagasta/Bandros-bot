@@ -33,11 +33,47 @@ type DeviceFlow = {
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
 
-const nameColors = ["#1f7a4d", "#b45309", "#6d28d9", "#1d4ed8", "#be123c", "#0f766e"];
+const nameColors = ["var(--sender-green)", "var(--sender-amber)", "var(--sender-purple)", "var(--sender-blue)", "var(--sender-pink)", "var(--sender-teal)"];
 
 function nameColor(name: string) {
   const index = [...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % nameColors.length;
   return nameColors[index];
+}
+
+const bandrosToppings = [
+  { cake: "#f6c453", crust: "#e08a2c" },
+  { cake: "#c6e38a", crust: "#6aaa4a" },
+  { cake: "#f3b7c8", crust: "#e07a93" },
+  { cake: "#e7c08a", crust: "#8a5a32" },
+  { cake: "#f7d36a", crust: "#d4892a" },
+  { cake: "#b7e0d2", crust: "#3d8f78" },
+];
+
+function BandrosAvatar({ name, working = false }: { name: string; working?: boolean }) {
+  const topping = bandrosToppings[[...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % bandrosToppings.length];
+  return (
+    <span className={`bandros-avatar ${working ? "is-working" : ""}`} aria-hidden="true">
+      <span className="bandros-cake">
+      <svg viewBox="0 0 64 64">
+        <ellipse cx="32" cy="58" rx="16" ry="3" fill="#000" opacity=".28" />
+        <circle cx="32" cy="32" r="26" fill={topping.crust} />
+        <circle cx="32" cy="30" r="22" fill={topping.cake} />
+        <circle cx="22" cy="22" r="1.5" fill={topping.crust} opacity=".55" />
+        <circle cx="34" cy="18" r="1.1" fill={topping.crust} opacity=".4" />
+        <circle cx="42" cy="24" r="1.3" fill={topping.crust} opacity=".45" />
+        <ellipse cx="18" cy="36" rx="3" ry="1.6" fill="#f3a0a0" opacity=".75" />
+        <ellipse cx="46" cy="36" rx="3" ry="1.6" fill="#f3a0a0" opacity=".75" />
+        <g className="bandros-eyes">
+          <ellipse cx="24" cy="30" rx="3.2" ry="3.6" fill="#2b2118" />
+          <ellipse cx="40" cy="30" rx="3.2" ry="3.6" fill="#2b2118" />
+          <circle cx="25.2" cy="28.8" r="1.1" fill="#fff" />
+          <circle cx="41.2" cy="28.8" r="1.1" fill="#fff" />
+        </g>
+        <path d="M26 38 Q32 44 38 38" fill="none" stroke="#2b2118" strokeWidth="1.7" strokeLinecap="round" />
+      </svg>
+      </span>
+    </span>
+  );
 }
 
 function chatTime(value?: string) {
@@ -45,6 +81,66 @@ function chatTime(value?: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+}
+
+function MemberPicker({ members, onChoose }: { members: Bot[]; onChoose: (id: string) => void }) {
+  const pickerRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !pickerRef.current?.contains(event.target)) pickerRef.current?.removeAttribute("open");
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, []);
+  return <details className="bandros-member-picker" ref={pickerRef} onKeyDown={(event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      pickerRef.current?.removeAttribute("open");
+      pickerRef.current?.querySelector("summary")?.focus();
+    }
+  }} onBlur={(event) => {
+    if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) event.currentTarget.removeAttribute("open");
+  }}>
+    <summary><span aria-hidden="true">＋</span>Tambah anggota<span className="bandros-picker-chevron" aria-hidden="true" /></summary>
+    <div className="bandros-member-options" role="group" aria-label="Bot yang tersedia">
+      <p>Tambahkan ke grup</p>
+      {members.length ? members.map((member) => <button type="button" key={member.id} onClick={() => {
+        pickerRef.current?.removeAttribute("open");
+        pickerRef.current?.querySelector("summary")?.focus();
+        onChoose(member.id);
+      }}><BandrosAvatar name={member.name} /><span>{member.name}</span><span className="bandros-member-add-mark" aria-hidden="true">＋</span></button>) : <p className="bandros-member-empty">Semua bot sudah bergabung.</p>}
+    </div>
+  </details>;
+}
+
+function CreateMenu({ disabled, onCreateBot, onCreateGroup }: { disabled: boolean; onCreateBot: () => void; onCreateGroup: () => void }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, []);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
+  const choose = (action: () => void) => {
+    setOpen(false);
+    triggerRef.current?.focus();
+    action();
+  };
+  return <div className="bandros-create" ref={menuRef} onBlur={(event) => {
+    if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+  }} onKeyDown={(event) => {
+    if (event.key === "Escape") { setOpen(false); triggerRef.current?.focus(); }
+  }}>
+    <button className="bandros-toolbar-button" ref={triggerRef} type="button" aria-label="Buat bot atau grup" title="Buat bot atau grup" aria-expanded={open} aria-controls="bandros-create-options" disabled={disabled} onClick={() => setOpen((value) => !value)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+    {open && <div className="bandros-create-options" id="bandros-create-options" role="group" aria-label="Buat baru">
+      <button type="button" onClick={() => choose(onCreateBot)}>Buat bot</button>
+      <button type="button" onClick={() => choose(onCreateGroup)}>Buat grup</button>
+    </div>}
+  </div>;
 }
 
 function hasOlderMessages<T extends { id: string }>(current: T[], next: T[]): boolean {
@@ -78,6 +174,20 @@ function rememberSnapshot(session: string | null, response: Response) {
   if (rev < prev) return;
   window.localStorage.setItem(key, snapshot);
   window.localStorage.setItem(revKey, String(rev));
+}
+
+function desktopUrl(ticket: string): string | null {
+  if (!apiBase) return null;
+  const prefix = new URL(apiBase).pathname.replace(/^\/|\/$/g, "");
+  const socketPath = `${prefix}/computer/view/${ticket}/websockify`;
+  const params = new URLSearchParams({
+    autoconnect: "1",
+    scale: "true",
+    reconnect: "1",
+    shared: "1",
+    path: socketPath,
+  });
+  return `${apiBase}/computer/view/${encodeURIComponent(ticket)}/vnc_lite.html?${params}`;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -134,6 +244,42 @@ export default function GrokDashboard() {
   const [authReady, setAuthReady] = useState(false);
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [botWorking, setBotWorking] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [membersOpen, setMembersOpen] = useState(true);
+  const [motionEnabled, setMotionEnabled] = useState(true);
+  const [computerState, setComputerState] = useState<"off" | "on" | "unavailable">("off");
+  const [screenUrl, setScreenUrl] = useState<string | null>(null);
+  const [screenOpen, setScreenOpen] = useState(false);
+  const [screenTicket, setScreenTicket] = useState<string | null>(null);
+  const [computerBusy, setComputerBusy] = useState(false);
+  const [approvals, setApprovals] = useState<Array<{ id: string; tool_name: string; reason: string }>>([]);
+  useEffect(() => {
+    setMotionEnabled(window.localStorage.getItem("bandros_motion") !== "off");
+  }, []);
+  useEffect(() => {
+    if (!chatGPT.connected || computerState !== "on") {
+      setScreenTicket(null);
+      return;
+    }
+    let active = true;
+    request<{ ticket: string }>("/computer/ticket")
+      .then((next) => { if (active) setScreenTicket(next.ticket); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [chatGPT.connected, computerState]);
+  useEffect(() => {
+    if (!chatGPT.connected) return;
+    let active = true;
+    request<{ state: "off" | "on" | "unavailable"; screen_url: string | null }>("/computer")
+      .then((next) => {
+        if (!active) return;
+        setComputerState(next.state);
+        setScreenUrl(next.screen_url);
+        if (next.state !== "on") setScreenOpen(false);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [chatGPT.connected]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -176,6 +322,8 @@ export default function GrokDashboard() {
 
   useEffect(() => {
     try {
+      const savedTheme = window.localStorage.getItem("bandros_theme");
+      if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
       const savedModels = JSON.parse(window.localStorage.getItem("bandros_bot_models") || "{}") as Record<string, string>;
       if (savedModels && typeof savedModels === "object") setModelByBot(savedModels);
       const cached = JSON.parse(window.localStorage.getItem("bandros_codex_models") || "[]") as ChatGPTModel[];
@@ -269,19 +417,25 @@ export default function GrokDashboard() {
     }
     let active = true;
     const botId = selectedBot.id;
+    setApprovals([]);
     const tick = async () => {
       try {
         const nextMessages = await request<Message[]>(`/bots/${botId}/messages`);
         if (!active) return;
         const visible = nextMessages.filter((message) => message.role !== "group");
         setMessages((current) => {
+          const kept = current.filter((item) => !item.id.startsWith("local-"));
+          const nextIds = new Set(visible.map((message) => message.id));
+          const sameRoom = kept.length === 0 || kept.some((item) => nextIds.has(item.id));
+          if (!sameRoom) return visible;
           if (hasOlderMessages(current, visible)) return current;
           const pending = current.filter((item) => item.id.startsWith("local-") && !visible.some((message) => message.role === item.role && message.content === item.content));
           return [...visible, ...pending];
         });
-        const activity = await request<{ working: boolean; error?: string | null }>(`/bots/${botId}/activity`);
+        const activity = await request<{ working: boolean; error?: string | null; approvals?: Array<{ id: string; tool_name: string; reason: string }> }>(`/bots/${botId}/activity`);
         if (!active) return;
         setBotWorking(activity.working);
+        setApprovals(activity.approvals ?? []);
         if (activity.error && !workingRef.current && shownRunError.current !== activity.error) {
           shownRunError.current = activity.error;
           setError(activity.error);
@@ -311,6 +465,9 @@ export default function GrokDashboard() {
         ]);
         if (!active) return;
         setGroupMessages((current) => {
+          const nextIds = new Set(nextMessages.map((message) => message.id));
+          const sameRoom = current.length === 0 || current.some((item) => nextIds.has(item.id));
+          if (!sameRoom) return nextMessages;
           if (hasOlderMessages(current, nextMessages)) return current;
           const pending = current.filter((item) => item.id.startsWith("local-") && !nextMessages.some((message) => message.sender_type === item.sender_type && message.content === item.content));
           return [...nextMessages, ...pending];
@@ -333,6 +490,24 @@ export default function GrokDashboard() {
     if (!node || !stickToBottom.current) return;
     node.scrollTop = node.scrollHeight;
   }, [messages, groupMessages, typingNames, working, botWorking]);
+
+  const toggleComputer = async () => {
+    setComputerBusy(true);
+    setError(null);
+    try {
+      const next = await request<{ state: "off" | "on" | "unavailable"; screen_url: string | null }>(
+        computerState === "on" ? "/computer/stop" : "/computer/start",
+        { method: "POST" },
+      );
+      setComputerState(next.state);
+      setScreenUrl(next.screen_url);
+      if (next.state !== "on") setScreenOpen(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Komputer gagal dinyalakan.");
+    } finally {
+      setComputerBusy(false);
+    }
+  };
 
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
@@ -621,20 +796,26 @@ export default function GrokDashboard() {
   );
 
   return (
-    <main className={`bandros-app ${mobilePane === "chat" ? "is-chat" : "is-list"}`}>
+    <main className={`bandros-app ${mobilePane === "chat" ? "is-chat" : "is-list"} ${selectedGroup && !membersOpen ? "is-members-closed" : ""}`} data-theme={theme} data-motion={motionEnabled ? "on" : "off"}>
       <aside className="bandros-sidebar">
-        <div className="bandros-brand"><strong>Bandros</strong><button type="button" onClick={() => void createBot()} disabled={!chatGPT.connected}>New</button></div>
+        <div className="bandros-brand">
+          <button className="bandros-toolbar-button" type="button" aria-label="Cari" title="Cari" onClick={() => composerRef.current?.focus()}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg></button>
+          <div className="bandros-toolbar-actions">
+            <button className="bandros-toolbar-button" type="button" aria-label={theme === "dark" ? "Mode terang" : "Mode gelap"} title={theme === "dark" ? "Mode terang" : "Mode gelap"} onClick={() => setTheme((current) => { const next = current === "dark" ? "light" : "dark"; window.localStorage.setItem("bandros_theme", next); return next; })}><svg viewBox="0 0 24 24" aria-hidden="true">{theme === "dark" ? <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></> : <path d="M20 14a8 8 0 0 1-10-10 8 8 0 1 0 10 10Z" />}</svg></button>
+            <CreateMenu disabled={!chatGPT.connected} onCreateBot={() => void createBot()} onCreateGroup={() => void createGroup()} />
+          </div>
+        </div>
         <div className="bandros-agent-list">
           {loading && <p className="bandros-muted">Memuat Bot…</p>}
-          {activeBots.map((bot) => <div className={`bandros-agent ${selectedBot?.id === bot.id && !selectedGroup ? "is-selected" : ""}`} key={bot.id}><button type="button" className="bandros-agent-open" onClick={() => openBot(bot)}><span className={`bandros-avatar ${(typingPeople.includes(bot.name) || (working && selectedBot?.id === bot.id && !selectedGroup)) ? "is-live" : ""}`}>{bot.name.slice(0, 1).toUpperCase()}</span><span className="bandros-agent-copy"><strong>{bot.name}</strong><small>{bot.description || "Belum ada peran"}</small></span></button><span className="bandros-agent-actions"><button type="button" aria-label={`Edit ${bot.name}`} onClick={() => openBotSettings(bot)}>Edit</button><button type="button" className="is-danger" aria-label={`Hapus ${bot.name}`} onClick={() => void deleteBot(bot)}>Hapus</button></span></div>)}
+          {activeBots.map((bot) => <div className={`bandros-agent ${selectedBot?.id === bot.id && !selectedGroup ? "is-selected" : ""}`} key={bot.id}><button type="button" className="bandros-agent-open" onClick={() => openBot(bot)}><BandrosAvatar name={bot.name} working={typingPeople.includes(bot.name) || (working && selectedBot?.id === bot.id && !selectedGroup)} /><span className="bandros-agent-copy"><strong>{bot.name}</strong><small>{bot.description || "Belum ada peran"}</small></span></button><button className="bandros-agent-more" type="button" aria-label={`Pengaturan ${bot.name}`} title={`Pengaturan ${bot.name}`} onClick={() => openBotSettings(bot)}>⋯</button></div>)}
           {!loading && chatGPT.connected && bots.length === 0 && <p className="bandros-muted">Belum ada Bot. Buat Bot pertama.</p>}
           {authReady && !chatGPT.connected && <p className="bandros-muted">Masuk dengan ChatGPT untuk membuka Bot kamu.</p>}
         </div>
-        <div className="bandros-groups-heading"><span>Groups</span><button aria-label="Buat grup" onClick={() => void createGroup()} disabled={!chatGPT.connected}>New</button></div>
         <div className="bandros-group-list">
-          {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span><strong>{group.name}</strong><small>{group.members.length} Bots</small></span></button>)}
+          <div className="bandros-groups-heading"><span>Groups</span></div>
+          {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-mark"><BandrosAvatar name={group.name} working={selectedGroup?.id === group.id && typingPeople.length > 0} /><em>{group.members.length}</em></span><span className="bandros-agent-copy"><strong>{group.name}</strong><small>{group.members.slice(0, 3).map((member) => member.name).join(", ") || "Grup kosong"}</small></span></button>)}
         </div>
-        <button className="bandros-account" type="button" onClick={() => chatGPT.connected ? void disconnectChatGPT() : void connectChatGPT()}>{chatGPT.connected ? chatGPT.email || "ChatGPT terhubung" : "Sign in with ChatGPT"}<small>{chatGPT.connected ? "Putuskan" : "Pakai paket ChatGPT"}</small></button>
+        <button className="bandros-account" type="button" onClick={() => chatGPT.connected ? void disconnectChatGPT() : void connectChatGPT()}><BandrosAvatar name="Marketplace" /><span><strong>Marketplace</strong><small>{chatGPT.connected ? chatGPT.email || "ChatGPT terhubung" : "Sign in with ChatGPT"}</small></span></button>
       </aside>
       <section className="bandros-main">
         <header className="bandros-topbar">
@@ -643,11 +824,9 @@ export default function GrokDashboard() {
             <span className={`bandros-status-dot ${working || botWorking || typingNames.length > 0 ? "is-live" : ""}`} />
             <span><strong>{displayName}</strong><small>{typingPeople.length > 0 ? `${typingPeople.join(", ")} mengetik…` : selectedGroup ? selectedGroup.members.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
           </button>}
-          {selectedBot && !selectedGroup && <span className="bandros-topbar-actions"><button type="button" onClick={openSettings}>Edit</button><button type="button" className="is-danger" onClick={() => void deleteBot(selectedBot)}>Hapus</button></span>}
-          {selectedGroup && <select className="bandros-add-member" aria-label="Tambah anggota" value="" onChange={(event) => { const botId = event.target.value; if (botId) void addGroupMember(botId); }}>
-            <option value="">{availableMembers.length ? "Tambah anggota" : "Semua Bot sudah masuk"}</option>
-            {availableMembers.map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
-          </select>}
+          {selectedBot && !selectedGroup && <button type="button" className="bandros-panel-toggle" aria-label="Pengaturan bot" title="Pengaturan bot" onClick={openSettings}>⋯</button>}
+          {selectedGroup && <button type="button" className="bandros-panel-toggle" aria-label={membersOpen ? "Tutup anggota" : "Buka anggota"} title={membersOpen ? "Tutup anggota" : "Buka anggota"} aria-expanded={membersOpen} onClick={() => setMembersOpen((open) => !open)}>{membersOpen ? "»" : "«"}</button>}
+          {selectedGroup && membersOpen && <MemberPicker members={availableMembers} onChoose={(botId) => void addGroupMember(botId)} />}
         </header>
         {error && <div className="bandros-alert" role="alert">{error}<button aria-label="Tutup notifikasi" onClick={() => setError(null)}>×</button></div>}
         <div className="bandros-chat" ref={chatRef} onScroll={() => {
@@ -655,27 +834,39 @@ export default function GrokDashboard() {
           if (!node) return;
           stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
         }}>
-          {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>{selectedBot?.name.toLowerCase() === "bandros" ? "Bandros adalah orkestrator. Minta dia membuat Bot spesialis; dia yang menulis tugas, cara kerja, output, dan batasannya." : `Kirim satu tugas yang selesai jelas. ${displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.`}</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}>{(() => { const sender = message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"; return <><button type="button" style={{ color: message.sender_type === "user" ? undefined : nameColor(sender) }} onClick={() => { if (message.sender_type !== "user") insertMention(sender); }}>{sender}</button>{message.sender_type === "user" ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content, selectedGroup.members.map((member) => member.name))}<time>{chatTime(message.created_at)}</time></div>}</>; })()}</article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}><span>{message.role === "user" ? "Kamu" : displayName}</span>{message.role === "user" ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content)}<time>{chatTime(message.created_at)}</time></div>}</article>)}
-          {typingPeople.map((name) => <article className="bandros-message from-bot bandros-typing" key={`typing-${name}`} aria-label={`${name} sedang mengetik`}><button type="button" style={{ color: nameColor(name) }} onClick={() => insertMention(name)}>{name}</button><div className="bandros-bubble bandros-typing-bubble"><i /><i /><i /></div></article>)}
+          {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>{selectedBot?.name.toLowerCase() === "bandros" ? "Bandros adalah orkestrator. Minta dia membuat Bot spesialis; dia yang menulis tugas, cara kerja, output, dan batasannya." : `Kirim satu tugas yang selesai jelas. ${displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.`}</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}>{(() => { const sender = message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"; const mine = message.sender_type === "user"; return <>{!mine && <BandrosAvatar name={sender} working={typingPeople.includes(sender)} />}<div className="bandros-message-body"><button type="button" style={{ color: mine ? undefined : nameColor(sender) }} onClick={() => { if (!mine) insertMention(sender); }}>{sender}</button>{mine ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content, selectedGroup.members.map((member) => member.name))}<time>{chatTime(message.created_at)}</time></div>}</div></>; })()}</article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}>{message.role !== "user" && <BandrosAvatar name={displayName} working={typingPeople.includes(displayName)} />}<div className="bandros-message-body"><span>{message.role === "user" ? "Kamu" : displayName}</span>{message.role === "user" ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content)}<time>{chatTime(message.created_at)}</time></div>}</div></article>)}
+          {typingPeople.map((name) => <article className="bandros-message from-bot bandros-typing" key={`typing-${name}`} aria-label={`${name} sedang mengetik`}><BandrosAvatar name={name} working /><div className="bandros-message-body"><button type="button" style={{ color: nameColor(name) }} onClick={() => insertMention(name)}>{name}</button><div className="bandros-bubble bandros-typing-bubble"><span className="bandros-dot" /><span className="bandros-dot" /><span className="bandros-dot" /></div></div></article>)}
         </div>
-        {typingPeople.length > 0 && <p className="bandros-typing-bar" role="status">{typingPeople.join(", ")} sedang mengetik…</p>}
+        <span className="bandros-sr-only" role="status" aria-live="polite" aria-atomic="true">{typingPeople.length > 0 ? `${typingPeople.join(", ")} sedang mengetik` : ""}</span>
         {mentionSuggestions.length > 0 && <div className="bandros-mentions" role="listbox" aria-label="Saran mention">{mentionSuggestions.map((member) => <button type="button" key={member.id} onMouseDown={(event) => event.preventDefault()} onClick={() => insertMention(member.name)}>@{member.name}</button>)}</div>}
+        {approvals.length > 0 && !selectedGroup && <div className="bandros-approval">{approvals.map((approval) => <div key={approval.id}><p>Perlu persetujuan: {approval.reason}</p><button type="button" onClick={() => void request(`/approvals/${approval.id}/approve`, { method: "POST" }).then(() => setApprovals((current) => current.filter((item) => item.id !== approval.id)))}>Setujui</button><button type="button" onClick={() => void request(`/approvals/${approval.id}/reject`, { method: "POST" }).then(() => setApprovals((current) => current.filter((item) => item.id !== approval.id)))}>Tolak</button></div>)}</div>}
         {chatGPT.connected && <form className="bandros-composer" onSubmit={sendMessage}>
-          <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}. Ketik @ untuk menyebut Bot` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
-          <div className="bandros-composer-footer">
-            <label className="bandros-model-picker">Model{chatGPT.connected ? modelSelect : <button type="button" onClick={() => void connectChatGPT()}>Sign in</button>}</label>
+          <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
+          <div className="bandros-composer-actions">
             {(working || botWorking || typingNames.length > 0) && <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button>}
-            <button type="submit" disabled={!prompt.trim() || working} aria-label="Send message">Send</button>
+            <button type="submit" disabled={!prompt.trim() || working} aria-label="Send message">↑</button>
           </div>
         </form>}
+        {chatGPT.connected && selectedBot && !selectedGroup && <div className="bandros-composer-footer"><span>Model</span>{modelSelect}</div>}
       </section>
-      <aside className="bandros-computer" aria-label="Computer">
-        <div className="bandros-computer-head"><span className={`bandros-status-dot ${working ? "is-live" : ""}`} /><strong>Computer</strong></div>
-        <p>{working ? `${displayName} sedang memakai layar ini.` : "Komputer akun ini sedang diam. Bot milik akun ChatGPT lain tidak memakai berkas ini."}</p>
-        <p>Hasil yang perlu disimpan taruh di workspace. Menutup halaman ini tidak menghentikan pekerjaan yang sudah berjalan di server.</p>
+      <aside className="bandros-computer" aria-label={selectedGroup ? "Members" : "Computer"}>
+        {selectedGroup ? <>
+          <div className="bandros-computer-head"><strong>Members</strong><button type="button" aria-label="Tutup panel anggota" onClick={() => setMembersOpen(false)}>×</button></div>
+          {selectedGroup.members.map((member) => <button className="bandros-member" type="button" key={member.id} onClick={() => insertMention(member.name)}><BandrosAvatar name={member.name} working={typingPeople.includes(member.name)} />{member.name}</button>)}
+          <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
+        </> : <>
+          <div className={`bandros-screen${screenTicket ? " has-view" : ""}`}>{screenTicket && desktopUrl(screenTicket) ? <iframe title="Layar komputer kecil" src={desktopUrl(screenTicket) ?? undefined} /> : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
+          <p>{displayName}&apos;s screen</p>
+          {computerState === "on" && <button className="bandros-computer-toggle" type="button" onClick={() => setScreenOpen(true)}>Buka layar</button>}
+          {computerState === "on" && <p>Semua Bot memakai desktop yang sama. Matikan setelah selesai.</p>}
+          <button className="bandros-computer-toggle" type="button" disabled={computerBusy || computerState === "unavailable"} onClick={() => void toggleComputer()}>{computerBusy ? "Memulai…" : computerState === "on" ? "Matikan komputer" : "Nyalakan komputer"}</button>
+          <div className="bandros-computer-head"><strong>Routines</strong></div>
+          <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
+        </>}
       </aside>
       {settingsOpen && selectedBot && <aside className="bandros-settings" aria-label="Bot settings">
         <div className="bandros-settings-header"><div><span className="bandros-settings-eyebrow">Bot settings</span><h2>{selectedBot.name}</h2></div><button aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button></div>
+        <label className="bandros-motion-setting"><input type="checkbox" checked={motionEnabled} onChange={(event) => { setMotionEnabled(event.target.checked); window.localStorage.setItem("bandros_motion", event.target.checked ? "on" : "off"); }} />Animasi aktivitas</label>
         <form onSubmit={saveSettings}>
           <label htmlFor="agent-name">Name</label>
           <input id="agent-name" value={editName} onChange={(event) => setEditName(event.target.value)} required />
@@ -693,6 +884,15 @@ export default function GrokDashboard() {
         </form>
         <button className="bandros-danger-button" type="button" onClick={() => void deleteBot(selectedBot)}>Hapus bot</button>
       </aside>}
+      {screenOpen && screenTicket && desktopUrl(screenTicket) && <div className="bandros-screen-backdrop" onClick={() => setScreenOpen(false)}>
+        <div className="bandros-screen-float" role="dialog" aria-label="Layar komputer" onClick={(event) => event.stopPropagation()}>
+          <div className="bandros-screen-float-bar">
+            <strong>Bandros&apos;s screen</strong>
+            <button type="button" aria-label="Tutup layar" onClick={() => setScreenOpen(false)}>×</button>
+          </div>
+          <iframe title="Layar komputer" src={desktopUrl(screenTicket) ?? undefined} />
+        </div>
+      </div>}
       {deviceFlow && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Sign in with ChatGPT">
         <section className="bandros-device-card">
           <button className="bandros-device-close" aria-label="Tutup device login" onClick={() => setDeviceFlow(null)}>×</button>

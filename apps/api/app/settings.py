@@ -45,6 +45,9 @@ class Settings:
     await_runs: bool
     cors_allow_all: bool
     environment_name: str
+    daytona_api_key: str | None
+    daytona_api_url: str
+    daytona_target: str
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -80,4 +83,7 @@ class Settings:
             await_runs=vercel or (_env_value("AWAIT_RUNS") == "1"),
             cors_allow_all=vercel or (_env_value("CORS_ALLOW_ALL") == "1"),
             environment_name=_env_value("VERCEL_ENV") or ("vercel" if vercel else "local"),
+            daytona_api_key=_env_value("DAYTONA_API_KEY"),
+            daytona_api_url=(_env_value("DAYTONA_API_URL") or "https://app.daytona.io/api").rstrip("/"),
+            daytona_target=_env_value("DAYTONA_TARGET") or "us",
         )

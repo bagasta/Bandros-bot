@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 import socket
@@ -43,6 +44,7 @@ class WorkspaceToolset:
         approved_tools: dict[str, list[dict[str, Any]]] | None = None,
         workspace_root: Path | None = None,
         on_group_post: Callable[[UUID, str, UUID], None] | None = None,
+        computer: Any | None = None,
     ) -> None:
         self.repository = repository
         self.run_id = run_id
@@ -53,6 +55,7 @@ class WorkspaceToolset:
         self.approved_tools = approved_tools or {}
         self.workspace_root = (workspace_root or Path("/workspace")).resolve()
         self.on_group_post = on_group_post
+        self.computer = computer
         self.skill_names = {skill.name for skill in repository.list_bot_skills(bot_id)}
 
     def definitions(self) -> list[ToolDefinition]:
@@ -86,6 +89,35 @@ class WorkspaceToolset:
             ToolDefinition("web_search", "Search the public web before a research answer. payload: {query}", self.web_search, RiskClass.READ_ONLY, timeout_seconds=25),
             ToolDefinition("fetch_url", "Read a public https page. payload: {url}", self.fetch_url, RiskClass.READ_ONLY, timeout_seconds=25),
         ]
+        if self.computer is not None:
+            definitions.extend([
+                ToolDefinition(
+                    "run_command",
+                    "Run one short shell command on the shared desktop. Every Bot uses this same computer. payload: {command}",
+                    self.run_command,
+                    RiskClass.LOCAL_WRITE,
+                    timeout_seconds=20,
+                ),
+                ToolDefinition(
+                    "computer_screenshot",
+                    "See the shared desktop. No payload. Use this before clicking.",
+                    self.computer_screenshot,
+                    RiskClass.READ_ONLY,
+                    timeout_seconds=20,
+                ),
+                ToolDefinition(
+                    "computer_click",
+                    "Click the shared desktop. payload: {x, y}",
+                    self.computer_click,
+                    RiskClass.LOCAL_WRITE,
+                ),
+                ToolDefinition(
+                    "computer_type",
+                    "Type into the shared desktop. payload: {text}",
+                    self.computer_type,
+                    RiskClass.LOCAL_WRITE,
+                ),
+            ])
         if self.repository.group_for_run(self.run_id):
             definitions = [item for item in definitions if item.name not in {"handoff_to_bot", "post_to_group"}]
         return [self._audited(definition) for definition in definitions]
@@ -294,6 +326,13 @@ class WorkspaceToolset:
             raise ValueError("bot was not found")
         return match
 
+    def _remote_relative(self, value: str) -> str:
+        raw = value.strip() or "."
+        path = Path(raw)
+        if path.is_absolute() or any(part == ".." for part in path.parts):
+            raise ValueError("path must stay inside the Bot workspace")
+        return "." if path == Path(".") else path.as_posix()
+
     def _workspace_path(self, value: str) -> Path:
         candidate = (self.workspace_root / value).resolve()
         if candidate != self.workspace_root and self.workspace_root not in candidate.parents:
@@ -301,6 +340,13 @@ class WorkspaceToolset:
         return candidate
 
     async def list_workspace_files(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.computer is not None:
+            relative = self._remote_relative(str(payload.get("path", ".")))
+            try:
+                entries = await asyncio.to_thread(self.computer.list_dir, relative)
+            except Exception as error:
+                return {"ok": False, "error": str(error)}
+            return {"ok": True, "entries": entries}
         directory = self._workspace_path(str(payload.get("path", ".")))
         if not directory.exists():
             return {"ok": False, "error": "directory not found"}
@@ -313,16 +359,49 @@ class WorkspaceToolset:
         return {"ok": True, "entries": entries}
 
     async def read_workspace_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.computer is not None:
+            relative = self._remote_relative(self._text(payload, "path"))
+            try:
+                content = await asyncio.to_thread(self.computer.read_text, relative)
+            except Exception as error:
+                return {"ok": False, "error": str(error)}
+            return {"ok": True, "path": relative, "content": content}
         path = self._workspace_path(self._text(payload, "path"))
         if not path.is_file():
             return {"ok": False, "error": "file not found"}
         return {"ok": True, "path": str(path.relative_to(self.workspace_root)), "content": path.read_text(encoding="utf-8")[:100_000]}
 
+    async def computer_screenshot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        image = await asyncio.to_thread(self.computer.screenshot)
+        return {"ok": True, "image": image}
+
+    async def computer_click(self, payload: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(self.computer.click, int(payload.get("x", 0)), int(payload.get("y", 0)))
+        return {"ok": True}
+
+    async def computer_type(self, payload: dict[str, Any]) -> dict[str, Any]:
+        text = self._text(payload, "text")
+        if len(text) > 2_000:
+            raise ValueError("text exceeds 2000 characters")
+        await asyncio.to_thread(self.computer.type_text, text)
+        return {"ok": True}
+
+    async def run_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        command = self._text(payload, "command")
+        if len(command) > 2_000:
+            raise ValueError("command exceeds 2000 characters")
+        result = await asyncio.to_thread(self.computer.run, command)
+        return {"ok": result["exit_code"] == 0, "exit_code": result["exit_code"], "output": result["output"]}
+
     async def write_workspace_file(self, payload: dict[str, Any]) -> dict[str, Any]:
-        path = self._workspace_path(self._text(payload, "path"))
         content = str(payload.get("content", ""))
         if len(content) > 100_000:
             raise ValueError("file content exceeds 100000 characters")
+        if self.computer is not None:
+            relative = self._remote_relative(self._text(payload, "path"))
+            await asyncio.to_thread(self.computer.write_text, relative, content)
+            return {"ok": True, "path": relative, "characters": len(content)}
+        path = self._workspace_path(self._text(payload, "path"))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return {"ok": True, "path": str(path.relative_to(self.workspace_root)), "characters": len(content)}

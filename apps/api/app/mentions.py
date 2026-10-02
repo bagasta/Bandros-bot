@@ -19,7 +19,35 @@ def mentioned_bots(text: str, bots: list[Bot]) -> list[Bot]:
 
 
 def is_silence(text: str) -> bool:
-    return text.strip().lower() in {"(diam)", "diam", "[diam]", "no_reply"}
+    return text.strip().lower() in {"", "(diam)", "diam", "[diam]", "no_reply"}
+
+
+def same_task(previous: str, nxt: str) -> bool:
+    """A follow-up stays in the same task when it continues the last line or repeats its subject."""
+    lowered = nxt.lower().strip()
+    if any(token in lowered for token in ("lanjut", "juga", "tambah", "sekalian", "yang tadi", "sama saja", "plus")):
+        return True
+    def words(value: str) -> set[str]:
+        return {word for word in re.findall(r"[a-zA-Z0-9]{4,}", value.lower())}
+    shared = words(previous) & words(nxt)
+    return len(shared) >= 2 or (len(lowered) < 48 and bool(shared))
+
+
+def cluster_topics(messages: list[str]) -> list[list[str]]:
+    groups: list[list[str]] = []
+    for message in messages:
+        if groups and same_task(groups[-1][-1], message):
+            groups[-1].append(message)
+        else:
+            groups.append([message])
+    return groups
+
+
+def burst_prompt(lines: list[str]) -> str:
+    if len(lines) == 1:
+        return lines[0]
+    body = "\n".join(f"{index}. {line}" for index, line in enumerate(lines, 1))
+    return "Pesan beruntun dari bos untuk satu tugas yang sama. Jawab sekali dan mencakup semuanya.\n" + body
 
 
 def is_stop_request(text: str) -> bool:
@@ -131,19 +159,24 @@ def lead_bot(members: list[Bot]) -> Bot:
     return members[0]
 
 
-def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_replied: list[str] | None = None) -> str:
+def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_replied: list[str] | None = None, jobs: str = "") -> str:
     roster = ", ".join(f"@{member.name}" for member in group.members)
     lines = [
         f"Grup {group.name}. Anggota: {roster}.",
         "Ini grup WhatsApp. Bos memberi arahan. Kamu ahli di bidangmu dan membalas seperti manusia: 2-6 kalimat, hasilnya dulu, tanpa judul atau laporan.",
-        "Satu tahap, satu pemilik. Orkestrator menyebut tepat satu @Nama yang mengerjakan sekarang, plus data yang sudah ada.",
-        "Kalau kamu disebut: kerjakan tuntas di balasan ini. Jangan bertanya scope. Tulis satu kalimat asumsi, lalu hasilnya.",
+        "Satu tahap, satu pemilik. Orkestrator menyebut tepat satu @Nama yang mengerjakan sekarang, plus data yang ada di pesan bos ini.",
+        "Pesan baru dari bos adalah tugas baru, kecuali ia menulis lanjut, revisi, atau menunjuk hasil yang baru dikirim.",
+        "Tugas baru tidak mewarisi usaha, menu, harga, atau asumsi dari job yang sudah selesai. Kalau pesan itu tidak menjelaskan bisnisnya, tanyakan satu kalimat dan jangan menugaskan rekan.",
+        "Kalau kamu disebut dan datanya sudah cukup: kerjakan tuntas. Sebut statusnya: sedang dikerjakan atau selesai.",
         "Untuk riset, panggil web_search atau fetch_url dulu. Untuk berkas, panggil write_workspace_file. Jangan hanya berjanji akan mencari.",
         "Setelah tahapmu selesai, sebut tepat satu @Nama yang memiliki langkah berikutnya. Kalau hasil sudah utuh, sebut koordinatornya.",
         "Kalau pesan ini bukan untukmu, balas (diam). @everyone berarti setiap anggota menjawab sekali.",
         "Jangan menulis @ di depan namamu sendiri, jangan handoff, dan jangan menyalin pesan orang lain.",
     ]
+    if jobs.strip():
+        lines.append(f"Status job: {jobs.strip()}. Job selesai bukan bahan tugas berikutnya.")
     if transcript.strip():
+        lines.append("Riwayat di bawah adalah pekerjaan lama, bukan brief tugas baru.")
         lines.append(f"Riwayat:\n{transcript.strip()}")
     if already_replied:
         lines.append(

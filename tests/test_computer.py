@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import asyncio
+import json
+
+import httpx
+
+from apps.api.app.computer import SNAPSHOT, ComputerError, DaytonaComputer
+from apps.api.app.database import Database
+from apps.api.app.repository import Repository
+from apps.api.app.runtime import RunRuntime
+from apps.api.app.workspace_tools import WorkspaceToolset
+
+
+class FakeGateway:
+    async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+        return "done"
+
+
+def _client(handler) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_reuses_small_sandbox_and_archives_without_desktop() -> None:
+    state = {"value": "stopped"}
+    created: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/sandbox":
+            created.append(json.loads(request.content))
+            return httpx.Response(500, json={"error": "should reuse"})
+        if request.method == "GET" and path == "/sandbox":
+            return httpx.Response(200, json={"items": [{"id": "sb", "state": state["value"], "labels": {"app": "bandros", "account": "acct"}}]})
+        if path == "/sandbox/sb/start":
+            state["value"] = "started"
+            return httpx.Response(200, json={"id": "sb", "state": "started"})
+        if request.method == "GET" and path == "/sandbox/sb":
+            return httpx.Response(200, json={"id": "sb", "state": state["value"], "toolboxProxyUrl": "https://proxy.test"})
+        if path == "/sandbox/sb/stop":
+            state["value"] = "stopped"
+            return httpx.Response(200, json={"state": "stopped"})
+        if path == "/sandbox/sb/archive":
+            state["value"] = "archived"
+            return httpx.Response(200, json={"state": "archived"})
+        if path == "/sb/files/folder":
+            return httpx.Response(201, text="")
+        if path == "/sb/process/execute":
+            assert b"computeruse" not in request.content
+            return httpx.Response(200, json={"exitCode": 0, "result": "ok"})
+        return httpx.Response(404, json={"path": path})
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    assert computer.run("pwd")["output"] == "ok"
+    computer.park()
+    assert created == []
+    assert state["value"] == "archived"
+
+
+def test_create_uses_smallest_snapshot() -> None:
+    body: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/sandbox":
+            return httpx.Response(200, json={"items": []})
+        if request.method == "POST" and request.url.path == "/sandbox":
+            body.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "new", "state": "started", "toolboxProxyUrl": "https://proxy.test"})
+        if request.url.path == "/new/files/folder":
+            return httpx.Response(201, text="")
+        if request.url.path == "/new/files":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404, text=request.url.path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    assert computer.list_dir(".") == []
+    assert body["snapshot"] == SNAPSHOT == "daytona-small"
+    assert body["autoStopInterval"] == 5
+    assert body["autoArchiveInterval"] == 60
+    assert "gpu" not in body
+    assert body["public"] is False
+
+
+def test_preview_origin_is_only_the_desktop_host() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/signed-preview-url"):
+            return httpx.Response(200, json={"url": "https://6080-example.daytonaproxy01.net/vnc.html"})
+        return httpx.Response(404, text=request.url.path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    assert computer._preview_origin("sb") == "https://6080-example.daytonaproxy01.net"
+
+
+def test_rejects_paths_outside_workspace() -> None:
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(lambda request: httpx.Response(500)))
+    try:
+        computer.read_text("../secret")
+    except ComputerError as error:
+        assert "workspace" in str(error)
+    else:
+        raise AssertionError("path escaped")
+
+
+def test_runtime_parks_after_the_turn(tmp_path) -> None:
+    class Parking:
+        def __init__(self) -> None:
+            self.parked = False
+
+        def park(self) -> None:
+            self.parked = True
+
+    database = Database(tmp_path / "park.db")
+    database.initialize()
+    repository = Repository(database)
+    bot = repository.create_bot("Worker", "", "", None)
+    run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Hi", "test-model")
+    computer = Parking()
+    runtime = RunRuntime(repository, FakeGateway(), "test-model", 1, computer=computer)
+    asyncio.run(runtime.start_and_wait(run.id))
+    assert computer.parked is True
+
+
+def test_held_computer_stays_awake(tmp_path) -> None:
+    class Parking:
+        def __init__(self) -> None:
+            self.parked = False
+
+        def park(self) -> None:
+            self.parked = True
+
+    database = Database(tmp_path / "held.db")
+    database.initialize()
+    repository = Repository(database)
+    bot = repository.create_bot("Worker", "", "", None)
+    run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Hi", "test-model")
+    computer = Parking()
+    runtime = RunRuntime(repository, FakeGateway(), "test-model", 1, computer=computer)
+    runtime._computer_held = True
+    asyncio.run(runtime.start_and_wait(run.id))
+    assert computer.parked is False
+
+
+def test_workspace_files_go_through_the_computer(tmp_path) -> None:
+    class Files:
+        def __init__(self) -> None:
+            self.files: dict[str, str] = {}
+
+        def list_dir(self, path: str) -> list[dict[str, str]]:
+            return [{"path": name, "type": "file"} for name in self.files]
+
+        def read_text(self, path: str) -> str:
+            return self.files[path]
+
+        def write_text(self, path: str, content: str) -> None:
+            self.files[path] = content
+
+        def run(self, command: str) -> dict[str, object]:
+            return {"exit_code": 0, "output": command}
+
+    database = Database(tmp_path / "files.db")
+    database.initialize()
+    repository = Repository(database)
+    bot = repository.create_bot("Worker", "", "", None)
+    run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Hi", "test-model")
+    computer = Files()
+    tools = WorkspaceToolset(repository, run.id, bot.id, lambda _: None, computer=computer)
+    definitions = {tool.name: tool for tool in tools.definitions()}
+    saved = asyncio.run(definitions["write_workspace_file"].handler({"path": "notes/plan.md", "content": "Ship it"}))
+    loaded = asyncio.run(definitions["read_workspace_file"].handler({"path": "notes/plan.md"}))
+    ran = asyncio.run(definitions["run_command"].handler({"command": "ls"}))
+    assert saved["ok"] is True
+    assert loaded["content"] == "Ship it"
+    assert ran["output"] == "ls"

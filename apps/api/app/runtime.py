@@ -11,6 +11,8 @@ from .mentions import (
     addresses_everyone,
     asks_roll_call,
     continues_the_work,
+    burst_prompt,
+    cluster_topics,
     group_prompt,
     is_silence,
     lead_bot,
@@ -32,11 +34,18 @@ class RunRuntime:
     default_model: str
     max_model_calls: int
     workspace_root: Path = Path("/workspace")
+    computer: object | None = None
     _tasks: dict[UUID, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _approved_tools: dict[UUID, dict[str, list[dict[str, object]]]] = field(default_factory=dict, init=False)
     _group_depth: dict[UUID, int] = field(default_factory=dict, init=False)
     _pending_wakes: list[tuple[UUID, str, UUID, int]] = field(default_factory=list, init=False)
     _wake_budget: int = field(default=12, init=False)
+    _anticipated: dict[UUID, list[str]] = field(default_factory=dict, init=False)
+    _bursts: dict[tuple[str, UUID], list[str]] = field(default_factory=dict, init=False)
+    _burst_gen: dict[tuple[str, UUID], int] = field(default_factory=dict, init=False)
+    _burst_tasks: dict[tuple[str, UUID], asyncio.Task[None]] = field(default_factory=dict, init=False)
+    _burst_runs: dict[tuple[str, UUID], UUID] = field(default_factory=dict, init=False)
+    _computer_held: bool = field(default=False, init=False)
 
     def start(self, run_id: UUID) -> None:
         if task := self._tasks.get(run_id):
@@ -52,6 +61,29 @@ class RunRuntime:
             await task
 
     async def _execute(self, run_id: UUID) -> None:
+        try:
+            await self._execute_unlocked(run_id)
+        finally:
+            await self._release_computer(run_id)
+
+    async def _release_computer(self, run_id: UUID) -> None:
+        computer = self.computer
+        if computer is None or self._computer_held or self._computer_busy():
+            return
+        try:
+            await asyncio.to_thread(computer.park)  # type: ignore[attr-defined]
+        except Exception as error:
+            self.repository.record_event(run_id, "computer.park_failed", {"error": str(error)[:300]})
+
+    def _computer_busy(self) -> bool:
+        if self._pending_wakes:
+            return True
+        if any(not task.done() for task in self._burst_tasks.values()):
+            return True
+        active = [task for task in self._tasks.values() if not task.done()]
+        return len(active) > 1
+
+    async def _execute_unlocked(self, run_id: UUID) -> None:
         run = self.repository.get_run(run_id)
         if run.status not in {RunStatus.QUEUED, RunStatus.FAILED_RETRYABLE}:
             return
@@ -71,6 +103,7 @@ class RunRuntime:
             self._approved_tools.pop(run_id, {}),
             self.workspace_root,
             on_group_post=self.queue_group_wake,
+            computer=self.computer,
         )
         try:
             history = self.repository.list_messages(run.conversation_id, limit=50)
@@ -107,6 +140,8 @@ class RunRuntime:
 
         current = self.repository.get_run(run_id)
         if current.status is RunStatus.WAITING_APPROVAL:
+            note = answer.strip() or "Butuh persetujuanmu sebelum langkah ini dijalankan."
+            self.repository.append_message(run.conversation_id, "assistant", note, model=run.model)
             return
         if current.stop_requested:
             self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
@@ -121,6 +156,10 @@ class RunRuntime:
                 answer = self._route_next_owner(group_id, bot, answer)
                 answer = self._drop_answered_peer_mentions(group_id, bot, answer)
                 answer = without_self_mention(answer, bot)
+        if is_silence(answer):
+            self.repository.record_event(run_id, "assistant.skipped", {"reason": "empty"})
+            self.repository.update_run(run_id, RunStatus.COMPLETED)
+            return
         self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
         self.repository.append_message(run.conversation_id, "assistant", answer, model=run.model)
         if group_id and not is_silence(answer):
@@ -138,12 +177,17 @@ class RunRuntime:
         await self.drain_group_wakes()
 
     def _finish_failed_run(self, run_id: UUID, conversation_id: UUID, message: str) -> None:
+        note = message[:500] or "Balasan kosong."
         try:
-            self.repository.append_message(conversation_id, "assistant", message[:500])
-            self.repository.update_run(run_id, RunStatus.FAILED, message[:500])
+            self.repository.append_message(conversation_id, "assistant", note)
+            group_id = self.repository.group_for_run(run_id)
+            if group_id is not None:
+                bot_id = self.repository.get_run(run_id).bot_id
+                self.repository.append_group_message(group_id, "bot", note, bot_id)
+            self.repository.update_run(run_id, RunStatus.FAILED, note)
         except Exception:
             return
-        self._resolve_handoffs(run_id, message[:500], success=False)
+        self._resolve_handoffs(run_id, note, success=False)
 
     def recover(self, *, resume: bool = True) -> int:
         """Resume interrupted work locally. On a serverless copy, close it so the user can send again."""
@@ -206,7 +250,77 @@ class RunRuntime:
             group_id, content, sender_bot_id, depth = self._pending_wakes.pop(0)
             await self.speak_in_group(group_id, content, sender_bot_id, depth)
 
+    def pending_dm_run(self, bot_id: UUID) -> UUID | None:
+        key = ("dm", bot_id)
+        task = self._burst_tasks.get(key)
+        if task and not task.done():
+            return self._burst_runs.get(key)
+        return None
+
+    def queue_dm(self, bot_id: UUID, run_id: UUID, text: str) -> UUID:
+        key = ("dm", bot_id)
+        self._bursts.setdefault(key, []).append(text)
+        self._burst_gen[key] = self._burst_gen.get(key, 0) + 1
+        self._burst_runs.setdefault(key, run_id)
+        task = self._burst_tasks.get(key)
+        if task is None or task.done():
+            self._burst_tasks[key] = asyncio.create_task(self._flush_dm(bot_id))
+        return self._burst_runs[key]
+
+    def queue_group(self, group_id: UUID, text: str) -> None:
+        key = ("group", group_id)
+        self._bursts.setdefault(key, []).append(text)
+        self._burst_gen[key] = self._burst_gen.get(key, 0) + 1
+        task = self._burst_tasks.get(key)
+        if task is None or task.done():
+            self._burst_tasks[key] = asyncio.create_task(self._flush_group(group_id))
+
+    async def _quiet_burst(self, key: tuple[str, UUID]) -> list[str]:
+        while True:
+            generation = self._burst_gen.get(key, 0)
+            await asyncio.sleep(1.8)
+            if self._burst_gen.get(key, 0) == generation:
+                return self._bursts.pop(key, [])
+
+    async def _flush_group(self, group_id: UUID) -> None:
+        key = ("group", group_id)
+        try:
+            while True:
+                lines = await self._quiet_burst(key)
+                if not lines:
+                    return
+                self.interrupt_group(group_id)
+                for batch in cluster_topics(lines):
+                    await self.speak_in_group(group_id, burst_prompt(batch), None, 0)
+                if not self._bursts.get(key):
+                    return
+        finally:
+            self._burst_tasks.pop(key, None)
+
+    async def _flush_dm(self, bot_id: UUID) -> None:
+        key = ("dm", bot_id)
+        try:
+            lines = await self._quiet_burst(key)
+            run_id = self._burst_runs.pop(key, None)
+            if not lines or run_id is None:
+                return
+            batches = cluster_topics(lines)
+            self.repository.set_run_prompt(run_id, burst_prompt(batches[0]))
+            await self.start_and_wait(run_id)
+            run = self.repository.get_run(run_id)
+            for batch in batches[1:]:
+                follow = self.repository.create_run(run.bot_id, run.conversation_id, burst_prompt(batch), run.model)
+                await self.start_and_wait(follow.id)
+        finally:
+            self._burst_runs.pop(key, None)
+            self._burst_tasks.pop(key, None)
+
+    def typing_names(self, group_id: UUID) -> list[str]:
+        return list(self._anticipated.get(group_id, []))
+
     async def speak_in_group(self, group_id: UUID, content: str, sender_bot_id: UUID | None, depth: int) -> None:
+        if depth == 0 and sender_bot_id is None:
+            self._wake_budget = 12
         if depth > 5 or self._wake_budget <= 0:
             return
         group = self.repository.get_group(group_id)
@@ -223,6 +337,14 @@ class RunRuntime:
                 targets = [member for member in targets if member.id != lead.id]
         elif not targets and members:
             targets = [lead_bot(members)]
+        self._anticipated[group_id] = [member.name for member in targets]
+        try:
+            await self._speak_to_targets(group_id, content, targets, depth)
+        finally:
+            self._anticipated.pop(group_id, None)
+
+    async def _speak_to_targets(self, group_id: UUID, content: str, targets: list, depth: int) -> None:
+        group = self.repository.get_group(group_id)
         for target in targets:
             if self._wake_budget <= 0:
                 continue
@@ -241,7 +363,9 @@ class RunRuntime:
                 for message in visible[-8:]
             )
             conversation_id = self.repository.conversation_for_bot(target.id)
-            prompt = group_prompt(group, content, transcript, already)
+            jobs = self.repository.list_jobs()
+            job_line = "; ".join(f"{job.title} [{job.status}]" for job in jobs[:8])
+            prompt = group_prompt(group, content, transcript, already, job_line)
             run = self.repository.create_run(target.id, conversation_id, prompt, target.model or self.default_model)
             self.repository.link_run_to_group(run.id, group_id)
             self._group_depth[run.id] = depth
@@ -249,6 +373,9 @@ class RunRuntime:
                 await self.start_and_wait(run.id)
             except Exception:
                 continue
+            remaining = [name for name in self._anticipated.get(group_id, []) if name != target.name]
+            if remaining:
+                self._anticipated[group_id] = remaining
 
     def _lead_already_replied(self, group_id: UUID, bot_id: UUID) -> bool:
         group = self.repository.get_group(group_id)
@@ -308,16 +435,21 @@ class RunRuntime:
 
     def _environment_context(self, bot_id: UUID) -> str:
         bots = self.repository.list_bots()
-        jobs = self.repository.list_jobs(bot_id)
+        jobs = self.repository.list_jobs() or self.repository.list_jobs(bot_id)
         groups = [group.name for group in self.repository.list_groups() if any(member.id == bot_id for member in group.members)]
         colleagues = ", ".join(f"{item.name}: {item.description or 'tanpa peran'}" for item in bots if item.status is BotStatus.ACTIVE)
         job_list = ", ".join(f"{job.title} [{job.status}]" for job in jobs) or "tidak ada"
         group_list = ", ".join(groups) or "tidak ada"
         memories = self.repository.list_memories(bot_id)
         memory_list = "; ".join(f"{memory.kind}: {memory.content}" for memory in memories[:20]) or "belum ada"
+        computer = (
+            " Semua Bot berbagi satu desktop. Pakai computer_screenshot sebelum computer_click atau computer_type. Komputer 1 vCPU ini tidur setelah giliran kalau pengguna belum menyalakannya."
+            if self.computer is not None
+            else ""
+        )
         return (
             f"Rekan kerja aktif: {colleagues or 'tidak ada'}. Job Anda: {job_list}. "
-            f"Grup Anda: {group_list}. Memori Bot: {memory_list}."
+            f"Grup Anda: {group_list}. Memori Bot: {memory_list}.{computer}"
         )
 
     @staticmethod

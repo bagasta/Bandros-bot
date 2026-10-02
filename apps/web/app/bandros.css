@@ -1,10 +1,21 @@
 .bandros-app {
-  --bg: #f5f4f1;
-  --panel: #ffffff;
-  --ink: #1c1c1e;
-  --muted: #6e6e73;
-  --line: #e4e2dc;
-  --live: #6d4aff;
+  --bg: #0c0c0c;
+  --panel: #111111;
+  --ink: #f4f4f5;
+  --muted: #9a9aa0;
+  --line: #2a2a2a;
+  --live: #3dd68c;
+  --bubble: #2a2a2a;
+  --bubble-user: #3a3a3c;
+  --chip: #242424;
+  --field: #2a2a2a;
+  --hover: #242424;
+  --sender-green: #79d5a6;
+  --sender-amber: #efba78;
+  --sender-purple: #c4a5f5;
+  --sender-blue: #91b7ff;
+  --sender-pink: #f29ab6;
+  --sender-teal: #75cec4;
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr) 280px;
   height: 100vh;
@@ -13,35 +24,83 @@
   background: var(--bg);
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
 }
+.bandros-app[data-theme="light"] {
+  --bg: #f4f3ef;
+  --panel: #ffffff;
+  --ink: #1c1c1e;
+  --muted: #6e6e73;
+  --line: #e4e2dc;
+  --live: #0f9f6e;
+  --bubble: #ffffff;
+  --bubble-user: #1c1c1e;
+  --chip: #eceae4;
+  --field: #ffffff;
+  --hover: #f3f2ee;
+  --sender-green: #1f7a4d;
+  --sender-amber: #965006;
+  --sender-purple: #6d28d9;
+  --sender-blue: #1d4ed8;
+  --sender-pink: #be123c;
+  --sender-teal: #0f766e;
+}
 .bandros-sidebar, .bandros-computer { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
 .bandros-sidebar { padding: 18px 12px 14px; border-right: 1px solid var(--line); }
 .bandros-brand { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 16px; }
 .bandros-brand strong { font-size: 16px; letter-spacing: -.03em; }
 .bandros-brand button, .bandros-groups-heading button, .bandros-account { min-height: 0; border: 0; background: transparent; }
 .bandros-brand button, .bandros-groups-heading button { padding: 4px 8px; color: var(--ink); border-radius: 8px; font-size: 13px; }
-.bandros-brand button:hover, .bandros-groups-heading button:hover { background: #f1f0ec; }
-.bandros-agent-list, .bandros-group-list { display: grid; align-content: start; gap: 2px; overflow: auto; }
+.bandros-brand button:hover, .bandros-groups-heading button:hover { background: var(--hover); }
+.bandros-brand { flex-shrink: 0; gap: 8px; padding: 0 4px 16px; }
+.bandros-toolbar-actions { display: flex; align-items: center; gap: 6px; }
+.bandros-brand .bandros-toolbar-button { display: grid; place-items: center; width: 34px; height: 34px; min-height: 34px; padding: 0; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 9px; }
+.bandros-brand .bandros-toolbar-button:hover, .bandros-brand .bandros-toolbar-button[aria-expanded="true"] { color: var(--ink); background: var(--hover); }
+.bandros-toolbar-button svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.bandros-create { position: relative; }
+.bandros-create-options { position: absolute; top: calc(100% + 8px); right: 0; z-index: 12; width: 180px; padding: 5px; background: var(--panel); border: 1px solid var(--line); border-radius: 11px; box-shadow: 0 8px 24px #0003; }
+.bandros-brand .bandros-create-options button { display: block; width: 100%; min-height: 40px; padding: 9px 12px; border-radius: 7px; color: var(--ink); text-align: left; font-size: 13px; }
+.bandros-agent-list, .bandros-group-list { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 2px; overflow-x: hidden; overflow-y: auto; }
 .bandros-agent-list { flex: 1; min-height: 0; }
 .bandros-agent, .bandros-group { display: flex; align-items: center; align-self: start; gap: 10px; width: 100%; height: auto; min-height: 52px; padding: 8px; color: var(--ink); text-align: left; background: transparent; border: 0; border-radius: 12px; }
 .bandros-agent-open { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 0; color: inherit; text-align: left; background: transparent; border: 0; }
-.bandros-agent-actions, .bandros-topbar-actions { display: flex; flex: 0 0 auto; gap: 4px; }
-.bandros-agent-actions button, .bandros-app header.bandros-topbar .bandros-topbar-actions button { min-height: 28px; margin: 0; padding: 0 8px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
-.bandros-agent-actions button.is-danger, .bandros-app header.bandros-topbar .bandros-topbar-actions button.is-danger { color: #9f1239; border-color: #fecdd3; }
-.bandros-agent:hover, .bandros-group:hover, .bandros-agent.is-selected, .bandros-group.is-selected { background: #f3f2ee; }
-.bandros-avatar { display: grid; place-items: center; width: 32px; height: 32px; color: #fff; background: #8d8d92; border-radius: 50%; font-size: 12px; font-weight: 700; }
-.bandros-avatar.is-live { box-shadow: 0 0 0 3px #e4dcff; background: var(--live); }
+.bandros-agent { position: relative; }
+.bandros-agent-open { padding-right: 28px; }
+.bandros-agent-more { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 28px; height: 28px; padding: 0; color: var(--muted); background: transparent; border: 0; border-radius: 50%; font-size: 21px; opacity: 0; }
+.bandros-agent:hover .bandros-agent-more, .bandros-agent:focus-within .bandros-agent-more { opacity: 1; }
+.bandros-agent-more:hover { color: var(--ink); background: var(--field); }
+@media (hover: none) { .bandros-agent-more { opacity: 1; } }
+.bandros-agent:hover, .bandros-group:hover, .bandros-agent.is-selected, .bandros-group.is-selected { background: var(--hover); }
+.bandros-avatar { display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 40px; background: transparent; overflow: visible; }
+.bandros-cake { display: block; width: 40px; height: 40px; transform-origin: 50% 90%; }
+.bandros-avatar svg { display: block; width: 40px; height: 40px; overflow: visible; }
+.bandros-avatar.is-working .bandros-cake { animation: bandros-hop 2.8s ease-in-out infinite; }
+.bandros-avatar.is-working .bandros-eyes { transform-origin: 32px 30px; animation: bandros-look 4.8s ease-in-out infinite; }
+.bandros-app.is-members-closed { grid-template-columns: 280px minmax(0, 1fr); }
+.bandros-app.is-members-closed .bandros-computer { display: none; }
+.bandros-group-mark { position: relative; width: 40px; height: 40px; flex: 0 0 40px; }
+.bandros-group-mark em { position: absolute; right: -4px; bottom: -2px; min-width: 16px; padding: 0 4px; color: #111; background: #f4f4f5; border-radius: 999px; font-size: 10px; font-style: normal; font-weight: 750; line-height: 16px; text-align: center; }
+@keyframes bandros-hop {
+  0%, 60%, 100% { transform: translateY(0); }
+  26% { transform: translateY(-4px) rotate(2deg); }
+  45% { transform: translateY(0) scale(1.02, .98); }
+}
+@keyframes bandros-look {
+  0%, 32%, 52%, 100% { transform: translateX(0) scaleY(1); }
+  37%, 46% { transform: translateX(1.5px) scaleY(1); }
+  73%, 79% { transform: scaleY(1); }
+  76% { transform: scaleY(.12); }
+}
 .bandros-agent-copy { min-width: 0; }
 .bandros-agent-copy strong, .bandros-agent-copy small, .bandros-group strong, .bandros-group small, .bandros-title strong, .bandros-title small, .bandros-account small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bandros-agent-copy strong, .bandros-group strong { font-size: 13px; }
 .bandros-agent-copy small, .bandros-group small { margin-top: 2px; color: var(--muted); font-size: 12px; }
 .bandros-groups-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; padding: 0 8px 8px; color: var(--muted); font-size: 12px; }
 .bandros-muted { padding: 8px; color: var(--muted); font-size: 13px; }
-.bandros-account { display: block; width: 100%; margin-top: auto; padding: 12px 8px 4px; color: var(--ink); text-align: left; }
+.bandros-account { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: auto; padding: 12px 8px 4px; color: var(--ink); text-align: left; }
 .bandros-account small { color: var(--muted); font-size: 12px; }
 .bandros-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .bandros-app header.bandros-topbar { position: static; top: auto; z-index: auto; display: flex; align-items: center; width: 100%; max-width: none; min-height: 64px; margin: 0; padding: 0 28px; background: transparent; }
 .bandros-app header.bandros-topbar button { margin: 0; padding: 0; color: var(--ink); background: transparent; border-radius: 0; }
-.bandros-title { display: flex; align-items: center; gap: 10px; min-height: 0; padding: 0; color: var(--ink); text-align: left; background: transparent; border: 0; }
+.bandros-title { display: flex; align-items: center; gap: 10px; min-height: 0; padding: 6px 12px; color: var(--ink); text-align: left; background: var(--chip); border: 0; border-radius: 999px; }
 .bandros-title strong { font-size: 15px; }
 .bandros-title small { color: var(--muted); font-size: 12px; }
 .bandros-status-dot { width: 8px; height: 8px; background: #c7c7cc; border-radius: 50%; }
@@ -49,16 +108,19 @@
 .bandros-chat { flex: 1; min-height: 0; overflow: auto; padding: 8px 18% 12px; }
 .bandros-welcome { max-width: 560px; margin: 12vh auto 0; text-align: center; }
 .bandros-welcome h1 { margin: 0; font-size: 34px; letter-spacing: -.04em; font-weight: 560; }
-.bandros-welcome p { margin: 14px 0 0; color: #3f3f46; line-height: 1.5; }
+.bandros-welcome p { margin: 14px 0 0; color: var(--muted); line-height: 1.5; }
 .bandros-welcome .bandros-signin { margin-top: 18px; padding: 10px 16px; color: #fff; background: var(--ink); border: 0; border-radius: 999px; font-weight: 650; }
 .bandros-quick-prompts { display: grid; gap: 8px; margin-top: 28px; text-align: left; }
 .bandros-quick-prompts button { min-height: 0; padding: 12px 14px; color: var(--ink); text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
-.bandros-message { max-width: 640px; margin: 0 auto 14px; }
-.bandros-message.from-user { margin-right: 0; margin-left: auto; }
+.bandros-message { display: flex; align-items: flex-end; gap: 8px; width: fit-content; max-width: min(640px, 100%); margin: 0 0 14px; }
+.bandros-message.from-user { flex-direction: column; align-items: flex-end; margin-left: auto; }
+.bandros-message-body { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+.bandros-message.from-user .bandros-message-body { align-items: flex-end; }
+.bandros-message .bandros-avatar, .bandros-message .bandros-cake, .bandros-message .bandros-avatar svg { width: 22px; height: 22px; flex-basis: 22px; }
 .bandros-message span, .bandros-message > button { color: var(--muted); font-size: 12px; font-weight: 650; background: transparent; border: 0; padding: 0; }
-.bandros-bubble { margin: 6px 0 0; padding: 10px 12px 8px; background: #fff; border: 1px solid var(--line); border-radius: 4px 16px 16px 16px; line-height: 1.5; }
+.bandros-bubble { margin: 6px 0 0; padding: 10px 12px 8px; color: var(--ink); background: var(--bubble); border: 1px solid var(--line); border-radius: 16px; line-height: 1.5; }
 .bandros-bubble time { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; text-align: right; }
-.bandros-message.from-user .bandros-bubble { background: #1c1c1e; color: #fff; white-space: pre-wrap; border-color: #1c1c1e; border-radius: 16px 16px 4px 16px; }
+.bandros-message.from-user .bandros-bubble { background: var(--bubble-user); color: #fff; white-space: pre-wrap; border-color: transparent; border-radius: 16px; }
 .bandros-message.from-user .bandros-bubble time { color: rgba(255, 255, 255, .62); }
 .bandros-rich p { margin: 0 0 8px; }
 .bandros-rich p:last-child, .bandros-rich ul:last-child, .bandros-rich ol:last-child, .bandros-rich pre:last-child { margin-bottom: 0; }
@@ -72,39 +134,113 @@
 .bandros-rich pre { margin: 8px 0; padding: 10px 12px; overflow: auto; background: #f4f3ef; border-radius: 10px; }
 .bandros-rich pre code { padding: 0; background: transparent; }
 .bandros-message.from-user .bandros-rich code { background: rgba(255, 255, 255, .14); }
-.bandros-typing-bar { margin: 0 28px 8px; color: var(--muted); font-size: 12px; }
+.bandros-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .bandros-message > button { cursor: pointer; }
-.bandros-typing-bubble { display: flex; align-items: center; gap: 5px; width: fit-content; min-height: 38px; padding: 14px 16px; }
-.bandros-typing-bubble i { width: 7px; height: 7px; border-radius: 50%; background: #8e8e93; animation: bandros-typing 1.2s infinite ease-in-out; }
-.bandros-typing-bubble i:nth-child(2) { animation-delay: .15s; }
-.bandros-typing-bubble i:nth-child(3) { animation-delay: .3s; }
+.bandros-message.bandros-typing { align-items: flex-end; }
+.bandros-typing-bubble { display: flex; align-items: center; gap: 6px; width: fit-content; min-height: 28px; margin: 0; padding: 10px 14px; }
+.bandros-message .bandros-dot { display: block; flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--ink); animation: bandros-typing 1.2s ease-in-out infinite; }
+.bandros-message .bandros-dot:nth-child(2) { animation-delay: .16s; }
+.bandros-message .bandros-dot:nth-child(3) { animation-delay: .32s; }
 @keyframes bandros-typing {
-  0%, 60%, 100% { transform: translateY(0); opacity: .35; }
-  30% { transform: translateY(-5px); opacity: 1; }
+  0%, 60%, 100% { transform: translateY(0) scale(.9); opacity: .4; }
+  30% { transform: translateY(-4px) scale(1); opacity: .9; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .bandros-typing-bubble i { animation: none; opacity: .7; }
+  .bandros-app:not([data-motion="on"]) .bandros-message .bandros-dot { animation: none; opacity: .7; }
+  .bandros-app:not([data-motion="on"]) .bandros-avatar.is-working .bandros-cake, .bandros-app:not([data-motion="on"]) .bandros-avatar.is-working .bandros-eyes { animation: none; }
 }
-.bandros-add-member { max-width: 160px; margin-left: auto; min-height: 32px; padding: 4px 8px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 10px; font: inherit; font-size: 12px; }
-.bandros-mentions { display: grid; gap: 2px; margin: 0 18% 8px; padding: 6px; background: #fff; border: 1px solid var(--line); border-radius: 12px; }
+.bandros-app[data-motion="off"] .bandros-dot, .bandros-app[data-motion="off"] .bandros-cake, .bandros-app[data-motion="off"] .bandros-eyes { animation: none; }
+.bandros-member-picker { position: relative; flex: 0 0 auto; color: var(--ink); font-size: 12px; }
+.bandros-member-picker summary { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; list-style: none; cursor: pointer; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); white-space: nowrap; user-select: none; }
+.bandros-member-picker summary::-webkit-details-marker { display: none; }
+.bandros-member-picker summary:hover, .bandros-member-picker[open] summary { background: var(--hover); }
+.bandros-member-picker summary:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
+.bandros-picker-chevron { width: 6px; height: 6px; margin-left: 5px; border-right: 1px solid var(--muted); border-bottom: 1px solid var(--muted); transform: rotate(45deg) translateY(-2px); }
+.bandros-member-picker[open] .bandros-picker-chevron { transform: rotate(225deg) translate(-1px, -1px); }
+.bandros-member-options { position: absolute; right: 0; top: calc(100% + 8px); z-index: 10; width: 240px; max-width: calc(100vw - 24px); max-height: min(360px, 60vh); overflow-y: auto; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 8px 24px #0003; }
+.bandros-member-options p { margin: 0; padding: 8px 10px; color: var(--muted); font-size: 11px; }
+.bandros-app header.bandros-topbar .bandros-member-options button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 10px; border: 0; border-radius: 7px; text-align: left; font-size: 13px; }
+.bandros-app header.bandros-topbar .bandros-member-options button:hover { background: var(--hover); }
+.bandros-member-options .bandros-avatar, .bandros-member-options .bandros-cake, .bandros-member-options svg { width: 28px; height: 28px; flex-basis: 28px; }
+.bandros-member-options button > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.bandros-member-add-mark { margin-left: auto; color: var(--muted); }
+.bandros-mentions { display: grid; gap: 2px; margin: 0 18% 8px; padding: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
 .bandros-mentions button { min-height: 0; padding: 8px 10px; color: var(--ink); text-align: left; background: transparent; border: 0; border-radius: 8px; font-weight: 650; }
-.bandros-mentions button:hover { background: #f3f2ee; }
+.bandros-mentions button:hover { background: var(--hover); }
 .bandros-mention { background: transparent; color: var(--live); font-weight: 700; }
-.bandros-composer { margin: 0 18% 22px; padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; }
-.bandros-composer textarea { width: 100%; min-height: 44px; padding: 4px 6px; color: var(--ink); background: transparent; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; }
-.bandros-composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.bandros-composer { display: flex; align-items: flex-end; gap: 8px; margin: 0 18% 22px; padding: 6px 6px 6px 16px; background: var(--bubble); border: 1px solid var(--line); border-radius: 28px; }
+.bandros-composer textarea, .bandros-settings input, .bandros-settings textarea, .bandros-settings select { color: var(--ink); background: var(--field); border-color: var(--line); }
+.bandros-composer textarea { flex: 1; width: auto; min-height: 40px; max-height: 120px; margin: 0; padding: 10px 0; color: var(--ink); background: transparent; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; line-height: 20px; }
+.bandros-composer-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; height: 40px; }
 .bandros-model-picker { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-.bandros-model-picker select, .bandros-settings select, .bandros-settings input, .bandros-settings textarea { color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
-.bandros-model-picker select { max-width: 240px; min-height: 32px; padding: 4px 8px; font-size: 12px; }
-.bandros-composer-footer button, .bandros-model-picker button, .bandros-settings form button { min-height: 32px; padding: 0 14px; color: #fff; background: #1c1c1e; border: 0; border-radius: 999px; }
-.bandros-composer-footer button:disabled { color: #8e8e93; background: #ecebe7; }
+.bandros-settings select, .bandros-settings input, .bandros-settings textarea { color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.bandros-composer select { width: 132px; height: 36px; margin: 0; padding: 0 10px; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 999px; font: inherit; font-size: 12px; }
+.bandros-composer button[type="submit"], .bandros-stop, .bandros-settings form button { min-height: 36px; padding: 0 14px; color: var(--bg); background: var(--ink); border: 0; border-radius: 999px; }
+.bandros-composer button[type="submit"] { width: 36px; padding: 0; font-size: 18px; line-height: 36px; }
+.bandros-composer button[type="submit"]:disabled { color: var(--muted); background: var(--chip); }
 .bandros-stop { color: #fff; background: var(--live); }
 .bandros-computer { padding: 22px 18px; border-left: 1px solid var(--line); }
-.bandros-computer-head { display: flex; align-items: center; gap: 8px; }
-.bandros-computer p { color: #3f3f46; font-size: 13px; line-height: 1.5; }
+.bandros-computer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.bandros-computer-head button, .bandros-panel-toggle { min-height: 28px; padding: 0 8px; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 999px; font-size: 12px; }
+.bandros-computer p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.bandros-screen { display: grid; place-items: center; min-height: 160px; margin: 12px 0; color: var(--muted); background: #1a1a1a; border: 1px solid var(--line); border-radius: 16px; font-size: 13px; overflow: hidden; }
+.bandros-screen.has-view { display: block; min-height: 180px; padding: 0; }
+.bandros-screen iframe { width: 100%; height: 180px; border: 0; background: #0b0b0b; }
+.bandros-screen-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(18px); }
+.bandros-screen-float { display: flex; flex-direction: column; width: min(1100px, calc(100vw - 48px)); height: min(720px, calc(100vh - 48px)); background: #111; border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45); overflow: hidden; }
+.bandros-screen-float-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 0 12px; color: var(--ink); background: var(--panel); }
+.bandros-screen-float-bar button { min-height: 28px; padding: 0 8px; color: var(--ink); background: transparent; border: 0; }
+.bandros-screen-float iframe { flex: 1; width: 100%; border: 0; background: #0b0b0b; }
+.bandros-computer-toggle { width: 100%; min-height: 36px; margin: 0 0 14px; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
+.bandros-computer-toggle:disabled { opacity: 0.6; }
+.bandros-member { display: flex; align-items: center; gap: 10px; padding: 8px 0; color: var(--ink); background: transparent; border: 0; text-align: left; }
+.bandros-approval { margin: 0 12% 8px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+.bandros-approval p { margin: 0 0 8px; color: var(--ink); font-size: 13px; }
+.bandros-approval button { min-height: 32px; margin-right: 8px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--field); color: var(--ink); }
 .bandros-alert { margin: 0 18% 8px; padding: 10px 12px; color: #7f1d1d; background: #fff1f2; border-radius: 10px; font-size: 13px; }
 .bandros-alert button { min-height: 0; margin-left: 8px; padding: 0; color: inherit; background: transparent; border: 0; }
-.bandros-settings { position: fixed; z-index: 6; top: 0; right: 0; bottom: 0; width: 360px; padding: 22px 18px; overflow: auto; background: #fff; border-left: 1px solid var(--line); }
+.bandros-app button { font-weight: 550; }
+.bandros-app :where(button, select) { cursor: pointer; transition: background-color 160ms ease, border-color 160ms ease, opacity 160ms ease; }
+.bandros-app :where(button, select):disabled { cursor: default; }
+.bandros-app :where(button, select, textarea, input):focus-visible { outline: 2px solid var(--muted); outline-offset: 3px; }
+.bandros-app .bandros-composer textarea:focus-visible { outline: none; box-shadow: none; }
+.bandros-app :where(button):not(:disabled):active { opacity: .75; }
+.bandros-app :where(.bandros-chat, .bandros-agent-list, .bandros-group-list, .bandros-settings) { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.bandros-sidebar, .bandros-computer, .bandros-account, .bandros-account > span { min-width: 0; }
+.bandros-group .bandros-agent-copy { flex: 1; }
+.bandros-app header.bandros-topbar { gap: 12px; }
+.bandros-app header.bandros-topbar { justify-content: flex-start; }
+.bandros-app header.bandros-topbar .bandros-title { margin-right: auto; }
+.bandros-app header.bandros-topbar .bandros-title:disabled { opacity: 1; }
+.bandros-app header.bandros-topbar .bandros-title { min-width: 0; border: 0; border-radius: 10px; }
+.bandros-title > span:last-child { min-width: 0; }
+.bandros-status-dot { flex: 0 0 8px; }
+.bandros-app header.bandros-topbar .bandros-panel-toggle { flex-shrink: 0; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; color: var(--muted); background: transparent; font-size: 23px; }
+.bandros-app header.bandros-topbar .bandros-panel-toggle:hover { background: var(--field); }
+.bandros-message-body > button { padding: 0; color: var(--muted); background: transparent; border: 0; font: inherit; font-size: 12px; }
+.bandros-message-body > button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.bandros-bubble { overflow-wrap: anywhere; }
+.bandros-rich pre { max-width: 100%; color: var(--ink); background: var(--panel); white-space: pre-wrap; }
+.bandros-composer:focus-within { border-color: var(--muted); }
+.bandros-composer button[type="submit"]:not(:disabled):hover { opacity: .82; }
+.bandros-composer .bandros-stop { color: var(--ink); background: var(--chip); }
+.bandros-composer .bandros-stop:hover { background: var(--field); }
+.bandros-member { border-radius: 8px; }
+.bandros-member:hover { background: var(--hover); }
+.bandros-agent-copy strong, .bandros-group strong, .bandros-title strong { font-weight: 550; }
+.bandros-composer-actions button { margin-top: 0; }
+.bandros-main:has(.bandros-composer-footer) .bandros-composer { margin-bottom: 6px; }
+.bandros-composer-footer { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0 18% 16px; padding: 0 12px; color: var(--muted); font-size: 11px; }
+.bandros-composer-footer > span { flex: 0 0 auto; }
+.bandros-composer-footer select { width: auto; min-width: 0; max-width: calc(100% - 42px); height: 28px; padding: 0 6px; color: var(--muted); background: var(--bg); border: 0; border-radius: 5px; font: inherit; color-scheme: dark; }
+.bandros-app[data-theme="light"] .bandros-composer-footer select { color-scheme: light; }
+.bandros-composer-footer select:hover { color: var(--ink); background: var(--hover); }
+.bandros-motion-setting { display: flex; align-items: center; gap: 8px; padding: 14px 0; }
+.bandros-motion-setting input { width: 16px; height: 16px; margin: 0; accent-color: #888; }
+@media (prefers-reduced-motion: reduce) {
+  .bandros-app :where(button, select) { transition: none; }
+}
+.bandros-settings { position: fixed; z-index: 6; top: 0; right: 0; bottom: 0; width: 360px; padding: 22px 18px; overflow: auto; background: var(--panel); color: var(--ink); border-left: 1px solid var(--line); }
 .bandros-settings-header { display: flex; justify-content: space-between; }
 .bandros-settings-header h2 { margin: 4px 0 0; font-size: 20px; }
 .bandros-settings-header button { min-height: 0; padding: 0 6px; background: transparent; border: 0; font-size: 22px; }
@@ -114,21 +250,22 @@
 .bandros-settings input, .bandros-settings textarea, .bandros-settings select { padding: 10px; font-size: 14px; }
 .bandros-danger-button { width: 100%; margin-top: 28px; min-height: 36px; color: #9f1239; background: transparent; border: 1px solid #fecdd3; border-radius: 10px; }
 .bandros-device-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 20px; background: #0008; }
-.bandros-device-card { position: relative; width: min(420px, 100%); padding: 28px; background: #fff; border-radius: 18px; }
-.bandros-device-card h2 { margin: 6px 0 10px; }
-.bandros-device-card code { display: block; margin: 16px 0; padding: 14px; background: #f5f4f1; border-radius: 12px; text-align: center; letter-spacing: .12em; font-size: 24px; font-weight: 750; }
-.bandros-device-card a { display: block; padding: 12px; color: #fff; background: #1c1c1e; border-radius: 999px; text-align: center; text-decoration: none; }
-.bandros-device-close { position: absolute; top: 10px; right: 10px; min-height: 0; background: transparent; border: 0; font-size: 22px; }
+.bandros-device-card { position: relative; width: min(420px, 100%); padding: 28px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 18px; }
+.bandros-device-card h2 { margin: 6px 0 10px; color: var(--ink); }
+.bandros-device-card p { color: var(--muted); }
+.bandros-device-card code { display: block; margin: 16px 0; padding: 14px; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 12px; text-align: center; letter-spacing: .12em; font-size: 24px; font-weight: 750; }
+.bandros-device-card a { display: block; padding: 12px; color: var(--bg); background: var(--ink); border-radius: 999px; text-align: center; text-decoration: none; }
+.bandros-device-close { position: absolute; top: 10px; right: 10px; min-height: 0; color: var(--ink); background: transparent; border: 0; font-size: 22px; }
 .bandros-back { display: none; }
 @media (max-width: 980px) {
   .bandros-app { grid-template-columns: 240px minmax(0, 1fr); }
   .bandros-computer { display: none; }
   .bandros-chat { padding: 8px 16px 12px; }
-  .bandros-composer, .bandros-alert { margin-right: 16px; margin-left: 16px; }
+  .bandros-composer, .bandros-alert, .bandros-composer-footer { margin-right: 16px; margin-left: 16px; }
 }
 @media (max-width: 760px) {
   html, body { height: 100%; overflow: hidden; background: #f5f4f1; }
-  .bandros-app { display: block; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: #fff; }
+  .bandros-app { display: block; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: var(--bg); }
   .bandros-app.is-list .bandros-main,
   .bandros-app.is-chat .bandros-sidebar,
   .bandros-computer { display: none; }
@@ -142,14 +279,14 @@
     height: 100%;
     padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
     overflow: hidden;
-    background: #fff;
+    background: var(--panel);
     border: 0;
   }
   .bandros-agent-list { flex: 1; min-height: 0; align-content: start; }
   .bandros-agent, .bandros-group { align-self: start; height: auto; }
   .bandros-account { flex: 0 0 auto; margin-top: 8px; }
   .bandros-back { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 36px; margin: 0; padding: 0 10px; color: var(--ink); background: transparent; border: 0; border-radius: 8px; font-size: 14px; font-weight: 650; }
-  .bandros-topbar, .bandros-app header.bandros-topbar { position: static; display: flex; align-items: center; width: 100%; max-width: none; min-height: 56px; margin: 0; padding: 0 8px; gap: 4px; background: #fff; }
+  .bandros-topbar, .bandros-app header.bandros-topbar { position: static; display: flex; align-items: center; width: 100%; max-width: none; min-height: 56px; margin: 0; padding: 0 8px; gap: 4px; background: var(--panel); }
   .bandros-title { min-width: 0; flex: 1; margin: 0; }
   .bandros-title span:last-child { min-width: 0; }
   .bandros-chat { width: auto; padding: 4px 12px 8px; }
@@ -158,15 +295,17 @@
   .bandros-message { max-width: none; }
   .bandros-composer, .bandros-mentions { width: auto; margin: 0 12px calc(12px + env(safe-area-inset-bottom)); }
   .bandros-mentions { margin-bottom: 8px; }
-  .bandros-add-member { max-width: 42vw; }
+  .bandros-member-picker summary { padding: 0 8px; gap: 4px; font-size: 11px; }
   .bandros-alert { margin: 0 12px 8px; }
   .bandros-composer-footer { gap: 8px; }
   .bandros-model-picker { min-width: 0; flex: 1; }
   .bandros-model-picker select { width: 100%; max-width: none; }
   .bandros-settings { width: 100%; }
   .bandros-app aside { display: flex; flex-direction: column; align-items: stretch; position: static; padding: 12px; border: 0; }
+  .bandros-app .bandros-computer { display: none; }
   .bandros-app header button { margin-top: 0; }
   .bandros-app form { display: block; }
+  .bandros-app form.bandros-composer { display: flex; }
   .bandros-app form button { margin-top: 0; justify-self: auto; }
-  .bandros-app .bandros-composer-footer { margin-bottom: 0; }
+  .bandros-app .bandros-composer-footer { margin: 0 12px calc(12px + env(safe-area-inset-bottom)); }
 }
