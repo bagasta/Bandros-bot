@@ -230,6 +230,112 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
 
+class SnapshotEnvelope:
+    """Carry the workspace snapshot in the JSON body so a large copy survives Vercel's header limit."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        header_map = {key.decode().lower(): value.decode() for key, value in scope.get("headers", [])}
+        if header_map.get("x-bandros-envelope") != "1":
+            await self.app(scope, receive, send)
+            return
+        chunks: list[bytes] = []
+        more = True
+        while more:
+            message = await receive()
+            if message["type"] != "http.request":
+                continue
+            chunks.append(message.get("body", b""))
+            more = message.get("more_body", False)
+        try:
+            envelope = json.loads(b"".join(chunks) or b"{}")
+        except json.JSONDecodeError:
+            envelope = {}
+        method = envelope.get("method") if isinstance(envelope, dict) else None
+        if isinstance(method, str) and method.strip():
+            scope["method"] = method.strip().upper()
+        snapshot = envelope.get("snapshot") if isinstance(envelope, dict) else None
+        if isinstance(snapshot, str) and snapshot:
+            scope.setdefault("state", {})["bandros_snapshot"] = snapshot
+        payload = envelope.get("payload") if isinstance(envelope, dict) else None
+        payload_body = b"" if payload is None else json.dumps(payload).encode()
+        scope["headers"] = [
+            (key, value)
+            for key, value in scope["headers"]
+            if key.lower() != b"content-length"
+        ]
+        scope["headers"].append((b"content-length", str(len(payload_body)).encode()))
+        sent = False
+
+        async def inner_receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            sent = True
+            return {"type": "http.request", "body": payload_body, "more_body": False}
+
+        started: dict[str, Any] = {}
+        body_parts: list[bytes] = []
+
+        async def inner_send(message):
+            if message["type"] == "http.response.start":
+                started.update(message)
+                return
+            if message["type"] != "http.response.body":
+                await send(message)
+                return
+            body_parts.append(message.get("body", b""))
+            if message.get("more_body", False):
+                return
+            await self._send_wrapped(send, started, b"".join(body_parts))
+
+        await self.app(scope, inner_receive, inner_send)
+
+    async def _send_wrapped(self, send, started: dict[str, Any], body: bytes) -> None:
+        headers = list(started.get("headers") or [])
+        snapshot = ""
+        revision = "0"
+        kept: list[tuple[bytes, bytes]] = []
+        for key, value in headers:
+            lowered = key.lower()
+            if lowered == b"x-bandros-snapshot":
+                snapshot = value.decode()
+                continue
+            if lowered == b"x-bandros-snapshot-rev":
+                revision = value.decode()
+                continue
+            if lowered == b"content-length":
+                continue
+            kept.append((key, value))
+        status_code = int(started.get("status", 200))
+        content_type = ""
+        for key, value in kept:
+            if key.lower() == b"content-type":
+                content_type = value.decode()
+        if status_code < 300 and "application/json" in content_type and body:
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                data = None
+            else:
+                wrapped = json.dumps({"data": data, "snapshot": snapshot, "revision": int(revision or "0")}).encode()
+                kept.append((b"content-length", str(len(wrapped)).encode()))
+                await send({**started, "headers": kept})
+                await send({"type": "http.response.body", "body": wrapped, "more_body": False})
+                return
+        kept.append((b"content-length", str(len(body)).encode()))
+        if snapshot:
+            kept.append((b"x-bandros-snapshot", snapshot.encode()))
+            kept.append((b"x-bandros-snapshot-rev", revision.encode()))
+        await send({**started, "headers": kept})
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
 app = FastAPI(title="Persistent Agent Workspace", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
@@ -237,7 +343,7 @@ app.add_middleware(
     allow_origin_regex=None if settings.cors_allow_all else r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Bandros-Session", "X-Bandros-Snapshot"],
+    allow_headers=["Content-Type", "Authorization", "X-Bandros-Session", "X-Bandros-Snapshot", "X-Bandros-Envelope"],
     expose_headers=["X-Bandros-Snapshot", "X-Bandros-Snapshot-Rev"],
 )
 
@@ -295,7 +401,7 @@ async def optional_auth(request: Request, call_next):
             if not isinstance(account_id, str) or not account_id.strip():
                 return JSONResponse({"detail": "Masuk dengan ChatGPT dulu."}, status_code=401)
             database_path = _account_database_path(account_id)
-            snapshot = request.headers.get("X-Bandros-Snapshot")
+            snapshot = request.headers.get("X-Bandros-Snapshot") or request.scope.get("state", {}).get("bandros_snapshot")
             with _STAGE_LOCK:
                 if snapshot:
                     stage_snapshot(database_path, snapshot)
@@ -307,7 +413,7 @@ async def optional_auth(request: Request, call_next):
             database_path = _account_database_path(account_id)
             if database_path.is_file():
                 encoded = encode_snapshot(database_path.read_bytes())
-                if len(encoded) <= 20_000:
+                if len(encoded) <= 400_000:
                     response.headers["X-Bandros-Snapshot"] = encoded
                     response.headers["X-Bandros-Snapshot-Rev"] = str(database_revision(database_path))
         return response
@@ -319,6 +425,9 @@ async def optional_auth(request: Request, call_next):
         if runtime_token is not None:
             current_runtime.reset(runtime_token)
         current_chatgpt_connection.reset(context_token)
+
+
+app.add_middleware(SnapshotEnvelope)
 
 
 def not_found(error: KeyError) -> HTTPException:

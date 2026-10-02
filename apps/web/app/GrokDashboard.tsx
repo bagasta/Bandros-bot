@@ -165,6 +165,7 @@ function revisionKey(session: string | null): string {
 }
 
 const HEADER_BUDGET = 20_000;
+const SNAPSHOT_BUDGET = 1_500_000;
 
 function dropWorkspaceCache() {
   for (const key of Object.keys(window.localStorage)) {
@@ -172,31 +173,27 @@ function dropWorkspaceCache() {
   }
 }
 
-function forgetOversizedCache() {
+function forgetOversizedSession() {
   const session = window.localStorage.getItem("bandros_chatgpt_session");
   if (session && session.length > HEADER_BUDGET) {
     window.localStorage.removeItem("bandros_chatgpt_session");
     dropWorkspaceCache();
-    return;
-  }
-  const key = workspaceKey(session);
-  const snapshot = key ? window.localStorage.getItem(key) : null;
-  if (snapshot && snapshot.length > HEADER_BUDGET) {
-    window.localStorage.removeItem(key);
-    window.localStorage.removeItem(revisionKey(session));
   }
 }
 
-function rememberSnapshot(session: string | null, response: Response) {
+function storeSnapshot(session: string | null, snapshot: string | null, rev: number): boolean {
   const key = workspaceKey(session);
   const revKey = revisionKey(session);
-  const snapshot = response.headers.get("X-Bandros-Snapshot");
-  if (!key || !snapshot || snapshot.length > HEADER_BUDGET) return;
-  const rev = Number(response.headers.get("X-Bandros-Snapshot-Rev") || "0");
+  if (!key || !snapshot || snapshot.length > SNAPSHOT_BUDGET) return false;
   const prev = Number(window.localStorage.getItem(revKey) || "0");
-  if (rev < prev) return;
+  if (rev < prev) return false;
   window.localStorage.setItem(key, snapshot);
   window.localStorage.setItem(revKey, String(rev));
+  return true;
+}
+
+function rememberSnapshot(session: string | null, response: Response) {
+  storeSnapshot(session, response.headers.get("X-Bandros-Snapshot"), Number(response.headers.get("X-Bandros-Snapshot-Rev") || "0"));
 }
 
 function desktopUrl(ticket: string): string | null {
@@ -213,46 +210,50 @@ function desktopUrl(ticket: string): string | null {
   return `${apiBase}/computer/view/${encodeURIComponent(ticket)}/vnc_lite.html?${params}`;
 }
 
-function requestHeaders(path: string, init?: RequestInit, includeSnapshot = true): HeadersInit {
+type RequestMeta = { fresh: boolean };
+
+async function request<T>(path: string, init?: RequestInit, meta?: RequestMeta): Promise<T> {
+  if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE_URL belum diatur.");
+  forgetOversizedSession();
   const deviceLogin = path.startsWith("/auth/chatgpt/device/");
   const session = deviceLogin ? null : window.localStorage.getItem("bandros_chatgpt_session");
-  const snapshot = includeSnapshot && session ? window.localStorage.getItem(workspaceKey(session)) : null;
-  const safeSnapshot = snapshot && snapshot.length <= HEADER_BUDGET ? snapshot : null;
-  return {
-    "Content-Type": "application/json",
-    ...(session ? { "X-Bandros-Session": session } : {}),
-    ...(safeSnapshot ? { "X-Bandros-Snapshot": safeSnapshot } : {}),
-    ...init?.headers,
-  };
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE_URL belum diatur.");
-  forgetOversizedCache();
+  const snapshot = session ? window.localStorage.getItem(workspaceKey(session)) : null;
+  const method = init?.method ?? "GET";
+  const payload = init?.body ? JSON.parse(String(init.body)) as unknown : null;
   let response: Response;
   try {
-    response = await fetch(`${apiBase}${path}`, { ...init, headers: requestHeaders(path, init) });
+    response = await fetch(`${apiBase}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Bandros-Envelope": "1",
+        ...(session ? { "X-Bandros-Session": session } : {}),
+      },
+      body: JSON.stringify({ method, snapshot: snapshot && snapshot.length <= SNAPSHOT_BUDGET ? snapshot : null, payload }),
+    });
   } catch (cause) {
-    if (!(cause instanceof TypeError)) throw cause;
-    dropWorkspaceCache();
-    try {
-      response = await fetch(`${apiBase}${path}`, { ...init, headers: requestHeaders(path, init, false) });
-    } catch {
-      throw new Error("Koneksi ke server terputus. Kirim ulang sebentar lagi.");
-    }
-  }
-  if (response.status === 494) {
-    dropWorkspaceCache();
-    response = await fetch(`${apiBase}${path}`, { ...init, headers: requestHeaders(path, init, false) });
-  }
-  const session = window.localStorage.getItem("bandros_chatgpt_session");
-  rememberSnapshot(session, response);
-  if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    throw new Error(typeof body?.detail === "string" ? body.detail : `Request gagal (${response.status}).`);
+    if (cause instanceof TypeError) throw new Error("Koneksi ke server terputus. Kirim ulang sebentar lagi.");
+    throw cause;
   }
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  const body = await response.json().catch(() => null) as { data?: T; snapshot?: string; revision?: number; detail?: unknown } | null;
+  if (body && typeof body === "object" && "data" in body && "revision" in body) {
+    const revision = Number(body.revision || 0);
+    const previous = Number(window.localStorage.getItem(revisionKey(session)) || "0");
+    storeSnapshot(session, body.snapshot ?? null, revision);
+    if (meta) meta.fresh = revision >= previous;
+    if (!response.ok) {
+      const detail = body.data && typeof body.data === "object" && "detail" in body.data ? (body.data as { detail?: unknown }).detail : body.detail;
+      throw new Error(typeof detail === "string" ? detail : `Request gagal (${response.status}).`);
+    }
+    return body.data as T;
+  }
+  rememberSnapshot(session, response);
+  if (meta) meta.fresh = true;
+  if (!response.ok) {
+    throw new Error(typeof body?.detail === "string" ? body.detail : `Request gagal (${response.status}).`);
+  }
+  return body as T;
 }
 
 export default function GrokDashboard() {
@@ -331,12 +332,14 @@ export default function GrokDashboard() {
 
   const loadBots = async (quiet = false) => {
     try {
+      const botMeta: RequestMeta = { fresh: true };
+      const groupMeta: RequestMeta = { fresh: true };
       const [nextBots, nextGroups] = await Promise.all([
-        request<Bot[]>("/bots"),
-        request<Group[]>("/groups"),
+        request<Bot[]>("/bots", undefined, botMeta),
+        request<Group[]>("/groups", undefined, groupMeta),
       ]);
-      setBots(nextBots);
-      setGroups(nextGroups);
+      if (botMeta.fresh) setBots(nextBots);
+      if (groupMeta.fresh) setGroups(nextGroups);
       const orchestrator = nextBots.find((bot) => bot.status === "active" && bot.name.toLowerCase() === "bandros");
       setSelectedBot((current) => {
         if (current) return nextBots.find((bot) => bot.id === current.id) ?? null;
@@ -462,8 +465,9 @@ export default function GrokDashboard() {
     setApprovals([]);
     const tick = async () => {
       try {
-        const nextMessages = await request<Message[]>(`/bots/${botId}/messages`);
-        if (!active) return;
+        const messageMeta: RequestMeta = { fresh: true };
+        const nextMessages = await request<Message[]>(`/bots/${botId}/messages`, undefined, messageMeta);
+        if (!active || !messageMeta.fresh) return;
         const visible = nextMessages.filter((message) => message.role !== "group");
         setMessages((current) => {
           const kept = current.filter((item) => !item.id.startsWith("local-"));
@@ -501,11 +505,12 @@ export default function GrokDashboard() {
     const groupId = selectedGroup.id;
     const tick = async () => {
       try {
+        const messageMeta: RequestMeta = { fresh: true };
         const [nextMessages, activity] = await Promise.all([
-          request<GroupMessage[]>(`/groups/${groupId}/messages`),
+          request<GroupMessage[]>(`/groups/${groupId}/messages`, undefined, messageMeta),
           request<GroupActivity[]>(`/groups/${groupId}/activity`),
         ]);
-        if (!active) return;
+        if (!active || !messageMeta.fresh) return;
         setGroupMessages((current) => {
           const nextIds = new Set(nextMessages.map((message) => message.id));
           const sameRoom = current.length === 0 || current.some((item) => nextIds.has(item.id));

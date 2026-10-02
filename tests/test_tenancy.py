@@ -87,6 +87,45 @@ def test_snapshot_keeps_the_same_bot_on_a_fresh_server(tmp_path: Path, monkeypat
     main._workspaces.clear()
 
 
+def test_envelope_snapshot_restores_a_bot_on_a_fresh_server(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, database_path=tmp_path / "workspace.db", workspace_root=tmp_path / "workspace"),
+    )
+    main._workspaces.clear()
+    asyncio.run(main.credential_store.put("sessions", "token-env", {"auth_mode": "codex", "account_id": "acct_env", "access_token": "a"}))
+    headers = {"X-Bandros-Session": "token-env", "X-Bandros-Envelope": "1"}
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            "/api/v1/bots",
+            headers=headers,
+            json={
+                "method": "POST",
+                "snapshot": None,
+                "payload": {"name": "Riset Envelope", "description": "tetap ada", "instructions": "kerja"},
+            },
+        )
+        snapshot = created.json()["snapshot"]
+        database_path, _, _ = tenant_locations("acct_env", tmp_path, tmp_path / "workspace")
+        database_path.unlink()
+        main._workspaces.clear()
+        listed = client.post(
+            "/api/v1/bots",
+            headers=headers,
+            json={"method": "GET", "snapshot": snapshot, "payload": None},
+        )
+
+    assert created.status_code == 201
+    assert created.json()["data"]["name"] == "Riset Envelope"
+    assert listed.status_code == 200
+    assert "Riset Envelope" in [bot["name"] for bot in listed.json()["data"]]
+    main._workspaces.clear()
+
+
 def test_old_snapshot_cannot_erase_a_reply(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
     monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)

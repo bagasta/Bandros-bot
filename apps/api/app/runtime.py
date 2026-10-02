@@ -278,7 +278,7 @@ class RunRuntime:
     async def _quiet_burst(self, key: tuple[str, UUID]) -> list[str]:
         while True:
             generation = self._burst_gen.get(key, 0)
-            await asyncio.sleep(1.8)
+            await asyncio.sleep(0.25)
             if self._burst_gen.get(key, 0) == generation:
                 return self._bursts.pop(key, [])
 
