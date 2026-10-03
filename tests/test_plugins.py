@@ -44,6 +44,32 @@ class FakeClient:
         return self.responses[json["method"]]
 
 
+class WeatherClient:
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    async def __aenter__(self) -> "WeatherClient":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def get(self, url: str, **kwargs: object) -> FakeResponse:
+        self.urls.append(url)
+        if "geocoding" in url:
+            return FakeResponse({"results": [{"name": "Jakarta", "country": "Indonesia", "latitude": -6.2, "longitude": 106.8}]})
+        return FakeResponse({
+            "timezone": "Asia/Jakarta",
+            "current": {"temperature_2m": 30.1, "weather_code": 1},
+            "daily": {
+                "weather_code": [1],
+                "temperature_2m_max": [32.0],
+                "temperature_2m_min": [26.0],
+                "precipitation_probability_max": [20],
+            },
+        })
+
+
 def test_mcp_server_tools_are_discovered(monkeypatch, tmp_path: Path) -> None:
     async def allow(url: str) -> bool:
         return True
@@ -134,3 +160,29 @@ def test_installed_skill_is_callable_by_the_assigned_bot(tmp_path: Path) -> None
         "description": "Current weather",
         "instructions": "Use the public weather endpoint.",
     }
+
+
+def test_weather_skill_fetches_a_forecast_from_its_allowlisted_service(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client = WeatherClient()
+    monkeypatch.setattr("apps.api.app.weather.httpx.AsyncClient", lambda *args, **kwargs: client)
+    repo = repository(tmp_path / "weather.db")
+    bot = repo.create_bot("WeatherBot", "Weather helper.", "Use weather tools.", None)
+    skill = repo.create_skill("Weather", "Current weather", "Use the weather forecast tool.")
+    repo.assign_skill(bot.id, skill.id)
+    run = repo.create_run(bot.id, repo.conversation_for_bot(bot.id), "Forecast Jakarta", "test")
+    tool = next(
+        item for item in WorkspaceToolset(repo, run.id, bot.id, lambda _: None).definitions()
+        if item.name == "weather_forecast"
+    )
+
+    result = asyncio.run(tool.handler({"location": "Jakarta"}))
+
+    assert result["ok"] is True
+    assert result["location"]["name"] == "Jakarta"
+    assert result["today"]["temperature_2m_max"] == 32.0
+    assert client.urls == [
+        "https://geocoding-api.open-meteo.com/v1/search",
+        "https://api.open-meteo.com/v1/forecast",
+    ]

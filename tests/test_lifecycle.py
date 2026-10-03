@@ -62,6 +62,8 @@ def test_run_prompt_includes_skill_and_shared_computer(tmp_path: Path) -> None:
 
     assert "shared computer" in captured["system"]
     assert "private conversation" in captured["system"]
+    assert "call the computer tools" in captured["system"]
+    assert "Desktop computer use is off" not in captured["system"]
     assert "This run is the group conversation" not in captured["system"]
     assert "Buka sumber" in captured["system"]
     assert captured["request_limit"] == "3"

@@ -12,10 +12,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
+import httpx
+
 from .repository import Repository
 from .domain import BotStatus, RiskClass, RunStatus
 from .orchestrator import missing_instruction_details
 from .policy import PolicyEngine
+from .weather import WeatherError, forecast
 
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -123,6 +126,16 @@ class WorkspaceToolset:
             ToolDefinition("web_search", "Search the public web before a research answer. payload: {query}", self.web_search, RiskClass.READ_ONLY, timeout_seconds=25),
             ToolDefinition("fetch_url", "Read a public https page. payload: {url}", self.fetch_url, RiskClass.READ_ONLY, timeout_seconds=25),
         ]
+        if any(name.lower() == "weather" for name in self.skill_names):
+            definitions.append(
+                ToolDefinition(
+                    "weather_forecast",
+                    "Get today's live forecast for a named location without an API key. payload: {location}",
+                    self.weather_forecast,
+                    RiskClass.READ_ONLY,
+                    timeout_seconds=25,
+                )
+            )
         if self.computer is not None:
             definitions.extend([
                 ToolDefinition(
@@ -410,30 +423,35 @@ class WorkspaceToolset:
         return {"ok": True, "path": str(path.relative_to(self.workspace_root)), "content": path.read_text(encoding="utf-8")[:100_000]}
 
     async def computer_screenshot(self, payload: dict[str, Any]) -> dict[str, Any]:
-        await self._wake_computer()
+        screen_url = await self._wake_computer()
         image = await asyncio.to_thread(self.computer.screenshot)
-        return {"ok": True, "image": image}
+        return {"ok": True, "image": image, "screen_url": screen_url}
 
     async def computer_click(self, payload: dict[str, Any]) -> dict[str, Any]:
-        await self._wake_computer()
+        screen_url = await self._wake_computer()
         await asyncio.to_thread(self.computer.click, int(payload.get("x", 0)), int(payload.get("y", 0)))
-        return {"ok": True}
+        return {"ok": True, "screen_url": screen_url}
 
     async def computer_type(self, payload: dict[str, Any]) -> dict[str, Any]:
-        await self._wake_computer()
+        screen_url = await self._wake_computer()
         text = self._text(payload, "text")
         if len(text) > 2_000:
             raise ValueError("text exceeds 2000 characters")
         await asyncio.to_thread(self.computer.type_text, text)
-        return {"ok": True}
+        return {"ok": True, "screen_url": screen_url}
 
     async def run_command(self, payload: dict[str, Any]) -> dict[str, Any]:
-        await self._wake_computer()
+        screen_url = await self._wake_computer()
         command = self._text(payload, "command")
         if len(command) > 2_000:
             raise ValueError("command exceeds 2000 characters")
         result = await asyncio.to_thread(self.computer.run, command)
-        return {"ok": result["exit_code"] == 0, "exit_code": result["exit_code"], "output": result["output"]}
+        return {
+            "ok": result["exit_code"] == 0,
+            "exit_code": result["exit_code"],
+            "output": result["output"],
+            "screen_url": screen_url,
+        }
 
     async def write_workspace_file(self, payload: dict[str, Any]) -> dict[str, Any]:
         content = str(payload.get("content", ""))
@@ -533,14 +551,16 @@ class WorkspaceToolset:
         self.repository.set_run_continuation(self.run_id, note)
         return {"ok": True, "continue": True}
 
-    async def _wake_computer(self) -> None:
+    async def _wake_computer(self) -> str | None:
         if self.computer is None:
             raise RuntimeError("Komputer belum dikonfigurasi.")
+        wake = getattr(self.computer, "wake", None)
+        status: dict[str, Any] | None = None
+        if wake is not None:
+            status = await asyncio.to_thread(wake)
         if self.on_computer_wake:
             self.on_computer_wake()
-        wake = getattr(self.computer, "wake", None)
-        if wake is not None:
-            await asyncio.to_thread(wake)
+        return status.get("screen_url") if status else None
 
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:
@@ -551,8 +571,6 @@ class WorkspaceToolset:
 
     async def web_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = self._text(payload, "query")[:300]
-        import httpx
-
         async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": "BandrosBot/1.0"}) as client:
             response = await client.post("https://html.duckduckgo.com/html/", data={"q": query})
         if response.status_code >= 400:
@@ -566,14 +584,18 @@ class WorkspaceToolset:
         url = self._text(payload, "url")
         if not await public_https_url(url):
             return {"ok": False, "error": "hanya halaman https publik yang bisa dibaca"}
-        import httpx
-
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, headers={"User-Agent": "BandrosBot/1.0"}) as client:
             response = await client.get(url)
         if response.status_code >= 400:
             return {"ok": False, "error": f"halaman gagal ({response.status_code})"}
         text = visible_page_text(response.text)
         return {"ok": True, "url": url, "text": text[:4000]}
+
+    async def weather_forecast(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await forecast(self._text(payload, "location"))
+        except WeatherError as error:
+            return {"ok": False, "error": str(error)}
 
 def parse_search_results(html: str) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []

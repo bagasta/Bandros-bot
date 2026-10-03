@@ -127,7 +127,10 @@ class DaytonaComputer:
             sandbox = self._ensure()
             started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
             self._raise_for_status(started)
-            return {"state": "on", "screen_url": self._preview_origin(str(sandbox["id"]))}
+            return {
+                "state": "on",
+                "screen_url": self._wait_for_preview(str(sandbox["id"])),
+            }
 
     def preview_origin(self) -> str | None:
         sandbox = self._find()
@@ -247,6 +250,15 @@ class DaytonaComputer:
                 raise ComputerError(state)
             self._sleep(0.4)
         raise ComputerError(f"sandbox stayed {last.get('state')}")
+
+    def _wait_for_preview(self, sandbox_id: str) -> str:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            origin = self._preview_origin(sandbox_id)
+            if origin:
+                return origin
+            self._sleep(0.4)
+        raise ComputerError("desktop preview did not become ready")
 
     def _remote(self, relative: str) -> str:
         raw = (relative or ".").strip() or "."
