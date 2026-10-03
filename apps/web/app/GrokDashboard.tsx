@@ -271,13 +271,18 @@ async function request<T>(path: string, init?: RequestInit, meta?: RequestMeta):
 
 type PluginRecord = { id: string; name: string; url: string; description: string; tools: string[] };
 
-function PluginPanel() {
+type ClawHubListing = { slug: string; owner_handle: string; name: string; summary: string; url: string };
+
+function PluginPanel({ botId }: { botId: string | null }) {
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<ClawHubListing[]>([]);
+  const [searching, setSearching] = useState(false);
   useEffect(() => {
     request<PluginRecord[]>("/plugins").then(setPlugins).catch(() => undefined);
   }, []);
@@ -301,9 +306,46 @@ function PluginPanel() {
     await request<void>(`/plugins/${id}`, { method: "DELETE" });
     setPlugins((current) => current.filter((plugin) => plugin.id !== id));
   };
+  const addFreeSense = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const created = await request<PluginRecord>("/plugins", { method: "POST", body: JSON.stringify({ name: "AI Sense", url: "https://aisenseapi.com/mcp", token: null }) });
+      setPlugins((current) => current.some((plugin) => plugin.id === created.id) ? current : [...current, created]);
+    } catch (cause) {
+      setNote(cause instanceof Error ? cause.message : "AI Sense tidak dapat dihubungkan.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const searchClawHub = async (event: FormEvent) => {
+    event.preventDefault();
+    setSearching(true);
+    setNote(null);
+    try {
+      setResults(await request<ClawHubListing[]>(`/clawhub/search?q=${encodeURIComponent(query.trim())}`));
+    } catch (cause) {
+      setNote(cause instanceof Error ? cause.message : "ClawHub tidak dapat dicari.");
+    } finally {
+      setSearching(false);
+    }
+  };
+  const installSkill = async (skill: ClawHubListing) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      await request("/clawhub/install", { method: "POST", body: JSON.stringify({ slug: skill.slug, owner_handle: skill.owner_handle, bot_id: botId }) });
+      setNote(`${skill.name} terpasang${botId ? " di bot ini" : ""}.`);
+    } catch (cause) {
+      setNote(cause instanceof Error ? cause.message : "Skill tidak dapat dipasang.");
+    } finally {
+      setBusy(false);
+    }
+  };
   return <div className="bandros-plugins">
     <div className="bandros-computer-head"><strong>Plugins</strong></div>
     <p>Connect an external app with its MCP server URL. Every bot in this account can use it.</p>
+    <button className="bandros-computer-toggle" type="button" disabled={busy} onClick={() => void addFreeSense()}>Add free AI Sense</button>
     <form className="bandros-plugin-form" onSubmit={(event) => void addPlugin(event)}>
       <input aria-label="Plugin name" placeholder="Name" value={name} onChange={(event) => setName(event.target.value)} required />
       <input aria-label="MCP server URL" placeholder="https://mcp.example.com" value={url} onChange={(event) => setUrl(event.target.value)} required />
@@ -312,6 +354,12 @@ function PluginPanel() {
     </form>
     {note && <p role="alert">{note}</p>}
     {plugins.map((plugin) => <div className="bandros-plugin" key={plugin.id}><span><strong>{plugin.name}</strong><small>{plugin.tools.join(", ") || plugin.url}</small></span><button type="button" onClick={() => void removePlugin(plugin.id)}>Remove</button></div>)}
+    <div className="bandros-computer-head"><strong>ClawHub skills</strong></div>
+    <form className="bandros-plugin-form" onSubmit={(event) => void searchClawHub(event)}>
+      <input aria-label="Search ClawHub" placeholder="Search ClawHub" value={query} onChange={(event) => setQuery(event.target.value)} required />
+      <button className="bandros-computer-toggle" type="submit" disabled={searching}>{searching ? "Searching…" : "Search"}</button>
+    </form>
+    {results.map((skill) => <div className="bandros-plugin" key={`${skill.owner_handle}/${skill.slug}`}><span><strong>{skill.name}</strong><small>{skill.summary}</small></span><button type="button" disabled={busy} onClick={() => void installSkill(skill)}>Install</button></div>)}
   </div>;
 }
 
@@ -1024,7 +1072,7 @@ export default function GrokDashboard() {
           <div className="bandros-computer-head"><strong>Routines</strong></div>
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </>}
-        {chatGPT.connected && <PluginPanel />}
+        {chatGPT.connected && <PluginPanel botId={selectedBot?.id ?? null} />}
       </aside>
       {settingsOpen && selectedBot && <aside className="bandros-settings" aria-label="Bot settings">
         <div className="bandros-settings-header"><div><span className="bandros-settings-eyebrow">Bot settings</span><h2>{selectedBot.name}</h2></div><button aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button></div>

@@ -257,6 +257,24 @@ class Plugin(APIModel):
     created_at: datetime
 
 
+class ClawHubQuery(APIModel):
+    q: str = Field(min_length=1, max_length=120)
+
+
+class ClawHubListing(APIModel):
+    slug: str
+    owner_handle: str
+    name: str
+    summary: str
+    url: str
+
+
+class ClawHubInstall(APIModel):
+    slug: str = Field(min_length=1, max_length=120)
+    owner_handle: str = Field(min_length=1, max_length=80)
+    bot_id: UUID | None = None
+
+
 class HandoffInput(APIModel):
     target_bot_id: UUID
     task: str = Field(min_length=1, max_length=20_000)

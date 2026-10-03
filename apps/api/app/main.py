@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from .database import Database, database_revision, encode_snapshot, hold_snapshot, release_snapshot, stage_snapshot
 from .computer import DaytonaComputer
 from .credential_store import CredentialStore
-from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
+from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, ClawHubInstall, ClawHubListing, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
@@ -1098,6 +1098,41 @@ def create_skill(payload: SkillInput) -> Skill:
         return repository.create_skill(payload.name, payload.description, payload.content)
     except Exception as error:
         raise HTTPException(status_code=409, detail="skill name is already in use") from error
+
+
+@app.get("/api/v1/clawhub/search", response_model=list[ClawHubListing])
+async def search_clawhub(q: str) -> list[ClawHubListing]:
+    from .clawhub import ClawHubError, search_skills
+
+    try:
+        results = await search_skills(q.strip())
+    except ClawHubError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    return [ClawHubListing.model_validate(item) for item in results]
+
+
+@app.post("/api/v1/clawhub/install", response_model=Skill)
+async def install_clawhub_skill(payload: ClawHubInstall) -> Skill:
+    from .clawhub import ClawHubError, fetch_skill_markdown, parse_skill_markdown
+
+    try:
+        markdown = await fetch_skill_markdown(payload.slug, payload.owner_handle)
+    except ClawHubError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    name, description, content = parse_skill_markdown(markdown)
+    name = name or payload.slug[:100]
+    if not content.strip():
+        content = markdown[:20_000]
+    source = f"https://clawhub.ai/{payload.owner_handle}/skills/{payload.slug}"
+    if source not in content:
+        content = f"{content}\n\nSource: {source}"[:20_000]
+    skill = repository.upsert_skill(name, description or payload.slug, content)
+    if payload.bot_id is not None:
+        try:
+            repository.assign_skill(payload.bot_id, skill.id)
+        except KeyError as error:
+            raise not_found(error) from error
+    return skill
 
 
 @app.get("/api/v1/plugins", response_model=list[Plugin])

@@ -423,6 +423,24 @@ class Repository:
             rows = db.execute("SELECT * FROM skills WHERE enabled = 1 ORDER BY name").fetchall()
         return [self._skill(row) for row in rows]
 
+    def upsert_skill(self, name: str, description: str, content: str) -> Skill:
+        timestamp = now()
+        with self.database.connection() as db:
+            row = db.execute("SELECT id FROM skills WHERE name = ?", (name,)).fetchone()
+            if row is None:
+                skill_id = uuid4()
+                db.execute(
+                    "INSERT INTO skills VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (str(skill_id), name, description, content, 1, dump_time(timestamp), dump_time(timestamp)),
+                )
+            else:
+                skill_id = UUID(row["id"])
+                db.execute(
+                    "UPDATE skills SET description = ?, content = ?, enabled = 1, updated_at = ? WHERE id = ?",
+                    (description, content, dump_time(timestamp), str(skill_id)),
+                )
+        return self.get_skill(skill_id)
+
     def get_skill(self, skill_id: UUID) -> Skill:
         with self.database.connection() as db:
             row = db.execute("SELECT * FROM skills WHERE id = ?", (str(skill_id),)).fetchone()

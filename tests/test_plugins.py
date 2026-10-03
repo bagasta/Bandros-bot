@@ -79,6 +79,15 @@ def test_mcp_event_stream_is_read(monkeypatch) -> None:
     assert tools[0]["name"] == "list_issues"
 
 
+def test_clawhub_skill_markdown_becomes_a_bandros_skill() -> None:
+    from apps.api.app.clawhub import parse_skill_markdown
+
+    name, description, content = parse_skill_markdown("---\nname: demo-skill\ndescription: Keep notes short.\n---\n\nWrite the result first.\n")
+    assert name == "demo-skill"
+    assert description == "Keep notes short."
+    assert content == "Write the result first."
+
+
 def test_private_plugin_url_is_rejected() -> None:
     with pytest.raises(McpError):
         asyncio.run(discover_tools("http://127.0.0.1/mcp", None))
