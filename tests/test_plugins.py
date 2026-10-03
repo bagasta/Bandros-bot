@@ -115,3 +115,23 @@ def test_clawhub_skill_markdown_becomes_a_bandros_skill() -> None:
 def test_private_plugin_url_is_rejected() -> None:
     with pytest.raises(McpError):
         asyncio.run(discover_tools("http://127.0.0.1/mcp", None))
+
+
+def test_installed_skill_is_callable_by_the_assigned_bot(tmp_path: Path) -> None:
+    from apps.api.app.workspace_tools import WorkspaceToolset
+
+    repo = repository(tmp_path / "skill.db")
+    bot = repo.create_bot("WeatherBot", "Weather helper.", "Use tools.", None)
+    skill = repo.create_skill("Weather", "Current weather", "Use the public weather endpoint.")
+    repo.assign_skill(bot.id, skill.id)
+    run = repo.create_run(bot.id, repo.conversation_for_bot(bot.id), "Weather", "test")
+    tool = next(item for item in WorkspaceToolset(repo, run.id, bot.id, lambda _: None).definitions() if item.name == "use_skill")
+
+    result = asyncio.run(tool.handler({"skill": "weather"}))
+
+    assert result == {
+        "ok": True,
+        "name": "Weather",
+        "description": "Current weather",
+        "instructions": "Use the public weather endpoint.",
+    }
