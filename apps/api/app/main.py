@@ -1282,8 +1282,7 @@ def cancel_group_runs(group_id: UUID) -> list[Run]:
     try:
         repository.get_group(group_id)
         runs = repository.runs_for_group(group_id)
-        for run in runs:
-            runtime.stop(run.id)
+        runtime.interrupt_group(group_id)
         return [repository.get_run(run.id) for run in runs]
     except KeyError as error:
         raise not_found(error) from error

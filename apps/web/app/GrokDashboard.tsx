@@ -212,7 +212,17 @@ function desktopUrl(ticket: string): string | null {
 
 type RequestMeta = { fresh: boolean };
 
+let turnEpoch = 0;
+let turnAbort = new AbortController();
+
+function stopCurrentTurn() {
+  turnEpoch += 1;
+  turnAbort.abort();
+  turnAbort = new AbortController();
+}
+
 async function request<T>(path: string, init?: RequestInit, meta?: RequestMeta): Promise<T> {
+  const epoch = turnEpoch;
   if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE_URL belum diatur.");
   forgetOversizedSession();
   const deviceLogin = path.startsWith("/auth/chatgpt/device/");
@@ -230,11 +240,14 @@ async function request<T>(path: string, init?: RequestInit, meta?: RequestMeta):
         ...(session ? { "X-Bandros-Session": session } : {}),
       },
       body: JSON.stringify({ method, snapshot: snapshot && snapshot.length <= SNAPSHOT_BUDGET ? snapshot : null, payload }),
+      signal: turnAbort.signal,
     });
   } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
     if (cause instanceof TypeError) throw new Error("Koneksi ke server terputus. Kirim ulang sebentar lagi.");
     throw cause;
   }
+  if (epoch !== turnEpoch) throw new DOMException("Stopped", "AbortError");
   if (response.status === 204) return undefined as T;
   const body = await response.json().catch(() => null) as { data?: T; snapshot?: string; revision?: number; detail?: unknown } | null;
   if (body && typeof body === "object" && "data" in body && "revision" in body) {
@@ -674,18 +687,28 @@ export default function GrokDashboard() {
       setMessages(await request<Message[]>(`/bots/${botId}/messages`));
       void loadBots();
     } catch (cause) {
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
       setError(cause instanceof Error ? cause.message : "Pesan tidak dapat dikirim.");
     } finally { advancing.current = false; workingRef.current = false; setWorking(false); setActiveRunId(null); }
   };
 
   const stopRun = async () => {
+    const groupId = selectedGroup?.id;
+    const runId = activeRunId;
+    stopCurrentTurn();
+    groupPending.current = false;
+    advancing.current = false;
+    workingRef.current = false;
+    setWorking(false);
+    setTypingNames([]);
     try {
-      if (selectedGroup) {
-        await request<Run[]>(`/groups/${selectedGroup.id}/cancel`, { method: "POST" });
-      } else if (activeRunId) {
-        await request<Run>(`/runs/${activeRunId}/cancel`, { method: "POST" });
-      } else return;
+      if (groupId) {
+        await request<Run[]>(`/groups/${groupId}/cancel`, { method: "POST" });
+      } else if (runId) {
+        await request<Run>(`/runs/${runId}/cancel`, { method: "POST" });
+      }
     } catch (cause) {
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
       setError(cause instanceof Error ? cause.message : "Run tidak dapat dihentikan.");
     }
   };

@@ -214,7 +214,8 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
         "Pesan baru dari bos adalah tugas baru, kecuali ia menulis lanjut, revisi, atau menunjuk hasil yang baru dikirim.",
         "Tugas baru tidak mewarisi usaha, menu, harga, atau asumsi dari job yang sudah selesai. Kalau pesan itu tidak menjelaskan bisnisnya, tanyakan satu kalimat dan jangan menugaskan rekan.",
         "Riwayat di bawah sudah kamu baca, termasuk pesan yang tidak menyebutmu. Jangan mengulang pekerjaan yang selesai.",
-        "Kamu dipilih untuk bicara. Balas sekarang, singkat, seperti chat. Jangan menulis (diam).",
+        "Kamu dipilih untuk bicara. Kerjakan tahapmu sendiri sampai ada hasil, lalu balas singkat. Jangan menulis (diam).",
+        "Kalau tahapmu belum selesai dan masih butuh alat, panggil continue_own_work. Kamu akan dibangunkan lagi. Pengguna bisa menghentikanmu kapan saja dengan berhenti.",
         "Kalau perlu satu rekan mengerjakan langkah berikutnya, sebut tepat satu @Nama beserta datanya.",
         "@everyone: setiap anggota menjawab sekali. Sebut satu @Nama hanya untuk langkah berikutnya.",
     ]

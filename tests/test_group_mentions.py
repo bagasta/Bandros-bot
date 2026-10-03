@@ -130,6 +130,49 @@ def test_each_advance_posts_one_speaker(tmp_path: Path) -> None:
     assert asyncio.run(runtime.advance_group(group.id)) is None
 
 
+def test_stop_clears_a_queued_bot(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "stop.db")
+    worker = repository.create_bot("IT Aplikasi", "", "TOKEN:worker", None)
+    group = repository.create_group("Divisi IT", "", [worker.id])
+    text = "@IT Aplikasi cek infrastruktur"
+    repository.append_group_message(group.id, "user", text)
+    runtime = RunRuntime(repository, ScriptedGateway({"TOKEN:worker": "tidak boleh terpanggil"}), "test-model", 3)
+    runtime.schedule_group_reply(group.id, text, None, 0)
+    assert repository.group_queue_size(group.id) == 1
+
+    runtime.interrupt_group(group.id)
+
+    assert repository.group_queue_size(group.id) == 0
+    assert asyncio.run(runtime.advance_group(group.id)) is None
+
+
+def test_a_bot_continues_its_own_stage_until_the_result(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "auto.db")
+    worker = repository.create_bot("IT Aplikasi", "", "TOKEN:worker", None)
+    group = repository.create_group("Divisi IT", "", [worker.id])
+    text = "@IT Aplikasi tulis hasilnya"
+    repository.append_group_message(group.id, "user", text)
+
+    class ContinuingGateway:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                tool = next(item for item in tools if item.name == "continue_own_work")
+                await tool.handler({"note": "tulis file hasil"})
+                return "Saya lanjutkan tahap ini."
+            return "File hasil sudah ditulis."
+
+    runtime = RunRuntime(repository, ContinuingGateway(), "test-model", 4)
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    posted = [message.content for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
+    assert posted == ["Saya lanjutkan tahap ini.", "File hasil sudah ditulis."]
+    assert repository.group_queue_size(group.id) == 0
+
+
 def test_a_bot_who_already_answered_is_not_left_typing(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "typing.db")
     worker = repository.create_bot("IT Aplikasi", "", "TOKEN:worker", None)

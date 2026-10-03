@@ -57,6 +57,8 @@ class WorkspaceToolset:
         self.on_group_post = on_group_post
         self.computer = computer
         self.skill_names = {skill.name for skill in repository.list_bot_skills(bot_id)}
+        self.continuation: str | None = None
+        self.tool_uses = 0
 
     def definitions(self) -> list[ToolDefinition]:
         # Every persistent Agent is an orchestrator. Description, instructions,
@@ -86,6 +88,12 @@ class WorkspaceToolset:
             ToolDefinition("write_workspace_file", "Write a text file into the persistent Bot workspace. payload: {path, content}", self.write_workspace_file, RiskClass.LOCAL_WRITE),
             ToolDefinition("list_memory", "Recall durable facts saved for this Bot. payload: {query?}", self.list_memory, RiskClass.READ_ONLY),
             ToolDefinition("save_memory", "Save a durable preference or fact for future runs. payload: {kind, content}", self.save_memory, RiskClass.LOCAL_WRITE),
+            ToolDefinition(
+                "continue_own_work",
+                "Keep working on your own stage after this reply. payload: {note}. Use it only when this stage still needs another tool pass. Do not mention a teammate in the same turn.",
+                self.continue_own_work,
+                RiskClass.READ_ONLY,
+            ),
             ToolDefinition("web_search", "Search the public web before a research answer. payload: {query}", self.web_search, RiskClass.READ_ONLY, timeout_seconds=25),
             ToolDefinition("fetch_url", "Read a public https page. payload: {url}", self.fetch_url, RiskClass.READ_ONLY, timeout_seconds=25),
         ]
@@ -124,6 +132,9 @@ class WorkspaceToolset:
 
     def _audited(self, definition: ToolDefinition) -> ToolDefinition:
         async def handler(payload: dict[str, Any]) -> dict[str, Any]:
+            run = self.repository.get_run(self.run_id)
+            if run.stop_requested or run.status is RunStatus.CANCELLED:
+                return {"ok": False, "stopped": True, "error": "Dihentikan."}
             approved_payloads = self.approved_tools.get(definition.name, [])
             approved_index = next(
                 (index for index, candidate in enumerate(approved_payloads) if candidate == payload),
@@ -148,6 +159,7 @@ class WorkspaceToolset:
                     {"tool": definition.name, "approval_id": str(approval.id)},
                 )
                 return {"ok": False, "requires_approval": True, "approval_id": str(approval.id)}
+            self.tool_uses += 1
             call_id = self.repository.create_tool_call(self.run_id, definition.name, payload)
             self.repository.record_event(
                 self.run_id,
@@ -418,6 +430,11 @@ class WorkspaceToolset:
         content = self._text(payload, "content")[:10_000]
         memory = self.repository.add_memory(self.bot_id, kind, content)
         return {"ok": True, "memory_id": str(memory.id), "kind": memory.kind}
+
+    async def continue_own_work(self, payload: dict[str, Any]) -> dict[str, Any]:
+        note = self._text(payload, "note")[:2_000]
+        self.continuation = note
+        return {"ok": True, "continue": True}
 
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:

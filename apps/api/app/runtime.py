@@ -48,6 +48,8 @@ class RunRuntime:
     _group_depth: dict[UUID, int] = field(default_factory=dict, init=False)
     _pending_wakes: list[tuple[UUID, str, UUID, int]] = field(default_factory=list, init=False)
     _step_only: bool = field(default=False, init=False)
+    _own_continuation: tuple[UUID, UUID, str, int] | None = field(default=None, init=False)
+    _repeat_ok: bool = field(default=False, init=False)
     _wake_budget: int = field(default=12, init=False)
     _anticipated: dict[UUID, list[str]] = field(default_factory=dict, init=False)
     _bursts: dict[tuple[str, UUID], list[str]] = field(default_factory=dict, init=False)
@@ -112,7 +114,7 @@ class RunRuntime:
             self._approved_tools.pop(run_id, {}),
             self.workspace_root,
             on_group_post=self.queue_group_wake,
-            computer=self.computer,
+            computer=None,
         )
         try:
             history = self.repository.list_messages(run.conversation_id, limit=50)
@@ -147,6 +149,8 @@ class RunRuntime:
             except Exception as error:
                 if "request_limit" not in str(error):
                     raise
+                if toolset.tool_uses > 0 and not toolset.continuation:
+                    toolset.continuation = "Lanjutkan tahap yang sama dari hasil yang sudah ada. Jangan mengulang pekerjaan yang selesai."
                 answer = await asyncio.wait_for(
                     self.model_gateway.complete(
                         system=system,
@@ -171,10 +175,11 @@ class RunRuntime:
             self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
             return
         group_id = self.repository.group_for_run(run_id)
+        self._queue_own_continuation(group_id, bot, run_id, toolset)
         if group_id:
             answer = visible_reply(answer)
         if group_id and not is_silence(answer):
-            if self._lead_already_replied(group_id, bot.id):
+            if self._lead_already_replied(group_id, bot.id) and not self._repeat_ok:
                 answer = "(diam)"
             else:
                 depth = self._group_depth.get(run_id, 0)
@@ -389,6 +394,19 @@ class RunRuntime:
             self._anticipated[group_id] = names
         return names
 
+    def _queue_own_continuation(self, group_id: UUID | None, bot, run_id: UUID, toolset) -> None:
+        """A bot keeps its own stage until the result exists, unless the user stopped it."""
+        note = getattr(toolset, "continuation", None)
+        if group_id is None or not note:
+            return
+        messages = self.repository.list_group_messages(group_id)
+        last_user = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].sender_type == "user"), -1)
+        own_posts = sum(1 for message in messages[last_user + 1 :] if message.sender_bot_id == bot.id)
+        if own_posts >= 3:
+            return
+        depth = self._group_depth.get(run_id, 0)
+        self._own_continuation = (group_id, bot.id, note, depth)
+
     def _speaker_already_answered(self, group_id: UUID, bot_id: UUID, content: str) -> bool:
         messages = self.repository.list_group_messages(group_id)
         wake_at = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].content == content), None)
@@ -402,7 +420,8 @@ class RunRuntime:
         if item is None:
             self._anticipated.pop(group_id, None)
             return None
-        turn_id, bot_id, content, _sender_bot_id, depth = item
+        turn_id, bot_id, content, sender_bot_id, depth = item
+        self._repeat_ok = sender_bot_id == bot_id
         if self._speaker_already_answered(group_id, bot_id, content):
             self.repository.drop_group_speaker(turn_id)
             return await self.advance_group(group_id)
@@ -414,6 +433,10 @@ class RunRuntime:
         finally:
             self._step_only = False
             self.repository.drop_group_speaker(turn_id)
+            pending = self._own_continuation
+            self._own_continuation = None
+            if pending is not None and pending[0] == group_id:
+                self.repository.enqueue_group_speaker(pending[0], pending[1], pending[2], pending[1], pending[3])
             remaining = [self.repository.get_bot(bot).name for bot in self.repository.queued_bot_ids(group_id)]
             if remaining:
                 self._anticipated[group_id] = remaining
@@ -533,11 +556,7 @@ class RunRuntime:
         group_list = ", ".join(groups) or "tidak ada"
         memories = self.repository.list_memories(bot_id)
         memory_list = "; ".join(f"{memory.kind}: {memory.content}" for memory in memories[:20]) or "belum ada"
-        computer = (
-            " Semua Bot berbagi satu desktop. Pakai computer_screenshot sebelum computer_click atau computer_type. Komputer 1 vCPU ini tidur setelah giliran kalau pengguna belum menyalakannya."
-            if self.computer is not None
-            else ""
-        )
+        computer = " Komputer desktop belum dipakai. Hasil tahan lama ditulis ke workspace bersama."
         return (
             f"Rekan kerja aktif: {colleagues or 'tidak ada'}. Job Anda: {job_list}. "
             f"Grup Anda: {group_list}. Memori Bot: {memory_list}.{computer}"
@@ -568,7 +587,10 @@ class RunRuntime:
                 "The transcript is context you already read, including lines that did not mention you. "
                 "Mention exactly one @Name only when that teammate owns the next step, and include the data they need. "
                 "If you are the orchestrator and a teammate already posted a result, mention the one teammate who has not finished, or give the user the final result with no @mention. "
-                "Call web_search or fetch_url before a research answer, and write_workspace_file when a file should exist. "
+                "Work the stage yourself until there is a result: read memory and skills, use web_search or fetch_url for research, and write_workspace_file for a durable file. "
+                "Do not claim a file, bot, or job exists unless the tool result says ok. "
+                "If this stage still needs another tool pass, call continue_own_work with a short note and reply with one status sentence. You will be woken to finish it. "
+                "Stop as soon as the user says berhenti. "
                 "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
                 "Do not recap that you already delegated. Do not quote the previous speaker or write @ before your own name. "
             )
@@ -576,7 +598,7 @@ class RunRuntime:
             mode = (
                 "This is your private conversation with the user. "
                 "Reply like an expert texting the boss on WhatsApp: the result first, short, and in their language. "
-                "Do the work yourself on the shared computer. "
+                "Do the work yourself in the shared workspace. Desktop computer use is off. "
                 "Use handoff_to_bot when another Bot owns a bounded part, and post_to_group when the team should see an update. "
                 "Every Bot can list, create, update, archive, and restore Bots, and can list, create, and edit groups. "
                 "When asked to make a Bot and a group with it, call create_bot and then create_group. "
