@@ -79,6 +79,30 @@ def test_mcp_event_stream_is_read(monkeypatch) -> None:
     assert tools[0]["name"] == "list_issues"
 
 
+def test_bandros_can_install_an_mcp_from_chat(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from apps.api.app.workspace_tools import WorkspaceToolset
+
+    async def fake_discover(url: str, token: str | None) -> list[dict[str, str]]:
+        assert url == "https://aisenseapi.com/mcp"
+        assert token is None
+        return [{"name": "get_current_time", "description": "Current time"}]
+
+    monkeypatch.setattr("apps.api.app.mcp_client.discover_tools", fake_discover)
+    repo = repository(tmp_path / "chat.db")
+    bot = repo.create_bot("Bandros", "Orkestrator utama.", "Atur tim.", None)
+    run = repo.create_run(bot.id, repo.conversation_for_bot(bot.id), "Pasang MCP AI Sense", "test")
+    toolset = WorkspaceToolset(repo, run.id, bot.id, lambda _run: None)
+    tool = next(item for item in toolset.definitions() if item.name == "connect_plugin")
+
+    result = asyncio.run(tool.handler({"name": "AI Sense", "url": "https://aisenseapi.com/mcp"}))
+
+    assert result["ok"] is True
+    assert result["tools"] == ["get_current_time"]
+    assert repo.list_plugins()[0].name == "AI Sense"
+
+
 def test_clawhub_skill_markdown_becomes_a_bandros_skill() -> None:
     from apps.api.app.clawhub import parse_skill_markdown
 

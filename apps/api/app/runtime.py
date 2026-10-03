@@ -583,6 +583,7 @@ class RunRuntime:
         skill_text = "\n\n".join(skill_blocks) or "none"
         orchestrator = (
             "You are the primary orchestrator, Bandros. Delegate specialist work to a Bot you create. "
+            "When the user asks you to install or connect an MCP, call connect_plugin yourself. "
             "A new Bot needs a specific description plus instructions with the sections Tugas, Cara kerja, Output, and Batasan. "
             "Rewrite the instructions until create_bot returns ok. "
             if "orkestrator" in description.lower()

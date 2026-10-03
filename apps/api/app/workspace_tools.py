@@ -95,6 +95,14 @@ class WorkspaceToolset:
                 RiskClass.READ_ONLY,
             ),
             ToolDefinition(
+                "connect_plugin",
+                "Install an external MCP server when the user asks. payload: {name, url, token?}. "
+                "The free AI Sense server is name AI Sense and url https://aisenseapi.com/mcp with no token. "
+                "Do not invent any other server URL.",
+                self.connect_plugin,
+                RiskClass.LOCAL_WRITE,
+            ),
+            ToolDefinition(
                 "use_plugin",
                 "Call a tool on a connected external MCP plugin. payload: {plugin, tool, arguments}. "
                 + self._plugin_catalog(),
@@ -443,6 +451,22 @@ class WorkspaceToolset:
         if not plugins:
             return "No plugins are connected yet."
         return "Connected plugins: " + "; ".join(f"{plugin.name} ({', '.join(plugin.tools) or 'no tools'})" for plugin in plugins)
+
+    async def connect_plugin(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .mcp_client import McpError, discover_tools
+
+        name = self._text(payload, "name")[:80]
+        url = self._text(payload, "url")
+        token = str(payload.get("token") or "").strip() or None
+        try:
+            tools = await discover_tools(url, token)
+        except McpError as error:
+            return {"ok": False, "error": str(error)}
+        try:
+            plugin = self.repository.create_plugin(name, url, token, tools)
+        except Exception:
+            return {"ok": False, "error": "Nama plugin sudah dipakai."}
+        return {"ok": True, "name": plugin.name, "tools": plugin.tools}
 
     async def use_plugin(self, payload: dict[str, Any]) -> dict[str, Any]:
         from .mcp_client import McpError, call_tool
