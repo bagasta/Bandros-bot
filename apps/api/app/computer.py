@@ -15,6 +15,8 @@ import httpx
 SNAPSHOT = "daytona-small"
 AUTO_STOP_MINUTES = 5
 AUTO_ARCHIVE_MINUTES = 60
+PREVIEW_HOLD_SECONDS = 8
+PREVIEW_GRACE_SECONDS = 4
 WORKSPACE = "/home/daytona/workspace"
 _SKIP_STATES = {"destroyed", "destroying", "deleted", "error", "unknown"}
 _LIVE_STATES = {"started", "starting", "creating"}
@@ -44,15 +46,22 @@ class DaytonaComputer:
         target: str = "us",
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], float] | None = None,
+        preview_hold_seconds: float = PREVIEW_HOLD_SECONDS,
+        preview_grace_seconds: float = PREVIEW_GRACE_SECONDS,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.account_id = account_id
         self.target = target
+        self.preview_hold_seconds = preview_hold_seconds
+        self.preview_grace_seconds = preview_grace_seconds
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._client = client or httpx.Client(timeout=30)
         self._sleep = sleep
+        self._now = now or time.monotonic
         self._sandbox_id: str | None = None
         self._account_lock = _account_lock(account_id)
+        self._preview_seen = threading.Event()
 
     def list_dir(self, relative: str) -> list[dict[str, str]]:
         remote = self._remote(relative)
@@ -119,10 +128,14 @@ class DaytonaComputer:
         sandbox = self._find()
         if sandbox is None or sandbox.get("state") != "started":
             return {"state": "off", "screen_url": None}
-        return {"state": "on", "screen_url": self._preview_origin(str(sandbox["id"]))}
+        screen_url = self._preview_origin(str(sandbox["id"]))
+        if screen_url:
+            self._preview_seen.set()
+        return {"state": "on", "screen_url": screen_url}
 
     def wake(self) -> dict[str, str | None]:
         """Start the small sandbox and its desktop. Caller must park it again."""
+        self._preview_seen.clear()
         with self._account_lock:
             sandbox = self._ensure()
             started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
@@ -152,6 +165,29 @@ class DaytonaComputer:
             return None
         parts = urlsplit(str(url))
         return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+    def park_after_preview(self) -> None:
+        """Leave the desktop URL readable until the panel can show it, then park."""
+        sandbox = self._find()
+        if sandbox is not None and sandbox.get("state") == "started":
+            self._wait_for_preview_view()
+        self.park()
+
+    def _wait_for_preview_view(self) -> None:
+        deadline = self._now() + self.preview_hold_seconds
+        visible_until: float | None = None
+        while True:
+            now = self._now()
+            if self._preview_seen.is_set() and visible_until is None:
+                visible_until = now + self.preview_grace_seconds
+            if visible_until is not None and now >= visible_until:
+                return
+            if now >= deadline:
+                return
+            remaining = deadline - now
+            if visible_until is not None:
+                remaining = min(remaining, visible_until - now)
+            self._sleep(min(0.2, max(remaining, 0)))
 
     def park(self) -> None:
         """Stop compute billing, then archive so disk is not billed either."""

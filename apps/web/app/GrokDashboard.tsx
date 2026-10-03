@@ -389,19 +389,27 @@ export default function GrokDashboard() {
   useEffect(() => {
     setMotionEnabled(window.localStorage.getItem("bandros_motion") !== "off");
   }, []);
+  const screenPull = useRef(0);
   useEffect(() => {
     if (!chatGPT.connected) return;
     let active = true;
-    request<{ state: "off" | "on" | "unavailable"; screen_url: string | null }>("/computer")
-      .then((next) => {
-        if (!active) return;
-        setComputerState(next.state);
-        setScreenUrl(next.screen_url);
-        if (next.state !== "on") setScreenOpen(false);
-      })
-      .catch(() => undefined);
-    return () => { active = false; };
-  }, [chatGPT.connected]);
+    const pull = () => {
+      const pullId = ++screenPull.current;
+      request<{ state: "off" | "on" | "unavailable"; screen_url: string | null }>("/computer")
+        .then((next) => {
+          if (!active || pullId !== screenPull.current) return;
+          setComputerState(next.state);
+          setScreenUrl(next.screen_url);
+          if (next.state !== "on") setScreenOpen(false);
+        })
+        .catch(() => undefined);
+    };
+    pull();
+    const live = working || botWorking || computerState === "on";
+    if (!live) return () => { active = false; };
+    const timer = window.setInterval(pull, 1000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [chatGPT.connected, working, botWorking, computerState]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);

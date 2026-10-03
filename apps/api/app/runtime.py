@@ -84,7 +84,8 @@ class RunRuntime:
         if computer is None or self._computer_held or not self._computer_used:
             return
         try:
-            await asyncio.to_thread(computer.park)  # type: ignore[attr-defined]
+            release = getattr(computer, "park_after_preview", None)
+            await asyncio.to_thread(release if release is not None else computer.park)  # type: ignore[attr-defined]
             self._computer_used = False
         except Exception as error:
             self.repository.record_event(run_id, "computer.park_failed", {"error": str(error)[:300]})
