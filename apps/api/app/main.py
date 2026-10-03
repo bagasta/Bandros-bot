@@ -562,13 +562,10 @@ async def computer_status() -> dict[str, str | None]:
 
 @app.post("/api/v1/computer/start")
 async def computer_start() -> dict[str, str | None]:
-    computer = _account_computer()
-    if computer is None:
-        raise HTTPException(status_code=503, detail="Komputer Daytona belum dikonfigurasi.")
-    try:
-        return await asyncio.to_thread(computer.wake)
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=str(error)[:300]) from error
+    raise HTTPException(
+        status_code=409,
+        detail="Desktop hanya diaktifkan saat Bot memanggil alat komputer.",
+    )
 
 
 @app.post("/api/v1/computer/stop")
