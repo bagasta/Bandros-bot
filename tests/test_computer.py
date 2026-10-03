@@ -81,6 +81,76 @@ def test_create_uses_smallest_snapshot() -> None:
     assert body["public"] is False
 
 
+def test_archives_duplicate_account_sandboxes_before_use() -> None:
+    actions: list[str] = []
+    states = {"first": "started", "second": "started"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/sandbox":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": "first", "state": states["first"], "labels": {"app": "bandros", "account": "acct"}},
+                        {"id": "second", "state": states["second"], "labels": {"app": "bandros", "account": "acct"}},
+                    ]
+                },
+            )
+        if path == "/sandbox/second/stop":
+            actions.append("stop second")
+            states["second"] = "stopped"
+            return httpx.Response(200, json={"state": "stopped"})
+        if request.method == "GET" and path == "/sandbox/second":
+            return httpx.Response(200, json={"id": "second", "state": states["second"]})
+        if path == "/sandbox/second/archive":
+            actions.append("archive second")
+            states["second"] = "archived"
+            return httpx.Response(200, json={"state": "archived"})
+        if request.method == "GET" and path == "/sandbox/first":
+            return httpx.Response(
+                200,
+                json={"id": "first", "state": "started", "toolboxProxyUrl": "https://proxy.test"},
+            )
+        if path == "/first/files/folder":
+            actions.append("use first")
+            return httpx.Response(201, text="")
+        if path == "/first/process/execute":
+            return httpx.Response(200, json={"exitCode": 0, "result": ""})
+        return httpx.Response(404, text=path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    assert computer.run("pwd")["output"] == ""
+    assert actions == ["stop second", "archive second", "use first"]
+
+
+def test_wake_returns_preview_without_installing_chrome() -> None:
+    commands: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/sandbox":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": "sb", "state": "started", "labels": {"app": "bandros", "account": "acct"}, "toolboxProxyUrl": "https://proxy.test"}]},
+            )
+        if path == "/sb/computeruse/start":
+            return httpx.Response(200, json={"state": "started"})
+        if path.endswith("/signed-preview-url"):
+            return httpx.Response(200, json={"url": "https://6080-example.daytonaproxy01.net/vnc.html?token=secret"})
+        if path == "/sb/process/execute":
+            commands.append(json.loads(request.content)["command"])
+            return httpx.Response(200, json={"exitCode": 0, "result": ""})
+        return httpx.Response(404, text=path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    status = computer.wake()
+
+    assert status == {"state": "on", "screen_url": "https://6080-example.daytonaproxy01.net"}
+    assert commands == []
+    assert computer.status()["screen_url"] == "https://6080-example.daytonaproxy01.net"
+
+
 def test_preview_origin_is_only_the_desktop_host() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/signed-preview-url"):
@@ -117,7 +187,43 @@ def test_runtime_parks_after_the_turn(tmp_path) -> None:
     computer = Parking()
     runtime = RunRuntime(repository, FakeGateway(), "test-model", 1, computer=computer)
     asyncio.run(runtime.start_and_wait(run.id))
-    assert computer.parked is True
+    assert computer.parked is False
+
+
+def test_runtime_wakes_and_parks_only_when_a_computer_tool_is_used(tmp_path) -> None:
+    class Desktop:
+        def __init__(self) -> None:
+            self.wakes = 0
+            self.parked = 0
+
+        def wake(self) -> None:
+            self.wakes += 1
+
+        def park(self) -> None:
+            self.parked += 1
+
+        def run(self, command: str) -> dict[str, object]:
+            return {"exit_code": 0, "output": command}
+
+    class ComputerGateway(FakeGateway):
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+            tool = next(item for item in tools if item.name == "run_command")
+            result = await tool.handler({"command": "pwd"})
+            assert result["ok"] is True
+            return "done"
+
+    database = Database(tmp_path / "lazy.db")
+    database.initialize()
+    repository = Repository(database)
+    bot = repository.create_bot("Worker", "", "", None)
+    run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Hi", "test-model")
+    computer = Desktop()
+    runtime = RunRuntime(repository, ComputerGateway(), "test-model", 1, computer=computer)
+
+    asyncio.run(runtime.start_and_wait(run.id))
+
+    assert computer.wakes == 1
+    assert computer.parked == 1
 
 
 def test_held_computer_stays_awake(tmp_path) -> None:

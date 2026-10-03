@@ -109,6 +109,14 @@ def continues_the_work(text: str) -> bool:
     return len(text.strip()) >= 180
 
 
+def is_resume_request(text: str) -> bool:
+    lowered = re.sub(r"[^\w\s]", " ", text.lower())
+    words = set(lowered.split())
+    return bool(words & {"lanjut", "lanjutin", "teruskan", "continue", "resume"}) and not bool(
+        words & {"jangan", "stop", "berhenti", "cukup"}
+    )
+
+
 def route_next_owner(answer: str, members: list[Bot], sender: Bot, finished_ids: set, allow_many: bool) -> str:
     """The lead keeps one unfinished owner. A finished teammate is not mentioned again."""
     if sender.id != lead_bot(members).id:

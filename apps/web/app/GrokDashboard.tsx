@@ -196,20 +196,6 @@ function rememberSnapshot(session: string | null, response: Response) {
   storeSnapshot(session, response.headers.get("X-Bandros-Snapshot"), Number(response.headers.get("X-Bandros-Snapshot-Rev") || "0"));
 }
 
-function desktopUrl(ticket: string): string | null {
-  if (!apiBase) return null;
-  const prefix = new URL(apiBase).pathname.replace(/^\/|\/$/g, "");
-  const socketPath = `${prefix}/computer/view/${ticket}/websockify`;
-  const params = new URLSearchParams({
-    autoconnect: "1",
-    scale: "true",
-    reconnect: "1",
-    shared: "1",
-    path: socketPath,
-  });
-  return `${apiBase}/computer/view/${encodeURIComponent(ticket)}/vnc_lite.html?${params}`;
-}
-
 type RequestMeta = { fresh: boolean };
 
 let turnEpoch = 0;
@@ -395,23 +381,10 @@ export default function GrokDashboard() {
   const [computerState, setComputerState] = useState<"off" | "on" | "unavailable">("off");
   const [screenUrl, setScreenUrl] = useState<string | null>(null);
   const [screenOpen, setScreenOpen] = useState(false);
-  const [screenTicket, setScreenTicket] = useState<string | null>(null);
-  const [computerBusy, setComputerBusy] = useState(false);
   const [approvals, setApprovals] = useState<Array<{ id: string; tool_name: string; reason: string }>>([]);
   useEffect(() => {
     setMotionEnabled(window.localStorage.getItem("bandros_motion") !== "off");
   }, []);
-  useEffect(() => {
-    if (!chatGPT.connected || computerState !== "on") {
-      setScreenTicket(null);
-      return;
-    }
-    let active = true;
-    request<{ ticket: string }>("/computer/ticket")
-      .then((next) => { if (active) setScreenTicket(next.ticket); })
-      .catch(() => undefined);
-    return () => { active = false; };
-  }, [chatGPT.connected, computerState]);
   useEffect(() => {
     if (!chatGPT.connected) return;
     let active = true;
@@ -675,27 +648,9 @@ export default function GrokDashboard() {
     node.scrollTop = node.scrollHeight;
   }, [messages, groupMessages, typingNames, working, botWorking]);
 
-  const toggleComputer = async () => {
-    setComputerBusy(true);
-    setError(null);
-    try {
-      const next = await request<{ state: "off" | "on" | "unavailable"; screen_url: string | null }>(
-        computerState === "on" ? "/computer/stop" : "/computer/start",
-        { method: "POST" },
-      );
-      setComputerState(next.state);
-      setScreenUrl(next.screen_url);
-      if (next.state !== "on") setScreenOpen(false);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Komputer gagal dinyalakan.");
-    } finally {
-      setComputerBusy(false);
-    }
-  };
-
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
-    if ((!selectedBot && !selectedGroup) || !prompt.trim() || working) return;
+    if ((!selectedBot && !selectedGroup) || !prompt.trim()) return;
     const content = prompt.trim();
     stickToBottom.current = true;
     setPrompt(""); setWorking(true); workingRef.current = true; advancing.current = true; setError(null);
@@ -1053,7 +1008,7 @@ export default function GrokDashboard() {
           <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
           <div className="bandros-composer-actions">
             {(working || botWorking || typingNames.length > 0) && <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button>}
-            <button type="submit" disabled={!prompt.trim() || working} aria-label="Send message">↑</button>
+            <button type="submit" disabled={!prompt.trim()} aria-label="Send message">↑</button>
           </div>
         </form>}
         {chatGPT.connected && selectedBot && !selectedGroup && <div className="bandros-composer-footer"><span>Model</span>{modelSelect}</div>}
@@ -1064,11 +1019,10 @@ export default function GrokDashboard() {
           {selectedGroup.members.map((member) => <button className="bandros-member" type="button" key={member.id} onClick={() => insertMention(member.name)}><BandrosAvatar name={member.name} working={typingPeople.includes(member.name)} />{member.name}</button>)}
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </> : <>
-          <div className={`bandros-screen${screenTicket ? " has-view" : ""}`}>{screenTicket && desktopUrl(screenTicket) ? <iframe title="Layar komputer kecil" src={desktopUrl(screenTicket) ?? undefined} /> : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
+          <div className={`bandros-screen${screenUrl ? " has-view" : ""}`}>{screenUrl ? <iframe title="Layar komputer kecil" src={screenUrl} /> : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
           <p>{displayName}&apos;s screen</p>
-          {computerState === "on" && <button className="bandros-computer-toggle" type="button" onClick={() => setScreenOpen(true)}>Buka layar</button>}
-          {computerState === "on" && <p>Semua Bot memakai desktop yang sama. Matikan setelah selesai.</p>}
-          <button className="bandros-computer-toggle" type="button" disabled={computerBusy || computerState === "unavailable"} onClick={() => void toggleComputer()}>{computerBusy ? "Memulai…" : computerState === "on" ? "Matikan komputer" : "Nyalakan komputer"}</button>
+          {screenUrl && <button className="bandros-computer-toggle" type="button" onClick={() => setScreenOpen(true)}>Buka layar</button>}
+          <p>{computerState === "on" ? "Desktop aktif selama Bot menggunakannya dan akan diparkir setelah gilirannya selesai." : "Desktop hanya aktif saat Bot meminta bantuan komputer."}</p>
           <div className="bandros-computer-head"><strong>Routines</strong></div>
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </>}
@@ -1094,13 +1048,13 @@ export default function GrokDashboard() {
         </form>
         <button className="bandros-danger-button" type="button" onClick={() => void deleteBot(selectedBot)}>Hapus bot</button>
       </aside>}
-      {screenOpen && screenTicket && desktopUrl(screenTicket) && <div className="bandros-screen-backdrop" onClick={() => setScreenOpen(false)}>
+      {screenOpen && screenUrl && <div className="bandros-screen-backdrop" onClick={() => setScreenOpen(false)}>
         <div className="bandros-screen-float" role="dialog" aria-label="Layar komputer" onClick={(event) => event.stopPropagation()}>
           <div className="bandros-screen-float-bar">
             <strong>Bandros&apos;s screen</strong>
             <button type="button" aria-label="Tutup layar" onClick={() => setScreenOpen(false)}>×</button>
           </div>
-          <iframe title="Layar komputer" src={desktopUrl(screenTicket) ?? undefined} />
+          <iframe title="Layar komputer" src={screenUrl} />
         </div>
       </div>}
       {deviceFlow && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Sign in with ChatGPT">

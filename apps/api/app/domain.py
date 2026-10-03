@@ -93,6 +93,7 @@ class Run(APIModel):
     prompt: str
     model: str
     error: str | None
+    continuation: str | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     stop_requested: bool = False
     created_at: datetime
