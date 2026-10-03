@@ -83,6 +83,10 @@ function chatTime(value?: string) {
   return date.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
 }
 
+function canSendMessage(prompt: string): boolean {
+  return prompt.trim().length > 0;
+}
+
 function MemberPicker({ members, onChoose }: { members: Bot[]; onChoose: (id: string) => void }) {
   const pickerRef = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
@@ -650,7 +654,7 @@ export default function GrokDashboard() {
 
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
-    if ((!selectedBot && !selectedGroup) || !prompt.trim()) return;
+    if ((!selectedBot && !selectedGroup) || !canSendMessage(prompt)) return;
     const content = prompt.trim();
     stickToBottom.current = true;
     setPrompt(""); setWorking(true); workingRef.current = true; advancing.current = true; setError(null);
@@ -1008,7 +1012,7 @@ export default function GrokDashboard() {
           <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
           <div className="bandros-composer-actions">
             {(working || botWorking || typingNames.length > 0) && <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button>}
-            <button type="submit" disabled={!prompt.trim()} aria-label="Send message">↑</button>
+            <button type="submit" disabled={!canSendMessage(prompt)} aria-label="Send message">↑</button>
           </div>
         </form>}
         {chatGPT.connected && selectedBot && !selectedGroup && <div className="bandros-composer-footer"><span>Model</span>{modelSelect}</div>}
