@@ -536,11 +536,11 @@ class WorkspaceToolset:
     async def _wake_computer(self) -> None:
         if self.computer is None:
             raise RuntimeError("Komputer belum dikonfigurasi.")
+        if self.on_computer_wake:
+            self.on_computer_wake()
         wake = getattr(self.computer, "wake", None)
         if wake is not None:
             await asyncio.to_thread(wake)
-        if self.on_computer_wake:
-            self.on_computer_wake()
 
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:

@@ -506,25 +506,30 @@ class RunRuntime:
         run = self.repository.create_run(target.id, conversation_id, prompt, target.model or self.default_model)
         self.repository.link_run_to_group(run.id, group_id)
         self._group_depth[run.id] = depth
+        target_messages_before = sum(
+            1
+            for message in self.repository.list_group_messages(group_id)
+            if message.sender_bot_id == target.id
+        )
         try:
             await asyncio.wait_for(self.start_and_wait(run.id), timeout=60)
         except TimeoutError:
             self.stop(run.id)
-            if not any(
-                message.sender_bot_id == target.id
-                for message in self.repository.list_group_messages(group_id)
-            ):
-                self.repository.append_group_message(
-                    group_id,
-                    "bot",
-                    "Balasan terlalu lama. Tahap ini dihentikan; kirim lanjutkan untuk meneruskannya.",
-                    target.id,
-                )
+            if self._target_message_count(group_id, target.id) == target_messages_before:
+                self.repository.append_group_message(group_id, "bot", "Balasan terlalu lama. Tahap ini dihentikan; kirim lanjutkan untuk meneruskannya.", target.id)
         except Exception:
-            return
+            if self._target_message_count(group_id, target.id) == target_messages_before:
+                self.repository.append_group_message(group_id, "bot", "Tahap ini gagal dijalankan. Kirim lanjutkan untuk meneruskannya.", target.id)
         remaining = [name for name in self._anticipated.get(group_id, []) if name != target.name]
         if remaining:
             self._anticipated[group_id] = remaining
+
+    def _target_message_count(self, group_id: UUID, bot_id: UUID) -> int:
+        return sum(
+            1
+            for message in self.repository.list_group_messages(group_id)
+            if message.sender_bot_id == bot_id
+        )
 
     def _lead_already_replied(self, group_id: UUID, bot_id: UUID) -> bool:
         group = self.repository.get_group(group_id)
