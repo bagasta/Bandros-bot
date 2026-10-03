@@ -81,6 +81,49 @@ def test_create_uses_smallest_snapshot() -> None:
     assert body["public"] is False
 
 
+def test_archives_duplicate_account_sandboxes_before_use() -> None:
+    actions: list[str] = []
+    states = {"first": "started", "second": "started"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/sandbox":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": "first", "state": states["first"], "labels": {"app": "bandros", "account": "acct"}},
+                        {"id": "second", "state": states["second"], "labels": {"app": "bandros", "account": "acct"}},
+                    ]
+                },
+            )
+        if path == "/sandbox/second/stop":
+            actions.append("stop second")
+            states["second"] = "stopped"
+            return httpx.Response(200, json={"state": "stopped"})
+        if request.method == "GET" and path == "/sandbox/second":
+            return httpx.Response(200, json={"id": "second", "state": states["second"]})
+        if path == "/sandbox/second/archive":
+            actions.append("archive second")
+            states["second"] = "archived"
+            return httpx.Response(200, json={"state": "archived"})
+        if request.method == "GET" and path == "/sandbox/first":
+            return httpx.Response(
+                200,
+                json={"id": "first", "state": "started", "toolboxProxyUrl": "https://proxy.test"},
+            )
+        if path == "/first/files/folder":
+            actions.append("use first")
+            return httpx.Response(201, text="")
+        if path == "/first/process/execute":
+            return httpx.Response(200, json={"exitCode": 0, "result": ""})
+        return httpx.Response(404, text=path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    assert computer.run("pwd")["output"] == ""
+    assert actions == ["stop second", "archive second", "use first"]
+
+
 def test_preview_origin_is_only_the_desktop_host() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/signed-preview-url"):
