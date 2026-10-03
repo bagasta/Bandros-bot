@@ -28,6 +28,13 @@ from .repository import Repository
 from .workspace_tools import WorkspaceToolset
 
 
+def _user_facing_error(error: Exception) -> str:
+    text = str(error).strip() or "Balasan gagal."
+    if "request_limit" in text:
+        return "Langkahnya kepanjangan. Kirim ulang bagian yang belum selesai."
+    return text
+
+
 @dataclass(slots=True)
 class RunRuntime:
     repository: Repository
@@ -119,24 +126,39 @@ class RunRuntime:
                 if context else run.prompt
             )
             skills = self.repository.list_bot_skills(bot.id)
-            answer = await asyncio.wait_for(
-                self.model_gateway.complete(
-                    system=self._system_prompt(
-                        bot.instructions,
-                        bot.description,
-                        self._environment_context(bot.id),
-                        skills,
-                        in_group=self.repository.group_for_run(run_id) is not None,
-                    ),
-                    prompt=prompt,
-                    model=run.model,
-                    tools=toolset.definitions(),
-                    request_limit=3 if self.repository.group_for_run(run_id) is not None else self.max_model_calls,
-                ),
-                timeout=150,
+            system = self._system_prompt(
+                bot.instructions,
+                bot.description,
+                self._environment_context(bot.id),
+                skills,
+                in_group=self.repository.group_for_run(run_id) is not None,
             )
+            try:
+                answer = await asyncio.wait_for(
+                    self.model_gateway.complete(
+                        system=system,
+                        prompt=prompt,
+                        model=run.model,
+                        tools=toolset.definitions(),
+                        request_limit=self.max_model_calls,
+                    ),
+                    timeout=150,
+                )
+            except Exception as error:
+                if "request_limit" not in str(error):
+                    raise
+                answer = await asyncio.wait_for(
+                    self.model_gateway.complete(
+                        system=system,
+                        prompt=f"{prompt}\n\nBalas sekarang dari yang sudah kamu tahu. Jangan panggil alat lagi.",
+                        model=run.model,
+                        tools=(),
+                        request_limit=2,
+                    ),
+                    timeout=60,
+                )
         except Exception as error:
-            message = "Balasan terlalu lama. Kirim ulang." if isinstance(error, TimeoutError) else (str(error).strip() or "Balasan gagal.")
+            message = "Balasan terlalu lama. Kirim ulang." if isinstance(error, TimeoutError) else _user_facing_error(error)
             self._finish_failed_run(run_id, run.conversation_id, message)
             return
 

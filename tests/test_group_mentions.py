@@ -130,6 +130,31 @@ def test_each_advance_posts_one_speaker(tmp_path: Path) -> None:
     assert asyncio.run(runtime.advance_group(group.id)) is None
 
 
+def test_tool_limit_is_replaced_by_a_chat_reply(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "limit.db")
+    worker = repository.create_bot("IT Aplikasi", "", "TOKEN:worker", None)
+    group = repository.create_group("Divisi IT", "", [worker.id])
+    repository.append_group_message(group.id, "user", "@IT Aplikasi coba uji")
+
+    class LimitGateway:
+        def __init__(self) -> None:
+            self.tool_counts: list[int] = []
+
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+            self.tool_counts.append(len(tools))
+            if tools:
+                raise RuntimeError("The next request would exceed the request_limit of 3")
+            return "PydanticAI cukup untuk tugas Python yang sederhana."
+
+    runtime = RunRuntime(repository, LimitGateway(), "test-model", 8)
+    asyncio.run(runtime.speak_in_group(group.id, "@IT Aplikasi coba uji", None, 0))
+
+    posted = [message.content for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
+    assert posted == ["PydanticAI cukup untuk tugas Python yang sederhana."]
+    assert runtime.model_gateway.tool_counts[0] > 0
+    assert runtime.model_gateway.tool_counts[1] == 0
+
+
 def test_follow_up_without_mention_reaches_the_last_speaker(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "group.db")
     lead = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:lead", None)
