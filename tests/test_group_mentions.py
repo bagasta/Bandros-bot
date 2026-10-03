@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from apps.api.app.database import Database
 from apps.api.app.domain import Bot
-from apps.api.app.mentions import bots_to_stop, is_stop_request, mentioned_bots, without_peer_mentions
+from apps.api.app.mentions import mentioned_bots, without_peer_mentions
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime
 from apps.api.app.workspace_tools import WorkspaceToolset, parse_search_results, public_https_url
@@ -29,15 +29,19 @@ def test_trailing_silence_token_is_removed_from_a_real_answer() -> None:
     assert visible_reply("(diam)") == ""
 
 
-def test_stop_request_is_a_direct_phrase() -> None:
-    assert is_stop_request("Stop now")
-    assert is_stop_request("berhenti")
-    assert not is_stop_request("jangan berhenti dulu")
-    worker = bot("Lamaran Kerja")
-    assert is_stop_request("@Lamaran Kerja berhenti", [worker])
-    assert [item.name for item in bots_to_stop("@Lamaran Kerja berhenti", [worker])] == ["Lamaran Kerja"]
-    assert bots_to_stop("berhenti", [worker]) == []
-    assert bots_to_stop("lanjut kerja", [worker]) is None
+def test_plain_language_stop_and_continue_reach_the_bot(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "natural.db")
+    lead = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:lead", None)
+    group = repository.create_group("Divisi IT", "", [lead.id])
+    runtime = RunRuntime(repository, ScriptedGateway({"TOKEN:lead": "Oke."}), "test-model", 3)
+
+    for text in ("udah cukup, jangan dilanjutin", "lanjut yang barusan"):
+        repository.append_group_message(group.id, "user", text)
+        asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    prompts = runtime.model_gateway.prompts
+    assert "udah cukup, jangan dilanjutin" in prompts[0]
+    assert "lanjut yang barusan" in prompts[1]
 
 
 def test_unfinished_teammate_stays_mentioned() -> None:

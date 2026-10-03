@@ -37,14 +37,11 @@ def visible_reply(text: str) -> str:
 
 
 def same_task(previous: str, nxt: str) -> bool:
-    """A follow-up stays in the same task when it continues the last line or repeats its subject."""
-    lowered = nxt.lower().strip()
-    if any(token in lowered for token in ("lanjut", "juga", "tambah", "sekalian", "yang tadi", "sama saja", "plus")):
-        return True
+    """Join two quick lines when they share the same subject. Wording is left to the bot."""
     def words(value: str) -> set[str]:
         return {word for word in re.findall(r"[a-zA-Z0-9]{4,}", value.lower())}
     shared = words(previous) & words(nxt)
-    return len(shared) >= 2 or (len(lowered) < 48 and bool(shared))
+    return len(shared) >= 2
 
 
 def cluster_topics(messages: list[str]) -> list[list[str]]:
@@ -62,43 +59,6 @@ def burst_prompt(lines: list[str]) -> str:
         return lines[0]
     body = "\n".join(f"{index}. {line}" for index, line in enumerate(lines, 1))
     return "Pesan beruntun dari bos untuk satu tugas yang sama. Jawab sekali dan mencakup semuanya.\n" + body
-
-
-_STOP_PHRASES = {
-    "stop",
-    "stop now",
-    "stop semua",
-    "berhenti",
-    "berhenti sekarang",
-    "berhenti semua",
-    "kalian berhenti",
-    "kalian stop",
-    "semua berhenti",
-    "tolong berhenti",
-    "tolong stop",
-}
-
-
-def is_stop_request(text: str, bots: list[Bot] | None = None) -> bool:
-    """A direct stop ends the turn, including '@Nama berhenti'."""
-    lowered = text.strip().lower()
-    if lowered in _STOP_PHRASES:
-        return True
-    cleaned = lowered
-    for bot in sorted(bots or [], key=lambda item: len(item.name), reverse=True):
-        cleaned = re.sub(rf"@{re.escape(bot.name)}(?!\w)", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"@\S+", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,!")
-    return cleaned in _STOP_PHRASES
-
-
-def bots_to_stop(text: str, bots: list[Bot]) -> list[Bot] | None:
-    """None means this is not a stop. An empty list stops the whole group."""
-    if not is_stop_request(text, bots):
-        return None
-    if addresses_everyone(text):
-        return []
-    return mentioned_bots(text, bots)
 
 
 def addresses_everyone(text: str) -> bool:
@@ -211,11 +171,11 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
         f"Grup {group.name}. Anggota: {roster}.",
         "Ini grup WhatsApp. Bos memberi arahan. Kamu ahli di bidangmu dan membalas seperti manusia: 2-6 kalimat, hasilnya dulu, tanpa judul atau laporan.",
         "Satu tahap, satu pemilik. Orkestrator menyebut tepat satu @Nama yang mengerjakan sekarang, plus data yang ada di pesan bos ini.",
-        "Pesan baru dari bos adalah tugas baru, kecuali ia menulis lanjut, revisi, atau menunjuk hasil yang baru dikirim.",
+        "Pesan baru biasanya tugas baru. Kalau pengguna menyambung pekerjaan yang sama, lanjutkan tahap itu. Kalau ia menyuruh berhenti, dengan kalimat apa pun, berhenti sekarang.",
         "Tugas baru tidak mewarisi usaha, menu, harga, atau asumsi dari job yang sudah selesai. Kalau pesan itu tidak menjelaskan bisnisnya, tanyakan satu kalimat dan jangan menugaskan rekan.",
         "Riwayat di bawah sudah kamu baca, termasuk pesan yang tidak menyebutmu. Jangan mengulang pekerjaan yang selesai.",
         "Kamu dipilih untuk bicara. Kerjakan tahapmu sendiri sampai ada hasil, lalu balas singkat. Jangan menulis (diam).",
-        "Kalau tahapmu belum selesai dan masih butuh alat, panggil continue_own_work. Kamu akan dibangunkan lagi. Pengguna bisa menghentikanmu kapan saja dengan berhenti.",
+        "Kalau tahapmu belum selesai, panggil continue_own_work. Kalau pengguna menyuruh berhenti, jangan panggil alat dan jangan continue_own_work.",
         "Kalau perlu satu rekan mengerjakan langkah berikutnya, sebut tepat satu @Nama beserta datanya.",
         "@everyone: setiap anggota menjawab sekali. Sebut satu @Nama hanya untuk langkah berikutnya.",
     ]

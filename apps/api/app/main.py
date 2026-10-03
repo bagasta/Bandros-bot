@@ -30,7 +30,6 @@ from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
-from .mentions import bots_to_stop, is_stop_request
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
 from .repository import Repository
 from .runtime import RunRuntime
@@ -1253,15 +1252,7 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
         message = repository.append_group_message(group_id, "user", payload.content)
     except KeyError as error:
         raise not_found(error) from error
-    stopped = bots_to_stop(payload.content, group.members)
-    if stopped is not None:
-        if stopped:
-            for bot in stopped:
-                runtime.interrupt_bot(bot.id)
-        else:
-            runtime.interrupt_group(group_id)
-        return message
-    # Save the user line first. Each later /advance call speaks one bot and returns that reply.
+    # The previous turn stops. The bot reads this message and decides whether it is a stop, a continuation, or a new task.
     runtime.interrupt_group(group_id)
     runtime.schedule_group_reply(group_id, payload.content, None, 0)
     return message
@@ -1405,17 +1396,7 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         model=payload.model,
         attachments=payload.attachments,
     )
-    if is_stop_request(payload.content):
-        runtime.interrupt_bot(bot_id)
-        run = repository.create_run(
-            bot_id,
-            conversation_id,
-            payload.content,
-            _model_for_bot(bot, payload.model),
-        )
-        repository.append_message(conversation_id, "assistant", "Dihentikan.")
-        repository.update_run(run.id, RunStatus.CANCELLED)
-        return repository.get_run(run.id)
+    runtime.interrupt_bot(bot_id)
     if pending := runtime.pending_dm_run(bot_id):
         return repository.get_run(runtime.queue_dm(bot_id, pending, payload.content))
     run = repository.create_run(

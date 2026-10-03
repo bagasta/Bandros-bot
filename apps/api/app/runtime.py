@@ -231,6 +231,10 @@ class RunRuntime:
 
     def interrupt_bot(self, bot_id: UUID) -> None:
         """A new direct message takes priority over work already running for that Bot."""
+        key = ("dm", bot_id)
+        self._bursts.pop(key, None)
+        self._burst_runs.pop(key, None)
+        self._burst_gen[key] = self._burst_gen.get(key, 0) + 1
         for run in self.repository.active_runs_for_bot(bot_id):
             self.stop(run.id)
 
@@ -302,7 +306,7 @@ class RunRuntime:
         key = ("dm", bot_id)
         self._bursts.setdefault(key, []).append(text)
         self._burst_gen[key] = self._burst_gen.get(key, 0) + 1
-        self._burst_runs.setdefault(key, run_id)
+        self._burst_runs[key] = run_id
         task = self._burst_tasks.get(key)
         if task is None or task.done():
             self._burst_tasks[key] = asyncio.create_task(self._flush_dm(bot_id))
@@ -341,20 +345,25 @@ class RunRuntime:
     async def _flush_dm(self, bot_id: UUID) -> None:
         key = ("dm", bot_id)
         try:
-            lines = await self._quiet_burst(key)
-            run_id = self._burst_runs.pop(key, None)
-            if not lines or run_id is None:
-                return
-            batches = cluster_topics(lines)
-            self.repository.set_run_prompt(run_id, burst_prompt(batches[0]))
-            await self.start_and_wait(run_id)
-            run = self.repository.get_run(run_id)
-            for batch in batches[1:]:
-                follow = self.repository.create_run(run.bot_id, run.conversation_id, burst_prompt(batch), run.model)
-                await self.start_and_wait(follow.id)
+            while True:
+                lines = await self._quiet_burst(key)
+                run_id = self._burst_runs.pop(key, None)
+                if not lines or run_id is None:
+                    if self._bursts.get(key):
+                        continue
+                    return
+                batches = cluster_topics(lines)
+                self.repository.set_run_prompt(run_id, burst_prompt(batches[0]))
+                await self.start_and_wait(run_id)
+                run = self.repository.get_run(run_id)
+                for batch in batches[1:]:
+                    follow = self.repository.create_run(run.bot_id, run.conversation_id, burst_prompt(batch), run.model)
+                    await self.start_and_wait(follow.id)
+                if not self._bursts.get(key):
+                    return
         finally:
-            self._burst_runs.pop(key, None)
-            self._burst_tasks.pop(key, None)
+            if self._burst_tasks.get(key) is asyncio.current_task() and not self._bursts.get(key):
+                self._burst_tasks.pop(key, None)
 
     def typing_names(self, group_id: UUID) -> list[str]:
         return list(self._anticipated.get(group_id, []))
@@ -590,7 +599,8 @@ class RunRuntime:
                 "Work the stage yourself until there is a result: read memory and skills, use web_search or fetch_url for research, and write_workspace_file for a durable file. "
                 "Do not claim a file, bot, or job exists unless the tool result says ok. "
                 "If this stage still needs another tool pass, call continue_own_work with a short note and reply with one status sentence. You will be woken to finish it. "
-                "Stop as soon as the user says berhenti. "
+                "If the user tells you to stop, in any wording, stop immediately: no tools, no continue_own_work, and no @Name. "
+                "If the user tells you to continue, pick up the same stage instead of starting a new task. "
                 "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
                 "Do not recap that you already delegated. Do not quote the previous speaker or write @ before your own name. "
             )
