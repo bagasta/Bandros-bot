@@ -242,6 +242,21 @@ class GroupMessage(APIModel):
     created_at: datetime
 
 
+class PluginInput(APIModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=8, max_length=500)
+    token: str | None = Field(default=None, max_length=2_000)
+
+
+class Plugin(APIModel):
+    id: UUID
+    name: str
+    url: str
+    description: str
+    tools: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
 class HandoffInput(APIModel):
     target_bot_id: UUID
     task: str = Field(min_length=1, max_length=20_000)

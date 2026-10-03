@@ -33,6 +33,7 @@ The same room works on a phone.
 - Let a bot finish its own stage. It can search, read and write shared files, and come back with the result or with exactly one `@Name` for the next owner.
 - Stop in plain language ("that's enough", "don't continue this") or press Stop. The previous turn is dropped.
 - Ask a bot to continue the same stage ("pick up where you left off") without a special command word.
+- Add an external app from the Plugins panel. Paste its MCP server URL and, when the app requires it, an access token. The tools that server publishes become available to every bot on the account. A tool that changes the external app waits for your approval.
 
 Desktop computer use is intentionally not part of the current agent loop. Durable output goes to the shared workspace.
 

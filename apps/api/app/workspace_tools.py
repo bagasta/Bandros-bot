@@ -94,6 +94,13 @@ class WorkspaceToolset:
                 self.continue_own_work,
                 RiskClass.READ_ONLY,
             ),
+            ToolDefinition(
+                "use_plugin",
+                "Call a tool on a connected external MCP plugin. payload: {plugin, tool, arguments}. "
+                + self._plugin_catalog(),
+                self.use_plugin,
+                RiskClass.READ_ONLY,
+            ),
             ToolDefinition("web_search", "Search the public web before a research answer. payload: {query}", self.web_search, RiskClass.READ_ONLY, timeout_seconds=25),
             ToolDefinition("fetch_url", "Read a public https page. payload: {url}", self.fetch_url, RiskClass.READ_ONLY, timeout_seconds=25),
         ]
@@ -430,6 +437,40 @@ class WorkspaceToolset:
         content = self._text(payload, "content")[:10_000]
         memory = self.repository.add_memory(self.bot_id, kind, content)
         return {"ok": True, "memory_id": str(memory.id), "kind": memory.kind}
+
+    def _plugin_catalog(self) -> str:
+        plugins = self.repository.list_plugins()
+        if not plugins:
+            return "No plugins are connected yet."
+        return "Connected plugins: " + "; ".join(f"{plugin.name} ({', '.join(plugin.tools) or 'no tools'})" for plugin in plugins)
+
+    async def use_plugin(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .mcp_client import McpError, call_tool
+
+        plugin, token = self.repository.get_plugin_by_name(self._text(payload, "plugin"))
+        tool_name = self._text(payload, "tool")
+        arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+        if not tool_name.lower().startswith(("list", "get", "search", "read", "fetch", "find")):
+            approved = self.approved_tools.get("use_plugin", [])
+            already = any(
+                item.get("plugin") == plugin.name and item.get("tool") == tool_name and item.get("arguments") == arguments
+                for item in approved
+            )
+            if not already:
+                approval = self.repository.create_approval(
+                    self.run_id,
+                    "use_plugin",
+                    RiskClass.EXTERNAL_WRITE,
+                    f"{plugin.name}.{tool_name} changes an external app",
+                    {"plugin": plugin.name, "tool": tool_name, "arguments": arguments},
+                )
+                self.repository.update_run(self.run_id, RunStatus.WAITING_APPROVAL)
+                return {"ok": False, "requires_approval": True, "approval_id": str(approval.id)}
+        try:
+            result = await call_tool(plugin.url, token, tool_name, arguments)
+        except McpError as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "result": result}
 
     async def continue_own_work(self, payload: dict[str, Any]) -> dict[str, Any]:
         note = self._text(payload, "note")[:2_000]

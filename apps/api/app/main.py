@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from .database import Database, database_revision, encode_snapshot, hold_snapshot, release_snapshot, stage_snapshot
 from .computer import DaytonaComputer
 from .credential_store import CredentialStore
-from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
+from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
@@ -1098,6 +1098,33 @@ def create_skill(payload: SkillInput) -> Skill:
         return repository.create_skill(payload.name, payload.description, payload.content)
     except Exception as error:
         raise HTTPException(status_code=409, detail="skill name is already in use") from error
+
+
+@app.get("/api/v1/plugins", response_model=list[Plugin])
+def list_plugins() -> list[Plugin]:
+    return repository.list_plugins()
+
+
+@app.post("/api/v1/plugins", response_model=Plugin, status_code=status.HTTP_201_CREATED)
+async def create_plugin(payload: PluginInput) -> Plugin:
+    from .mcp_client import McpError, discover_tools
+
+    try:
+        tools = await discover_tools(payload.url.strip(), payload.token)
+    except McpError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    try:
+        return repository.create_plugin(payload.name.strip(), payload.url.strip(), payload.token, tools)
+    except Exception as error:
+        raise HTTPException(status_code=409, detail="plugin name is already in use") from error
+
+
+@app.delete("/api/v1/plugins/{plugin_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_plugin(plugin_id: UUID) -> None:
+    try:
+        repository.delete_plugin(plugin_id)
+    except KeyError as error:
+        raise not_found(error) from error
 
 
 @app.get("/api/v1/bots/{bot_id}/skills", response_model=list[Skill])

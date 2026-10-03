@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from .database import Database
-from .domain import Approval, ApprovalStatus, Bot, BotStatus, GroupMessage, Handoff, Job, Memory, Message, Run, RunEvent, RunStatus, Skill, WorkGroup
+from .domain import Approval, ApprovalStatus, Bot, BotStatus, GroupMessage, Handoff, Job, Memory, Message, Plugin, Run, RunEvent, RunStatus, Skill, WorkGroup
 from .orchestrator import ORCHESTRATOR_NAME
 
 
@@ -698,6 +698,45 @@ class Repository:
         with self.database.connection() as db:
             member_rows = db.execute("SELECT bots.* FROM bots JOIN group_members ON group_members.bot_id = bots.id WHERE group_members.group_id = ? ORDER BY group_members.rowid", (str(group_id),)).fetchall()
         return WorkGroup(id=group_id, name=row["name"], description=row["description"], members=[self._bot(member) for member in member_rows], created_at=load_time(row["created_at"]))
+
+    def list_plugins(self) -> list[Plugin]:
+        with self.database.connection() as db:
+            rows = db.execute("SELECT * FROM plugins ORDER BY created_at").fetchall()
+        return [self._plugin(row) for row in rows]
+
+    def get_plugin(self, plugin_id: UUID) -> Plugin:
+        with self.database.connection() as db:
+            row = db.execute("SELECT * FROM plugins WHERE id = ?", (str(plugin_id),)).fetchone()
+        if row is None:
+            raise KeyError("plugin not found")
+        return self._plugin(row)
+
+    def get_plugin_by_name(self, name: str) -> tuple[Plugin, str | None]:
+        with self.database.connection() as db:
+            row = db.execute("SELECT * FROM plugins WHERE lower(name) = lower(?)", (name.strip(),)).fetchone()
+        if row is None:
+            raise KeyError("plugin not found")
+        return self._plugin(row), row["token"]
+
+    def create_plugin(self, name: str, url: str, token: str | None, tools: list[dict[str, str]]) -> Plugin:
+        plugin_id, timestamp = uuid4(), now()
+        description = ", ".join(tool["name"] for tool in tools[:8])
+        with self.database.connection() as db:
+            db.execute(
+                "INSERT INTO plugins (id, name, url, description, token, tools_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(plugin_id), name.strip(), url.strip(), description, token or None, json.dumps(tools), dump_time(timestamp)),
+            )
+        return self.get_plugin(plugin_id)
+
+    def delete_plugin(self, plugin_id: UUID) -> None:
+        self.get_plugin(plugin_id)
+        with self.database.connection() as db:
+            db.execute("DELETE FROM plugins WHERE id = ?", (str(plugin_id),))
+
+    def _plugin(self, row: Any) -> Plugin:
+        tools = json.loads(row["tools_json"] or "[]")
+        names = [str(tool.get("name")) for tool in tools if isinstance(tool, dict) and tool.get("name")]
+        return Plugin(id=UUID(row["id"]), name=row["name"], url=row["url"], description=row["description"], tools=names, created_at=load_time(row["created_at"]))
 
     def _handoff(self, row: Any) -> Handoff:
         return Handoff(id=UUID(row["id"]), source_bot_id=UUID(row["source_bot_id"]), target_bot_id=UUID(row["target_bot_id"]), parent_run_id=UUID(row["parent_run_id"]) if row["parent_run_id"] else None, child_run_id=UUID(row["child_run_id"]) if row["child_run_id"] else None, task=row["task"], status=row["status"], result=row["result"], created_at=load_time(row["created_at"]), completed_at=load_time(row["completed_at"]))

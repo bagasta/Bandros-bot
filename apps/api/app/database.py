@@ -135,6 +135,15 @@ CREATE TABLE IF NOT EXISTS group_run_links (
     run_id TEXT PRIMARY KEY REFERENCES runs(id),
     group_id TEXT NOT NULL REFERENCES work_groups(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS plugins (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    token TEXT,
+    tools_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS group_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     group_id TEXT NOT NULL REFERENCES work_groups(id) ON DELETE CASCADE,
@@ -284,6 +293,19 @@ class Database:
         try:
             connection.execute("PRAGMA foreign_keys = ON")
             # A client snapshot from before this table existed must still accept a group turn.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS plugins (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    url TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    token TEXT,
+                    tools_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS group_queue (

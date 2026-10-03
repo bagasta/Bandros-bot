@@ -565,7 +565,9 @@ class RunRuntime:
         group_list = ", ".join(groups) or "tidak ada"
         memories = self.repository.list_memories(bot_id)
         memory_list = "; ".join(f"{memory.kind}: {memory.content}" for memory in memories[:20]) or "belum ada"
-        computer = " Komputer desktop belum dipakai. Hasil tahan lama ditulis ke workspace bersama."
+        plugins = self.repository.list_plugins()
+        plugin_list = ", ".join(f"{plugin.name} [{', '.join(plugin.tools)}]" for plugin in plugins) or "tidak ada"
+        computer = f" Komputer desktop belum dipakai. Hasil tahan lama ditulis ke workspace bersama. Plugin MCP terhubung: {plugin_list}."
         return (
             f"Rekan kerja aktif: {colleagues or 'tidak ada'}. Job Anda: {job_list}. "
             f"Grup Anda: {group_list}. Memori Bot: {memory_list}.{computer}"
@@ -596,7 +598,7 @@ class RunRuntime:
                 "The transcript is context you already read, including lines that did not mention you. "
                 "Mention exactly one @Name only when that teammate owns the next step, and include the data they need. "
                 "If you are the orchestrator and a teammate already posted a result, mention the one teammate who has not finished, or give the user the final result with no @mention. "
-                "Work the stage yourself until there is a result: read memory and skills, use web_search or fetch_url for research, and write_workspace_file for a durable file. "
+                "Work the stage yourself until there is a result: read memory and skills, prefer a connected MCP plugin when it can do the job, otherwise use web_search, fetch_url, or write_workspace_file. "
                 "Do not claim a file, bot, or job exists unless the tool result says ok. "
                 "If this stage still needs another tool pass, call continue_own_work with a short note and reply with one status sentence. You will be woken to finish it. "
                 "If the user tells you to stop, in any wording, stop immediately: no tools, no continue_own_work, and no @Name. "

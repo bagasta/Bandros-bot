@@ -191,6 +191,12 @@
 .bandros-screen-float-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 0 12px; color: var(--ink); background: var(--panel); }
 .bandros-screen-float-bar button { min-height: 28px; padding: 0 8px; color: var(--ink); background: transparent; border: 0; }
 .bandros-screen-float iframe { flex: 1; width: 100%; border: 0; background: #0b0b0b; }
+.bandros-plugins { margin-top: 8px; }
+.bandros-plugin-form { display: grid; gap: 6px; margin-bottom: 10px; }
+.bandros-plugin-form input { width: 100%; min-height: 34px; padding: 0 10px; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 10px; }
+.bandros-plugin { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+.bandros-plugin small { display: block; color: var(--muted); }
+.bandros-plugin button { min-height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--field); color: var(--ink); cursor: pointer; }
 .bandros-computer-toggle { width: 100%; min-height: 36px; margin: 0 0 14px; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
 .bandros-computer-toggle:disabled { opacity: 0.6; }
 .bandros-member { display: flex; align-items: center; gap: 10px; padding: 8px 0; color: var(--ink); background: transparent; border: 0; text-align: left; }

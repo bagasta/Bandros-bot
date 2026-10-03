@@ -269,6 +269,52 @@ async function request<T>(path: string, init?: RequestInit, meta?: RequestMeta):
   return body as T;
 }
 
+type PluginRecord = { id: string; name: string; url: string; description: string; tools: string[] };
+
+function PluginPanel() {
+  const [plugins, setPlugins] = useState<PluginRecord[]>([]);
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    request<PluginRecord[]>("/plugins").then(setPlugins).catch(() => undefined);
+  }, []);
+  const addPlugin = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setNote(null);
+    try {
+      const created = await request<PluginRecord>("/plugins", { method: "POST", body: JSON.stringify({ name: name.trim(), url: url.trim(), token: token.trim() || null }) });
+      setPlugins((current) => [...current, created]);
+      setName("");
+      setUrl("");
+      setToken("");
+    } catch (cause) {
+      setNote(cause instanceof Error ? cause.message : "Plugin tidak dapat dihubungkan.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const removePlugin = async (id: string) => {
+    await request<void>(`/plugins/${id}`, { method: "DELETE" });
+    setPlugins((current) => current.filter((plugin) => plugin.id !== id));
+  };
+  return <div className="bandros-plugins">
+    <div className="bandros-computer-head"><strong>Plugins</strong></div>
+    <p>Connect an external app with its MCP server URL. Every bot in this account can use it.</p>
+    <form className="bandros-plugin-form" onSubmit={(event) => void addPlugin(event)}>
+      <input aria-label="Plugin name" placeholder="Name" value={name} onChange={(event) => setName(event.target.value)} required />
+      <input aria-label="MCP server URL" placeholder="https://mcp.example.com" value={url} onChange={(event) => setUrl(event.target.value)} required />
+      <input aria-label="Plugin token" placeholder="Access token, if the app requires one" type="password" value={token} onChange={(event) => setToken(event.target.value)} />
+      <button className="bandros-computer-toggle" type="submit" disabled={busy}>{busy ? "Connecting…" : "Add plugin"}</button>
+    </form>
+    {note && <p role="alert">{note}</p>}
+    {plugins.map((plugin) => <div className="bandros-plugin" key={plugin.id}><span><strong>{plugin.name}</strong><small>{plugin.tools.join(", ") || plugin.url}</small></span><button type="button" onClick={() => void removePlugin(plugin.id)}>Remove</button></div>)}
+  </div>;
+}
+
 export default function GrokDashboard() {
   const [bots, setBots] = useState<Bot[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -978,6 +1024,7 @@ export default function GrokDashboard() {
           <div className="bandros-computer-head"><strong>Routines</strong></div>
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </>}
+        {chatGPT.connected && <PluginPanel />}
       </aside>
       {settingsOpen && selectedBot && <aside className="bandros-settings" aria-label="Bot settings">
         <div className="bandros-settings-header"><div><span className="bandros-settings-eyebrow">Bot settings</span><h2>{selectedBot.name}</h2></div><button aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button></div>
