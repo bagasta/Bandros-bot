@@ -130,6 +130,22 @@ def test_each_advance_posts_one_speaker(tmp_path: Path) -> None:
     assert asyncio.run(runtime.advance_group(group.id)) is None
 
 
+def test_a_bot_who_already_answered_is_not_left_typing(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "typing.db")
+    worker = repository.create_bot("IT Aplikasi", "", "TOKEN:worker", None)
+    group = repository.create_group("Divisi IT", "", [worker.id])
+    text = "@IT Aplikasi cek infrastruktur"
+    repository.append_group_message(group.id, "user", text)
+    repository.append_group_message(group.id, "bot", "Infrastrukturnya sudah mendukung function calling.", worker.id)
+    runtime = RunRuntime(repository, ScriptedGateway({"TOKEN:worker": "tidak boleh terpanggil"}), "test-model", 3)
+    runtime.schedule_group_reply(group.id, text, None, 0)
+
+    assert asyncio.run(runtime.advance_group(group.id)) is None
+    assert repository.group_queue_size(group.id) == 0
+    posted = [message.content for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
+    assert posted == ["Infrastrukturnya sudah mendukung function calling."]
+
+
 def test_tool_limit_is_replaced_by_a_chat_reply(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "limit.db")
     worker = repository.create_bot("IT Aplikasi", "", "TOKEN:worker", None)

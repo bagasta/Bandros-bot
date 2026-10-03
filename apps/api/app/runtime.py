@@ -389,6 +389,13 @@ class RunRuntime:
             self._anticipated[group_id] = names
         return names
 
+    def _speaker_already_answered(self, group_id: UUID, bot_id: UUID, content: str) -> bool:
+        messages = self.repository.list_group_messages(group_id)
+        wake_at = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].content == content), None)
+        if wake_at is None:
+            return False
+        return any(message.sender_bot_id == bot_id for message in messages[wake_at + 1 :])
+
     async def advance_group(self, group_id: UUID) -> str | None:
         """One selected bot replies, then the turn is saved before the next bot speaks."""
         item = self.repository.peek_group_speaker(group_id)
@@ -396,6 +403,9 @@ class RunRuntime:
             self._anticipated.pop(group_id, None)
             return None
         turn_id, bot_id, content, _sender_bot_id, depth = item
+        if self._speaker_already_answered(group_id, bot_id, content):
+            self.repository.drop_group_speaker(turn_id)
+            return await self.advance_group(group_id)
         target = self.repository.get_bot(bot_id)
         self._anticipated[group_id] = [target.name]
         self._step_only = True

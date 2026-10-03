@@ -326,6 +326,7 @@ export default function GrokDashboard() {
   const shownRunError = useRef<string | null>(null);
   const selectedGroupId = useRef<string | null>(null);
   const groupPending = useRef(false);
+  const advancing = useRef(false);
   workingRef.current = working;
   selectedGroupId.current = selectedGroup?.id ?? null;
 
@@ -506,11 +507,35 @@ export default function GrokDashboard() {
     groupPending.current = true;
     let active = true;
     const groupId = selectedGroup.id;
+    const applyMessages = (nextMessages: GroupMessage[]) => {
+      setGroupMessages((current) => {
+        const nextIds = new Set(nextMessages.map((message) => message.id));
+        const sameRoom = current.length === 0 || current.some((item) => nextIds.has(item.id));
+        if (!sameRoom) return nextMessages;
+        if (hasOlderMessages(current, nextMessages)) return current;
+        const pending = current.filter((item) => item.id.startsWith("local-") && !nextMessages.some((message) => message.sender_type === item.sender_type && message.content === item.content));
+        return [...nextMessages, ...pending];
+      });
+    };
     const tick = async () => {
+      if (advancing.current || workingRef.current) return;
       try {
-        if (!workingRef.current && groupPending.current) {
-          const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
-          groupPending.current = turn.pending > 0;
+        if (groupPending.current) {
+          advancing.current = true;
+          try {
+            const activity = await request<GroupActivity[]>(`/groups/${groupId}/activity`);
+            if (active) setTypingNames(activity.map((item) => item.name));
+            const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
+            groupPending.current = turn.pending > 0;
+            const messageMeta: RequestMeta = { fresh: true };
+            const nextMessages = await request<GroupMessage[]>(`/groups/${groupId}/messages`, undefined, messageMeta);
+            if (!active || !messageMeta.fresh) return;
+            applyMessages(nextMessages);
+            if (!turn.pending) setTypingNames([]);
+          } finally {
+            advancing.current = false;
+          }
+          return;
         }
         const messageMeta: RequestMeta = { fresh: true };
         const [nextMessages, activity] = await Promise.all([
@@ -518,15 +543,13 @@ export default function GrokDashboard() {
           request<GroupActivity[]>(`/groups/${groupId}/activity`),
         ]);
         if (!active || !messageMeta.fresh) return;
-        setGroupMessages((current) => {
-          const nextIds = new Set(nextMessages.map((message) => message.id));
-          const sameRoom = current.length === 0 || current.some((item) => nextIds.has(item.id));
-          if (!sameRoom) return nextMessages;
-          if (hasOlderMessages(current, nextMessages)) return current;
-          const pending = current.filter((item) => item.id.startsWith("local-") && !nextMessages.some((message) => message.sender_type === item.sender_type && message.content === item.content));
-          return [...nextMessages, ...pending];
-        });
-        setTypingNames(activity.map((item) => item.name));
+        applyMessages(nextMessages);
+        if (activity.length > 0) {
+          groupPending.current = true;
+          setTypingNames(activity.map((item) => item.name));
+        } else {
+          setTypingNames([]);
+        }
       } catch {
         /* Poll lagi pada interval berikutnya. */
       }
@@ -534,7 +557,7 @@ export default function GrokDashboard() {
     void tick();
     const timer = window.setInterval(() => void tick(), 1200);
     return () => { active = false; window.clearInterval(timer); };
-  }, [selectedGroup, chatGPT.connected]);
+  }, [selectedGroup?.id, chatGPT.connected]);
 
   useEffect(() => {
     stickToBottom.current = true;
@@ -568,7 +591,7 @@ export default function GrokDashboard() {
     if ((!selectedBot && !selectedGroup) || !prompt.trim() || working) return;
     const content = prompt.trim();
     stickToBottom.current = true;
-    setPrompt(""); setWorking(true); workingRef.current = true; setError(null);
+    setPrompt(""); setWorking(true); workingRef.current = true; advancing.current = true; setError(null);
     try {
       if (selectedGroup) {
         const groupId = selectedGroup.id;
@@ -583,6 +606,8 @@ export default function GrokDashboard() {
         setGroups(nextGroups);
         for (let step = 0; step < 8; step += 1) {
           if (selectedGroupId.current !== groupId) return;
+          const activity = await request<GroupActivity[]>(`/groups/${groupId}/activity`);
+          if (selectedGroupId.current === groupId) setTypingNames(activity.map((item) => item.name));
           const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
           const spoken = await request<GroupMessage[]>(`/groups/${groupId}/messages`);
           if (selectedGroupId.current !== groupId) return;
@@ -650,7 +675,7 @@ export default function GrokDashboard() {
       void loadBots();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Pesan tidak dapat dikirim.");
-    } finally { workingRef.current = false; setWorking(false); setActiveRunId(null); }
+    } finally { advancing.current = false; workingRef.current = false; setWorking(false); setActiveRunId(null); }
   };
 
   const stopRun = async () => {
