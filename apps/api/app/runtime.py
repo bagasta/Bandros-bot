@@ -302,13 +302,6 @@ class RunRuntime:
             if not progressed:
                 return
 
-    def pending_dm_run(self, bot_id: UUID) -> UUID | None:
-        key = ("dm", bot_id)
-        task = self._burst_tasks.get(key)
-        if task and not task.done():
-            return self._burst_runs.get(key)
-        return None
-
     def queue_dm(self, bot_id: UUID, run_id: UUID, text: str) -> UUID:
         key = ("dm", bot_id)
         self._bursts.setdefault(key, []).append(text)
@@ -361,7 +354,12 @@ class RunRuntime:
                     return
                 batches = cluster_topics(lines)
                 self.repository.set_run_prompt(run_id, burst_prompt(batches[0]))
-                await self.start_and_wait(run_id)
+                try:
+                    await self.start_and_wait(run_id)
+                except asyncio.CancelledError:
+                    # A newer direct message interrupts this run. Keep the
+                    # burst task alive so its fresh run can execute below.
+                    pass
                 run = self.repository.get_run(run_id)
                 for batch in batches[1:]:
                     follow = self.repository.create_run(run.bot_id, run.conversation_id, burst_prompt(batch), run.model)
