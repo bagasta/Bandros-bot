@@ -31,7 +31,7 @@ from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
-from .mentions import is_resume_request
+from .mentions import is_resume_request, prompt_for_direct_message
 from .repository import Repository
 from .runtime import RunRuntime
 from .settings import Settings, running_on_vercel
@@ -1458,24 +1458,23 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         attachments=payload.attachments,
     )
     runtime.interrupt_bot(bot_id)
+    interrupted = repository.latest_interrupted_run(bot_id) if is_resume_request(payload.content) else None
+    prompt = prompt_for_direct_message(payload.content, interrupted.continuation if interrupted else None)
     run = repository.create_run(
         bot_id,
         conversation_id,
-        (
-            f"Lanjutkan tahap yang sama dari pekerjaan yang terhenti. "
-            f"Catatan tahap sebelumnya: {interrupted.continuation}\n\n"
-            f"Pesan pengguna: {payload.content}"
-            if is_resume_request(payload.content)
-            and (interrupted := repository.latest_interrupted_run(bot_id)) is not None
-            else payload.content
-        ),
+        prompt,
         _model_for_bot(bot, payload.model),
     )
-    run_id = runtime.queue_dm(bot_id, run.id, payload.content)
+    run_id = runtime.queue_dm(bot_id, run.id, prompt)
     if settings.await_runs:
         task = runtime._burst_tasks.get(("dm", bot_id))
         if task is not None:
-            await task
+            try:
+                await task
+            except asyncio.CancelledError:
+                runtime.stop(run_id)
+                raise
     return repository.get_run(run_id)
 
 

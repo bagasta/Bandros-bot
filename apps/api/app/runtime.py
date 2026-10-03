@@ -253,14 +253,15 @@ class RunRuntime:
             self.stop(run.id)
 
     def stop(self, run_id: UUID) -> None:
-        task = self._tasks.get(run_id)
-        if task and not task.done():
-            task.cancel()
         run = self.repository.request_stop(run_id)
         if not run.continuation:
             self.repository.set_run_continuation(run_id, run.prompt)
+            run = self.repository.get_run(run_id)
         if run.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL}:
             self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
+        task = self._tasks.get(run_id)
+        if task and not task.done():
+            task.cancel()
 
     def resume_after_approval(self, approval_id: UUID) -> None:
         approval = self.repository.get_approval(approval_id)
@@ -354,7 +355,17 @@ class RunRuntime:
                         continue
                     return
                 batches = cluster_topics(lines)
-                self.repository.set_run_prompt(run_id, burst_prompt(batches[0]))
+                existing = self.repository.get_run(run_id)
+                merged = burst_prompt(batches[0])
+                # queue_dm may carry only the raw "lanjut". Keep the stage note already stored on the run.
+                if (
+                    existing.prompt
+                    and existing.prompt != merged
+                    and "Catatan tahap sebelumnya" in existing.prompt
+                    and is_resume_request(merged)
+                ):
+                    merged = existing.prompt
+                self.repository.set_run_prompt(run_id, merged)
                 try:
                     await self.start_and_wait(run_id)
                 except asyncio.CancelledError:
