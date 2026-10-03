@@ -188,7 +188,7 @@ def _seed_workspace(repo: Repository) -> None:
         if existing.status is not BotStatus.ACTIVE:
             repo.set_bot_status(existing.id, BotStatus.ACTIVE)
             existing = repo.get_bot(existing.id)
-        if "tugas baru tidak mewarisi" not in existing.instructions.lower():
+        if "jangan menulis (diam)" not in existing.instructions.lower():
             repo.update_bot(existing.id, {"description": ORCHESTRATOR_DESCRIPTION, "instructions": ORCHESTRATOR_INSTRUCTIONS})
     repo.drop_copied_group_context()
 
@@ -1180,6 +1180,12 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
         seen.add(bot.name)
         activity.append(GroupActivity(bot_id=bot.id, name=bot.name, status=str(run.status)))
     group = repository.get_group(group_id)
+    for bot_id in repository.queued_bot_ids(group_id):
+        member = next((item for item in group.members if item.id == bot_id), None)
+        if member is None or member.name in seen:
+            continue
+        seen.add(member.name)
+        activity.append(GroupActivity(bot_id=member.id, name=member.name, status="running"))
     for name in runtime.typing_names(group_id):
         if name in seen:
             continue
@@ -1235,6 +1241,11 @@ def list_group_messages(group_id: UUID) -> list[GroupMessage]:
         raise not_found(error) from error
 
 
+class GroupStep(BaseModel):
+    speaker: str | None = None
+    pending: int = 0
+
+
 @app.post("/api/v1/groups/{group_id}/messages", response_model=GroupMessage, status_code=status.HTTP_201_CREATED)
 async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> GroupMessage:
     try:
@@ -1250,21 +1261,20 @@ async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> Grou
         else:
             runtime.interrupt_group(group_id)
         return message
-    database_path = _account_database_path(_active_account_id())
-    hold_snapshot(database_path)
-
-    async def speak() -> None:
-        try:
-            await runtime.speak_in_group(group_id, payload.content, None, 0)
-        finally:
-            release_snapshot(database_path)
-
-    if running_on_vercel():
-        # A background task on this runtime was ending before any bot called the model.
-        await speak()
-    else:
-        asyncio.create_task(speak())
+    # Save the user line first. Each later /advance call speaks one bot and returns that reply.
+    runtime.interrupt_group(group_id)
+    runtime.schedule_group_reply(group_id, payload.content, None, 0)
     return message
+
+
+@app.post("/api/v1/groups/{group_id}/advance", response_model=GroupStep)
+async def advance_group_message(group_id: UUID) -> GroupStep:
+    try:
+        repository.get_group(group_id)
+    except KeyError as error:
+        raise not_found(error) from error
+    speaker = await runtime.advance_group(group_id)
+    return GroupStep(speaker=speaker, pending=repository.group_queue_size(group_id))
 
 
 @app.post("/api/v1/groups/{group_id}/cancel", response_model=list[Run])

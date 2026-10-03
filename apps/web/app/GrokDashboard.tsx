@@ -239,9 +239,9 @@ async function request<T>(path: string, init?: RequestInit, meta?: RequestMeta):
   const body = await response.json().catch(() => null) as { data?: T; snapshot?: string; revision?: number; detail?: unknown } | null;
   if (body && typeof body === "object" && "data" in body && "revision" in body) {
     const revision = Number(body.revision || 0);
-    const previous = Number(window.localStorage.getItem(revisionKey(session)) || "0");
     storeSnapshot(session, body.snapshot ?? null, revision);
-    if (meta) meta.fresh = revision >= previous;
+    const currentRevision = Number(window.localStorage.getItem(revisionKey(session)) || "0");
+    if (meta) meta.fresh = revision >= currentRevision;
     if (!response.ok) {
       const detail = body.data && typeof body.data === "object" && "detail" in body.data ? (body.data as { detail?: unknown }).detail : body.detail;
       throw new Error(typeof detail === "string" ? detail : `Request gagal (${response.status}).`);
@@ -325,6 +325,7 @@ export default function GrokDashboard() {
   const workingRef = useRef(false);
   const shownRunError = useRef<string | null>(null);
   const selectedGroupId = useRef<string | null>(null);
+  const groupPending = useRef(false);
   workingRef.current = working;
   selectedGroupId.current = selectedGroup?.id ?? null;
 
@@ -499,12 +500,18 @@ export default function GrokDashboard() {
     if (!selectedGroup || !chatGPT.connected) {
       if (!selectedGroup) setGroupMessages([]);
       setTypingNames([]);
+      groupPending.current = false;
       return;
     }
+    groupPending.current = true;
     let active = true;
     const groupId = selectedGroup.id;
     const tick = async () => {
       try {
+        if (!workingRef.current && groupPending.current) {
+          const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
+          groupPending.current = turn.pending > 0;
+        }
         const messageMeta: RequestMeta = { fresh: true };
         const [nextMessages, activity] = await Promise.all([
           request<GroupMessage[]>(`/groups/${groupId}/messages`, undefined, messageMeta),
@@ -561,7 +568,7 @@ export default function GrokDashboard() {
     if ((!selectedBot && !selectedGroup) || !prompt.trim() || working) return;
     const content = prompt.trim();
     stickToBottom.current = true;
-    setPrompt(""); setWorking(true); setError(null);
+    setPrompt(""); setWorking(true); workingRef.current = true; setError(null);
     try {
       if (selectedGroup) {
         const groupId = selectedGroup.id;
@@ -574,6 +581,19 @@ export default function GrokDashboard() {
         if (selectedGroup?.id !== groupId) return;
         setGroupMessages(nextMessages);
         setGroups(nextGroups);
+        for (let step = 0; step < 8; step += 1) {
+          if (selectedGroupId.current !== groupId) return;
+          const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
+          const spoken = await request<GroupMessage[]>(`/groups/${groupId}/messages`);
+          if (selectedGroupId.current !== groupId) return;
+          setGroupMessages(spoken);
+          if (!turn.pending) {
+            groupPending.current = false;
+            break;
+          }
+          groupPending.current = true;
+        }
+        setTypingNames([]);
         const refreshed = nextGroups.find((group) => group.id === groupId);
         if (refreshed) setSelectedGroup(refreshed);
         return;
@@ -630,7 +650,7 @@ export default function GrokDashboard() {
       void loadBots();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Pesan tidak dapat dikirim.");
-    } finally { setWorking(false); setActiveRunId(null); }
+    } finally { workingRef.current = false; setWorking(false); setActiveRunId(null); }
   };
 
   const stopRun = async () => {

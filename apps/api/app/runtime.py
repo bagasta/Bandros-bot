@@ -40,6 +40,7 @@ class RunRuntime:
     _approved_tools: dict[UUID, dict[str, list[dict[str, object]]]] = field(default_factory=dict, init=False)
     _group_depth: dict[UUID, int] = field(default_factory=dict, init=False)
     _pending_wakes: list[tuple[UUID, str, UUID, int]] = field(default_factory=list, init=False)
+    _step_only: bool = field(default=False, init=False)
     _wake_budget: int = field(default=12, init=False)
     _anticipated: dict[UUID, list[str]] = field(default_factory=dict, init=False)
     _bursts: dict[tuple[str, UUID], list[str]] = field(default_factory=dict, init=False)
@@ -130,7 +131,7 @@ class RunRuntime:
                     prompt=prompt,
                     model=run.model,
                     tools=toolset.definitions(),
-                    request_limit=self.max_model_calls,
+                    request_limit=3 if self.repository.group_for_run(run_id) is not None else self.max_model_calls,
                 ),
                 timeout=150,
             )
@@ -209,6 +210,8 @@ class RunRuntime:
     def interrupt_group(self, group_id: UUID) -> None:
         """A new group message redirects the team and drops wakes from the previous turn."""
         self._pending_wakes = [wake for wake in self._pending_wakes if wake[0] != group_id]
+        self._anticipated.pop(group_id, None)
+        self.repository.clear_group_queue(group_id)
         for run in self.repository.runs_for_group(group_id):
             self.stop(run.id)
 
@@ -242,16 +245,24 @@ class RunRuntime:
             self.repository.append_message(source_conversation, "bot", f"Hasil dari {target_name} ({status}):\n{result}")
 
     def queue_group_wake(self, group_id: UUID, content: str, sender_bot_id: UUID, depth: int = 1) -> None:
-        if depth > 5 or self._wake_budget <= 0 or is_silence(content):
+        if depth > 5 or is_silence(content):
             return
-        wake = (group_id, content, sender_bot_id, depth)
-        if wake not in self._pending_wakes:
-            self._pending_wakes.append(wake)
+        self.schedule_group_reply(group_id, content, sender_bot_id, depth)
 
     async def drain_group_wakes(self) -> None:
-        while self._pending_wakes and self._wake_budget > 0:
-            group_id, content, sender_bot_id, depth = self._pending_wakes.pop(0)
-            await self.speak_in_group(group_id, content, sender_bot_id, depth)
+        """Speak bots queued by a tool or a reply. One HTTP step does not drain the rest."""
+        if self._step_only:
+            return
+        for _ in range(12):
+            pending = self.repository.pending_group_ids()
+            if not pending:
+                return
+            progressed = False
+            for group_id in pending:
+                if await self.advance_group(group_id):
+                    progressed = True
+            if not progressed:
+                return
 
     def pending_dm_run(self, bot_id: UUID) -> UUID | None:
         key = ("dm", bot_id)
@@ -321,11 +332,10 @@ class RunRuntime:
     def typing_names(self, group_id: UUID) -> list[str]:
         return list(self._anticipated.get(group_id, []))
 
-    async def speak_in_group(self, group_id: UUID, content: str, sender_bot_id: UUID | None, depth: int) -> None:
-        if depth == 0 and sender_bot_id is None:
-            self._wake_budget = 12
-        if depth > 5 or self._wake_budget <= 0:
-            return
+    def schedule_group_reply(self, group_id: UUID, content: str, sender_bot_id: UUID | None, depth: int) -> list[str]:
+        """Remember who should speak next. The model call happens in advance_group."""
+        if depth > 5:
+            return []
         group = self.repository.get_group(group_id)
         members = [member for member in group.members if member.status is BotStatus.ACTIVE]
         if addresses_everyone(content):
@@ -349,11 +359,42 @@ class RunRuntime:
                 if speaker is not None:
                     targets.append(speaker)
                 break
-        self._anticipated[group_id] = [member.name for member in targets]
-        try:
-            await self._speak_to_targets(group_id, content, targets, depth)
-        finally:
+        names: list[str] = []
+        for target in targets:
+            if self.repository.enqueue_group_speaker(group_id, target.id, content, sender_bot_id, depth):
+                names.append(target.name)
+        if names:
+            self._anticipated[group_id] = names
+        return names
+
+    async def advance_group(self, group_id: UUID) -> str | None:
+        """One selected bot replies, then the turn is saved before the next bot speaks."""
+        item = self.repository.peek_group_speaker(group_id)
+        if item is None:
             self._anticipated.pop(group_id, None)
+            return None
+        turn_id, bot_id, content, _sender_bot_id, depth = item
+        target = self.repository.get_bot(bot_id)
+        self._anticipated[group_id] = [target.name]
+        self._step_only = True
+        try:
+            await self._speak_one(group_id, content, target, depth)
+        finally:
+            self._step_only = False
+            self.repository.drop_group_speaker(turn_id)
+            remaining = [self.repository.get_bot(bot).name for bot in self.repository.queued_bot_ids(group_id)]
+            if remaining:
+                self._anticipated[group_id] = remaining
+            else:
+                self._anticipated.pop(group_id, None)
+        return target.name
+
+    async def speak_in_group(self, group_id: UUID, content: str, sender_bot_id: UUID | None, depth: int) -> None:
+        if depth == 0 and sender_bot_id is None:
+            self._wake_budget = 12
+        self.schedule_group_reply(group_id, content, sender_bot_id, depth)
+        while await self.advance_group(group_id):
+            pass
 
     async def _speak_to_targets(self, group_id: UUID, content: str, targets: list, depth: int) -> None:
         allowed = []
@@ -488,18 +529,14 @@ class RunRuntime:
         if in_group:
             mode = (
                 "This run is the group conversation. These rules win if they conflict with the Bot instructions. "
-                "You are an expert human in a WhatsApp group. The boss gives the direction. "
-                "Reply in a short chat message: the result first, then exactly one @Name if someone else owns the next step. "
+                "You were selected to speak. You are an expert teammate in a WhatsApp group, in the style of a Grok Bot. "
+                "Reply now in the user's language: 1-4 short sentences, the result first. "
+                "Never write (diam), diam, or no_reply. "
                 "No headings, no status essay, and no recap of these rules. "
-                "One stage has one owner. Mention exactly one @Name and include the data they need. "
-                "A check-in or @everyone is the exception: every named member answers once. "
                 "The transcript is context you already read, including lines that did not mention you. "
-                "If this message mentions you, it is yours: answer now in a short chat message. "
-                "If it does not mention you and you are not the orchestrator answering an unaddressed message, reply (diam). "
-                "Call web_search or fetch_url before a research answer, and write_workspace_file when a file should exist. "
-                "When your stage is done, mention the one teammate who owns the next step. "
+                "Mention exactly one @Name only when that teammate owns the next step, and include the data they need. "
                 "If you are the orchestrator and a teammate already posted a result, mention the one teammate who has not finished, or give the user the final result with no @mention. "
-                "Do not answer a short ready/status ping. Do not reply (diam) when you were mentioned. "
+                "Call web_search or fetch_url before a research answer, and write_workspace_file when a file should exist. "
                 "The final reply is the group message, so do not call post_to_group or handoff_to_bot for that task. "
                 "Do not recap that you already delegated. Do not quote the previous speaker or write @ before your own name. "
             )

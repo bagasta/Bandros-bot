@@ -106,6 +106,30 @@ def test_unmentioned_message_wakes_the_lead_then_the_mention(tmp_path: Path) -> 
     assert all("Anggota:" not in message.content for message in private)
 
 
+def test_each_advance_posts_one_speaker(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "step.db")
+    lead = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:lead", None)
+    worker = repository.create_bot("IT Aplikasi", "", "TOKEN:worker", None)
+    group = repository.create_group("Divisi IT", "", [lead.id, worker.id])
+    repository.append_group_message(group.id, "user", "Mana udh jadi blm?")
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({"TOKEN:lead": "@IT Aplikasi cek filenya.", "TOKEN:worker": "File tokyo8 sudah ada."}),
+        "test-model",
+        3,
+    )
+
+    runtime.schedule_group_reply(group.id, "Mana udh jadi blm?", None, 0)
+    assert [repository.get_bot(bot_id).name for bot_id in repository.queued_bot_ids(group.id)] == ["Bandros"]
+    assert asyncio.run(runtime.advance_group(group.id)) == "Bandros"
+    posted = [message for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
+    assert [message.sender_bot_id for message in posted] == [lead.id]
+    assert asyncio.run(runtime.advance_group(group.id)) == "IT Aplikasi"
+    posted = [message for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
+    assert [message.sender_bot_id for message in posted] == [lead.id, worker.id]
+    assert asyncio.run(runtime.advance_group(group.id)) is None
+
+
 def test_follow_up_without_mention_reaches_the_last_speaker(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "group.db")
     lead = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:lead", None)

@@ -542,6 +542,73 @@ class Repository:
         with self.database.connection() as db:
             db.execute("DELETE FROM messages WHERE role = 'group' AND content LIKE '[Grup %'")
 
+    def enqueue_group_speaker(
+        self,
+        group_id: UUID,
+        bot_id: UUID,
+        content: str,
+        sender_bot_id: UUID | None,
+        depth: int,
+    ) -> bool:
+        """Queue one bot to speak. The same bot is not queued twice for this group."""
+        with self.database.connection() as db:
+            existing = db.execute(
+                "SELECT 1 FROM group_queue WHERE group_id = ? AND bot_id = ?",
+                (str(group_id), str(bot_id)),
+            ).fetchone()
+            if existing is not None:
+                return False
+            count = db.execute("SELECT COUNT(*) AS n FROM group_queue WHERE group_id = ?", (str(group_id),)).fetchone()
+            if count is not None and int(count["n"]) >= 12:
+                return False
+            db.execute(
+                "INSERT INTO group_queue (group_id, bot_id, content, sender_bot_id, depth, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(group_id), str(bot_id), content, str(sender_bot_id) if sender_bot_id else None, depth, dump_time(now())),
+            )
+        return True
+
+    def peek_group_speaker(self, group_id: UUID) -> tuple[int, UUID, str, UUID | None, int] | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                "SELECT * FROM group_queue WHERE group_id = ? ORDER BY id LIMIT 1",
+                (str(group_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return (
+            int(row["id"]),
+            UUID(row["bot_id"]),
+            row["content"],
+            UUID(row["sender_bot_id"]) if row["sender_bot_id"] else None,
+            int(row["depth"]),
+        )
+
+    def drop_group_speaker(self, turn_id: int) -> None:
+        with self.database.connection() as db:
+            db.execute("DELETE FROM group_queue WHERE id = ?", (turn_id,))
+
+    def clear_group_queue(self, group_id: UUID) -> None:
+        with self.database.connection() as db:
+            db.execute("DELETE FROM group_queue WHERE group_id = ?", (str(group_id),))
+
+    def group_queue_size(self, group_id: UUID) -> int:
+        with self.database.connection() as db:
+            row = db.execute("SELECT COUNT(*) AS n FROM group_queue WHERE group_id = ?", (str(group_id),)).fetchone()
+        return int(row["n"]) if row else 0
+
+    def queued_bot_ids(self, group_id: UUID) -> list[UUID]:
+        with self.database.connection() as db:
+            rows = db.execute(
+                "SELECT bot_id FROM group_queue WHERE group_id = ? ORDER BY id",
+                (str(group_id),),
+            ).fetchall()
+        return [UUID(row["bot_id"]) for row in rows]
+
+    def pending_group_ids(self) -> list[UUID]:
+        with self.database.connection() as db:
+            rows = db.execute("SELECT DISTINCT group_id FROM group_queue ORDER BY id").fetchall()
+        return [UUID(row["group_id"]) for row in rows]
+
     def list_group_messages(self, group_id: UUID) -> list[GroupMessage]:
         self.get_group(group_id)
         with self.database.connection() as db:

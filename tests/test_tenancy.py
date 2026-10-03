@@ -173,10 +173,11 @@ def test_group_message_is_accepted_before_bots_reply(tmp_path: Path, monkeypatch
 
     called: list[str] = []
 
-    async def record_reply(self, group_id, content, sender_bot_id, depth) -> None:
-        called.append(content)
+    async def record_reply(self, group_id) -> str:
+        called.append("advance")
+        return "Bandros"
 
-    monkeypatch.setattr(main.RunRuntime, "speak_in_group", record_reply)
+    monkeypatch.setattr(main.RunRuntime, "advance_group", record_reply)
     monkeypatch.setattr(
         main,
         "settings",
@@ -199,11 +200,15 @@ def test_group_message_is_accepted_before_bots_reply(tmp_path: Path, monkeypatch
         sent = client.post(f"/api/v1/groups/{created.json()['id']}/messages", headers=headers, json={"content": "halo tim"})
         elapsed = time.perf_counter() - started
         messages = client.get(f"/api/v1/groups/{created.json()['id']}/messages", headers=headers)
+        assert called == []
+        stepped = client.post(f"/api/v1/groups/{created.json()['id']}/advance", headers=headers)
 
     assert created.status_code == 201
     assert sent.status_code == 201
     assert sent.json()["content"] == "halo tim"
-    assert called == ["halo tim"]
+    assert called == ["advance"]
+    assert stepped.status_code == 200
+    assert stepped.json()["speaker"] == "Bandros"
     assert elapsed < 1.5
     assert any(message["content"] == "halo tim" for message in messages.json())
     main._workspaces.clear()

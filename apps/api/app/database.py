@@ -135,6 +135,15 @@ CREATE TABLE IF NOT EXISTS group_run_links (
     run_id TEXT PRIMARY KEY REFERENCES runs(id),
     group_id TEXT NOT NULL REFERENCES work_groups(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS group_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL REFERENCES work_groups(id) ON DELETE CASCADE,
+    bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    sender_bot_id TEXT,
+    depth INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS handoffs (
     id TEXT PRIMARY KEY,
     source_bot_id TEXT NOT NULL REFERENCES bots(id),
@@ -274,6 +283,20 @@ class Database:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA foreign_keys = ON")
+            # A client snapshot from before this table existed must still accept a group turn.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS group_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT NOT NULL,
+                    bot_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    sender_bot_id TEXT,
+                    depth INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             changes = connection.total_changes
             yield connection
             if connection.total_changes != changes:
