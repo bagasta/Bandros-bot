@@ -213,9 +213,14 @@ class Database:
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        migrated = False
         with self.connection() as connection:
             connection.executescript(SCHEMA)
-            self._migrate(connection)
+            migrated = self._migrate(connection)
+        # SQLite DDL does not increment total_changes, so connection() cannot
+        # notice an ALTER TABLE and persist the migrated database to Blob.
+        if migrated:
+            self.push()
 
     @staticmethod
     def _durable() -> bool:
@@ -255,7 +260,7 @@ class Database:
             return
 
     @staticmethod
-    def _migrate(connection: sqlite3.Connection) -> None:
+    def _migrate(connection: sqlite3.Connection) -> bool:
         """Apply additive migrations for databases created by earlier versions."""
         migrations = {
             "messages": {
@@ -276,6 +281,7 @@ class Database:
                 "preferred_model": "TEXT",
             },
         }
+        migrated = False
         for table, columns in migrations.items():
             existing = {
                 row["name"]
@@ -284,6 +290,8 @@ class Database:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                    migrated = True
+        return migrated
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
