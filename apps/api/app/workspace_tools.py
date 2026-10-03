@@ -536,7 +536,9 @@ class WorkspaceToolset:
     async def _wake_computer(self) -> None:
         if self.computer is None:
             raise RuntimeError("Komputer belum dikonfigurasi.")
-        await asyncio.to_thread(self.computer.wake)
+        wake = getattr(self.computer, "wake", None)
+        if wake is not None:
+            await asyncio.to_thread(wake)
         if self.on_computer_wake:
             self.on_computer_wake()
 
