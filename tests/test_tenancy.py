@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from apps.api.app import main
+from apps.api.app.database import decode_snapshot, encode_snapshot
 from apps.api.app.tenancy import tenant_locations
 
 
@@ -140,6 +142,42 @@ def test_old_snapshot_cannot_erase_a_reply(tmp_path: Path, monkeypatch) -> None:
             await_runs=True,
         ),
     )
+    main._workspaces.clear()
+
+
+def test_legacy_snapshot_migrates_a_cached_workspace(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.setattr(main, "_gateway", main.MockGateway())
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, database_path=tmp_path / "workspace.db", workspace_root=tmp_path / "workspace"),
+    )
+    main._workspaces.clear()
+    asyncio.run(main.credential_store.put("sessions", "token-legacy", {"auth_mode": "codex", "account_id": "acct_legacy", "access_token": "a"}))
+    headers = {"X-Bandros-Session": "token-legacy"}
+
+    with TestClient(main.app) as client:
+        listed = client.get("/api/v1/bots", headers=headers)
+        bot_id = next(bot["id"] for bot in listed.json() if bot["name"] == "Bandros")
+        snapshot = decode_snapshot(listed.headers["X-Bandros-Snapshot"])
+        assert snapshot is not None
+        legacy_path = tmp_path / "legacy.db"
+        legacy_path.write_bytes(snapshot)
+        with sqlite3.connect(legacy_path) as connection:
+            connection.execute("DELETE FROM workspace_meta")
+            connection.execute("ALTER TABLE runs DROP COLUMN continuation")
+        legacy_snapshot = encode_snapshot(legacy_path.read_bytes())
+
+        sent = client.post(
+            f"/api/v1/bots/{bot_id}/messages",
+            headers={**headers, "X-Bandros-Snapshot": legacy_snapshot},
+            json={"content": "halo"},
+        )
+
+    assert sent.status_code == 202
+    assert sent.json()["status"] == "completed"
     main._workspaces.clear()
     asyncio.run(main.credential_store.put("sessions", "token-reply", {"auth_mode": "codex", "account_id": "acct_reply", "access_token": "a"}))
     headers = {"X-Bandros-Session": "token-reply"}

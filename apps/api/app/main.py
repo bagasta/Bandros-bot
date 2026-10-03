@@ -404,8 +404,13 @@ async def optional_auth(request: Request, call_next):
             database_path = _account_database_path(account_id)
             snapshot = request.headers.get("X-Bandros-Snapshot") or request.scope.get("state", {}).get("bandros_snapshot")
             with _STAGE_LOCK:
+                staged = False
                 if snapshot:
-                    stage_snapshot(database_path, snapshot)
+                    staged = stage_snapshot(database_path, snapshot)
+                    if staged:
+                        cached = _workspaces.get(tenant_digest(account_id))
+                        if cached is not None:
+                            cached[0].database.initialize()
                 hold_snapshot(database_path)
                 held_path = database_path
             incoming_rev = database_revision(database_path) if database_path.is_file() else -1
