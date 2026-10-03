@@ -115,6 +115,8 @@ def test_archives_duplicate_account_sandboxes_before_use() -> None:
         if path == "/first/files/folder":
             actions.append("use first")
             return httpx.Response(201, text="")
+        if path == "/first/process/execute":
+            return httpx.Response(200, json={"exitCode": 0, "result": ""})
         return httpx.Response(404, text=path)
 
     computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
