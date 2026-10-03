@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 
 type Bot = { id: string; name: string; description: string; instructions?: string; model?: string | null; status: "active" | "archived" };
@@ -81,10 +82,6 @@ function chatTime(value?: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
-}
-
-function canSendMessage(prompt: string): boolean {
-  return prompt.trim().length > 0;
 }
 
 function MemberPicker({ members, onChoose }: { members: Bot[]; onChoose: (id: string) => void }) {
@@ -653,11 +650,9 @@ export default function GrokDashboard() {
     node.scrollTop = node.scrollHeight;
   }, [messages, groupMessages, typingNames, working, botWorking]);
 
-  const sendMessage = async (event: FormEvent) => {
-    event.preventDefault();
-    if ((!selectedBot && !selectedGroup) || !canSendMessage(prompt)) return;
-    const content = prompt.trim();
-    const currentSubmission = ++submissionId.current;
+  const turnActive = working || botWorking || typingNames.length > 0;
+
+  const sendMessage = async (content: string, currentSubmission: number) => {
     stickToBottom.current = true;
     setPrompt(""); setWorking(true); workingRef.current = true; advancing.current = true; setError(null);
     try {
@@ -709,6 +704,7 @@ export default function GrokDashboard() {
       const session = window.localStorage.getItem("bandros_chatgpt_session");
       const response = await fetch(`${apiBase}/runs/${run.id}/events/stream`, {
         headers: session ? { "X-Bandros-Session": session } : {},
+        signal: turnAbort.signal,
       });
       if (!response.ok || !response.body) throw new Error("Streaming Run tidak tersedia.");
       const reader = response.body.getReader();
@@ -756,6 +752,15 @@ export default function GrokDashboard() {
         setActiveRunId(null);
       }
     }
+  };
+
+  const submitComposer = (event?: FormEvent) => {
+    event?.preventDefault();
+    const draft = messageDraft(composerRef.current?.value ?? prompt);
+    if ((!selectedBot && !selectedGroup) || !draft) return;
+    const currentSubmission = ++submissionId.current;
+    if (workingRef.current) stopCurrentTurn();
+    void sendMessage(draft, currentSubmission);
   };
 
   const stopRun = async () => {
@@ -1021,11 +1026,11 @@ export default function GrokDashboard() {
         <span className="bandros-sr-only" role="status" aria-live="polite" aria-atomic="true">{typingPeople.length > 0 ? `${typingPeople.join(", ")} sedang mengetik` : ""}</span>
         {mentionSuggestions.length > 0 && <div className="bandros-mentions" role="listbox" aria-label="Saran mention">{mentionSuggestions.map((member) => <button type="button" key={member.id} onMouseDown={(event) => event.preventDefault()} onClick={() => insertMention(member.name)}>@{member.name}</button>)}</div>}
         {approvals.length > 0 && !selectedGroup && <div className="bandros-approval">{approvals.map((approval) => <div key={approval.id}><p>Perlu persetujuan: {approval.reason}</p><button type="button" onClick={() => void request(`/approvals/${approval.id}/approve`, { method: "POST" }).then(() => setApprovals((current) => current.filter((item) => item.id !== approval.id)))}>Setujui</button><button type="button" onClick={() => void request(`/approvals/${approval.id}/reject`, { method: "POST" }).then(() => setApprovals((current) => current.filter((item) => item.id !== approval.id)))}>Tolak</button></div>)}</div>}
-        {chatGPT.connected && <form className="bandros-composer" onSubmit={sendMessage}>
-          <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else event.currentTarget.form?.requestSubmit(); } }} placeholder={selectedGroup ? `Message ${displayName}` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
+        {chatGPT.connected && <form className="bandros-composer" onSubmit={submitComposer}>
+          <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else submitComposer(); } }} placeholder={selectedGroup ? `Message ${displayName}` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
           <div className="bandros-composer-actions">
-            {(working || botWorking || typingNames.length > 0) && <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button>}
-            <button type="submit" disabled={!canSendMessage(prompt)} aria-label="Send message">↑</button>
+            {turnActive && <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button>}
+            <button type="button" disabled={sendControlDisabled(turnActive, prompt)} aria-label="Send message" onClick={() => submitComposer()}>↑</button>
           </div>
         </form>}
         {chatGPT.connected && selectedBot && !selectedGroup && <div className="bandros-composer-footer"><span>Model</span>{modelSelect}</div>}

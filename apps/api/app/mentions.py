@@ -117,6 +117,18 @@ def is_resume_request(text: str) -> bool:
     )
 
 
+def prompt_for_direct_message(content: str, continuation: str | None) -> str:
+    """A follow-up such as lanjut returns to the interrupted stage instead of a new task."""
+    note = (continuation or "").strip()
+    if note and is_resume_request(content):
+        return (
+            "Lanjutkan tahap yang sama dari pekerjaan yang terhenti. "
+            f"Catatan tahap sebelumnya: {note}\n\n"
+            f"Pesan pengguna: {content}"
+        )
+    return content
+
+
 def route_next_owner(answer: str, members: list[Bot], sender: Bot, finished_ids: set, allow_many: bool) -> str:
     """The lead keeps one unfinished owner. A finished teammate is not mentioned again."""
     if sender.id != lead_bot(members).id:
