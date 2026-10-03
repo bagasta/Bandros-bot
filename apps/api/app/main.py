@@ -1458,8 +1458,6 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         attachments=payload.attachments,
     )
     runtime.interrupt_bot(bot_id)
-    if pending := runtime.pending_dm_run(bot_id):
-        return repository.get_run(runtime.queue_dm(bot_id, pending, payload.content))
     run = repository.create_run(
         bot_id,
         conversation_id,

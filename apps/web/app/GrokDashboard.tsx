@@ -411,6 +411,7 @@ export default function GrokDashboard() {
   const selectedGroupId = useRef<string | null>(null);
   const groupPending = useRef(false);
   const advancing = useRef(false);
+  const submissionId = useRef(0);
   workingRef.current = working;
   selectedGroupId.current = selectedGroup?.id ?? null;
 
@@ -656,6 +657,7 @@ export default function GrokDashboard() {
     event.preventDefault();
     if ((!selectedBot && !selectedGroup) || !canSendMessage(prompt)) return;
     const content = prompt.trim();
+    const currentSubmission = ++submissionId.current;
     stickToBottom.current = true;
     setPrompt(""); setWorking(true); workingRef.current = true; advancing.current = true; setError(null);
     try {
@@ -694,6 +696,7 @@ export default function GrokDashboard() {
       const model = modelByBot[botId] ?? selectedBot?.model ?? null;
       setMessages((current) => [...current, { id: `local-${Date.now()}`, role: "user", content }]);
       const run = await request<Run>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content, model }) });
+      if (currentSubmission !== submissionId.current) return;
       setActiveRunId(run.id);
       if (["completed", "failed", "failed_retryable", "cancelled"].includes(run.status)) {
         if (selectedBot?.id !== botId) return;
@@ -724,6 +727,7 @@ export default function GrokDashboard() {
           if (!data) continue;
           const parsed = JSON.parse(data) as { payload?: { content?: string } } & Run;
           if (eventName === "assistant.delta") {
+            if (currentSubmission !== submissionId.current) continue;
             const streamedContent = parsed.payload?.content || "";
             setMessages((current) => [
               ...current.filter((message) => message.id !== `streaming-${run.id}`),
@@ -736,13 +740,22 @@ export default function GrokDashboard() {
       }
       if (!completed) throw new Error("Streaming berakhir sebelum Run selesai.");
       if (completed.error) throw new Error(completed.error);
+      if (currentSubmission !== submissionId.current) return;
       if (selectedBot?.id !== botId) return;
       setMessages(await request<Message[]>(`/bots/${botId}/messages`));
       void loadBots();
     } catch (cause) {
+      if (currentSubmission !== submissionId.current) return;
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       setError(cause instanceof Error ? cause.message : "Pesan tidak dapat dikirim.");
-    } finally { advancing.current = false; workingRef.current = false; setWorking(false); setActiveRunId(null); }
+    } finally {
+      if (currentSubmission === submissionId.current) {
+        advancing.current = false;
+        workingRef.current = false;
+        setWorking(false);
+        setActiveRunId(null);
+      }
+    }
   };
 
   const stopRun = async () => {
