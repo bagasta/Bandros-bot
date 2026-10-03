@@ -188,6 +188,10 @@ class DaytonaComputer:
             self._wait(sandbox_id, {"archived", "stopped"})
 
     def _ensure(self) -> dict[str, Any]:
+        with self._account_lock:
+            return self._ensure_unlocked()
+
+    def _ensure_unlocked(self) -> dict[str, Any]:
         sandbox = self._find()
         if sandbox is None:
             created = self._send(
@@ -205,6 +209,9 @@ class DaytonaComputer:
                 },
             )
             sandbox = created.json()
+            discovered = self._find()
+            if discovered is not None:
+                sandbox = discovered
         sandbox_id = str(sandbox["id"])
         self._sandbox_id = sandbox_id
         state = str(sandbox.get("state") or "")
