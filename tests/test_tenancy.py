@@ -38,7 +38,12 @@ def test_two_chatgpt_accounts_do_not_share_bots(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(
         main,
         "settings",
-        replace(main.settings, database_path=tmp_path / "workspace.db", workspace_root=tmp_path / "workspace"),
+        replace(
+            main.settings,
+            database_path=tmp_path / "workspace.db",
+            workspace_root=tmp_path / "workspace",
+            await_runs=True,
+        ),
     )
     main._workspaces.clear()
     asyncio.run(main.credential_store.put("sessions", "token-a", {"auth_mode": "codex", "account_id": "acct_a", "access_token": "a"}))
@@ -144,6 +149,28 @@ def test_old_snapshot_cannot_erase_a_reply(tmp_path: Path, monkeypatch) -> None:
     )
     main._workspaces.clear()
 
+    asyncio.run(main.credential_store.put("sessions", "token-reply", {"auth_mode": "codex", "account_id": "acct_reply", "access_token": "a"}))
+    headers = {"X-Bandros-Session": "token-reply"}
+
+    with TestClient(main.app) as client:
+        listed = client.get("/api/v1/bots", headers=headers)
+        old_snapshot = listed.headers["X-Bandros-Snapshot"]
+        bot_id = next(bot["id"] for bot in listed.json() if bot["name"] == "Bandros")
+        sent = client.post(f"/api/v1/bots/{bot_id}/messages", headers=headers, json={"content": "halo"})
+        stale = client.get(
+            f"/api/v1/bots/{bot_id}/messages",
+            headers={**headers, "X-Bandros-Snapshot": old_snapshot},
+        )
+        activity = client.get(f"/api/v1/bots/{bot_id}/activity", headers=headers)
+
+    assert activity.status_code == 200
+    assert activity.json()["working"] is False
+    assert sent.status_code == 202
+    assert sent.json()["status"] == "completed"
+    assert any(message["content"] == "Mock response for: halo" for message in stale.json())
+    assert int(stale.headers["X-Bandros-Snapshot-Rev"]) > int(listed.headers["X-Bandros-Snapshot-Rev"])
+    main._workspaces.clear()
+
 
 def test_legacy_snapshot_migrates_a_cached_workspace(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
@@ -152,7 +179,12 @@ def test_legacy_snapshot_migrates_a_cached_workspace(tmp_path: Path, monkeypatch
     monkeypatch.setattr(
         main,
         "settings",
-        replace(main.settings, database_path=tmp_path / "workspace.db", workspace_root=tmp_path / "workspace"),
+        replace(
+            main.settings,
+            database_path=tmp_path / "workspace.db",
+            workspace_root=tmp_path / "workspace",
+            await_runs=True,
+        ),
     )
     main._workspaces.clear()
     asyncio.run(main.credential_store.put("sessions", "token-legacy", {"auth_mode": "codex", "account_id": "acct_legacy", "access_token": "a"}))
@@ -178,27 +210,6 @@ def test_legacy_snapshot_migrates_a_cached_workspace(tmp_path: Path, monkeypatch
 
     assert sent.status_code == 202
     assert sent.json()["status"] == "completed"
-    main._workspaces.clear()
-    asyncio.run(main.credential_store.put("sessions", "token-reply", {"auth_mode": "codex", "account_id": "acct_reply", "access_token": "a"}))
-    headers = {"X-Bandros-Session": "token-reply"}
-
-    with TestClient(main.app) as client:
-        listed = client.get("/api/v1/bots", headers=headers)
-        old_snapshot = listed.headers["X-Bandros-Snapshot"]
-        bot_id = next(bot["id"] for bot in listed.json() if bot["name"] == "Bandros")
-        sent = client.post(f"/api/v1/bots/{bot_id}/messages", headers=headers, json={"content": "halo"})
-        stale = client.get(
-            f"/api/v1/bots/{bot_id}/messages",
-            headers={**headers, "X-Bandros-Snapshot": old_snapshot},
-        )
-        activity = client.get(f"/api/v1/bots/{bot_id}/activity", headers=headers)
-
-    assert activity.status_code == 200
-    assert activity.json()["working"] is False
-    assert sent.status_code == 202
-    assert sent.json()["status"] == "completed"
-    assert any(message["content"] == "Mock response for: halo" for message in stale.json())
-    assert int(stale.headers["X-Bandros-Snapshot-Rev"]) > int(listed.headers["X-Bandros-Snapshot-Rev"])
     main._workspaces.clear()
 
 
