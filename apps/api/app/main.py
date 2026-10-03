@@ -31,6 +31,7 @@ from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot
 from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
 from .policy import PolicyEngine
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
+from .mentions import is_resume_request
 from .repository import Repository
 from .runtime import RunRuntime
 from .settings import Settings, running_on_vercel
@@ -564,23 +565,15 @@ async def computer_start() -> dict[str, str | None]:
     computer = _account_computer()
     if computer is None:
         raise HTTPException(status_code=503, detail="Komputer Daytona belum dikonfigurasi.")
-    runtime = current_runtime.get()
-    if runtime is not None:
-        runtime._computer_held = True
     try:
         return await asyncio.to_thread(computer.wake)
     except Exception as error:
-        if runtime is not None:
-            runtime._computer_held = False
         raise HTTPException(status_code=502, detail=str(error)[:300]) from error
 
 
 @app.post("/api/v1/computer/stop")
 async def computer_stop() -> dict[str, str | None]:
     computer = _account_computer()
-    runtime = current_runtime.get()
-    if runtime is not None:
-        runtime._computer_held = False
     if computer is not None:
         await asyncio.to_thread(computer.park)
     return {"state": "off", "screen_url": None}
@@ -1132,6 +1125,10 @@ async def install_clawhub_skill(payload: ClawHubInstall) -> Skill:
             repository.assign_skill(payload.bot_id, skill.id)
         except KeyError as error:
             raise not_found(error) from error
+    else:
+        for bot in repository.list_bots():
+            if bot.status is BotStatus.ACTIVE:
+                repository.assign_skill(bot.id, skill.id)
     return skill
 
 
@@ -1464,7 +1461,14 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
     run = repository.create_run(
         bot_id,
         conversation_id,
-        payload.content,
+        (
+            f"Lanjutkan tahap yang sama dari pekerjaan yang terhenti. "
+            f"Catatan tahap sebelumnya: {interrupted.continuation}\n\n"
+            f"Pesan pengguna: {payload.content}"
+            if is_resume_request(payload.content)
+            and (interrupted := repository.latest_interrupted_run(bot_id)) is not None
+            else payload.content
+        ),
         _model_for_bot(bot, payload.model),
     )
     run_id = runtime.queue_dm(bot_id, run.id, payload.content)

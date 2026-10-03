@@ -15,6 +15,7 @@ from .mentions import (
     cluster_topics,
     group_prompt,
     is_silence,
+    is_resume_request,
     lead_bot,
     visible_reply,
     mentioned_bots,
@@ -57,6 +58,7 @@ class RunRuntime:
     _burst_tasks: dict[tuple[str, UUID], asyncio.Task[None]] = field(default_factory=dict, init=False)
     _burst_runs: dict[tuple[str, UUID], UUID] = field(default_factory=dict, init=False)
     _computer_held: bool = field(default=False, init=False)
+    _computer_used: bool = field(default=False, init=False)
 
     def start(self, run_id: UUID) -> None:
         if task := self._tasks.get(run_id):
@@ -79,10 +81,11 @@ class RunRuntime:
 
     async def _release_computer(self, run_id: UUID) -> None:
         computer = self.computer
-        if computer is None or self._computer_held or self._computer_busy():
+        if computer is None or self._computer_held or not self._computer_used:
             return
         try:
             await asyncio.to_thread(computer.park)  # type: ignore[attr-defined]
+            self._computer_used = False
         except Exception as error:
             self.repository.record_event(run_id, "computer.park_failed", {"error": str(error)[:300]})
 
@@ -114,7 +117,9 @@ class RunRuntime:
             self._approved_tools.pop(run_id, {}),
             self.workspace_root,
             on_group_post=self.queue_group_wake,
-            computer=None,
+            computer=self.computer,
+            remote_workspace=False,
+            on_computer_wake=lambda: setattr(self, "_computer_used", True),
         )
         try:
             history = self.repository.list_messages(run.conversation_id, limit=50)
@@ -251,6 +256,8 @@ class RunRuntime:
         if task and not task.done():
             task.cancel()
         run = self.repository.request_stop(run_id)
+        if not run.continuation:
+            self.repository.set_run_continuation(run_id, run.prompt)
         if run.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL}:
             self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
 
@@ -489,11 +496,30 @@ class RunRuntime:
         jobs = self.repository.list_jobs()
         job_line = "; ".join(f"{job.title} [{job.status}]" for job in jobs[:8])
         prompt = group_prompt(group, content, transcript, already, job_line)
+        if is_resume_request(content):
+            interrupted = self.repository.latest_interrupted_run_for_group(group_id, target.id)
+            if interrupted is not None:
+                prompt = (
+                    f"{prompt}\n\nLanjutkan tahap yang sama yang terhenti. "
+                    f"Catatan tahap sebelumnya: {interrupted.continuation}"
+                )
         run = self.repository.create_run(target.id, conversation_id, prompt, target.model or self.default_model)
         self.repository.link_run_to_group(run.id, group_id)
         self._group_depth[run.id] = depth
         try:
-            await self.start_and_wait(run.id)
+            await asyncio.wait_for(self.start_and_wait(run.id), timeout=60)
+        except TimeoutError:
+            self.stop(run.id)
+            if not any(
+                message.sender_bot_id == target.id
+                for message in self.repository.list_group_messages(group_id)
+            ):
+                self.repository.append_group_message(
+                    group_id,
+                    "bot",
+                    "Balasan terlalu lama. Tahap ini dihentikan; kirim lanjutkan untuk meneruskannya.",
+                    target.id,
+                )
         except Exception:
             return
         remaining = [name for name in self._anticipated.get(group_id, []) if name != target.name]

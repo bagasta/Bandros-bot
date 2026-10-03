@@ -24,7 +24,7 @@ class ComputerError(RuntimeError):
 
 
 class DaytonaComputer:
-    """Filesystem and shell on a 1 vCPU container. Desktop sessions are never started."""
+    """Filesystem and shell on a 1 vCPU container with lazy desktop activation."""
 
     def __init__(
         self,
@@ -108,32 +108,14 @@ class DaytonaComputer:
         sandbox = self._find()
         if sandbox is None or sandbox.get("state") != "started":
             return {"state": "off", "screen_url": None}
-        return {"state": "on", "screen_url": None}
+        return {"state": "on", "screen_url": self._preview_origin(str(sandbox["id"]))}
 
     def wake(self) -> dict[str, str | None]:
         """Start the small sandbox and its desktop. Caller must park it again."""
         sandbox = self._ensure()
         started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
         self._raise_for_status(started)
-        self._ensure_chrome(sandbox)
-        return {"state": "on", "screen_url": None}
-
-    def _ensure_chrome(self, sandbox: dict[str, Any]) -> None:
-        """Linux desktop already runs. Add Chrome when the image does not ship it."""
-        command = (
-            "if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null "
-            "&& ! command -v chromium-browser >/dev/null; then "
-            "nohup sh -c 'sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y chromium' >/tmp/chrome-install.log 2>&1 & "
-            "fi"
-        )
-        installed = self._toolbox_raw(
-            sandbox,
-            "POST",
-            "/process/execute",
-            json={"command": command, "cwd": WORKSPACE, "timeout": 15},
-        )
-        if installed.status_code >= 400:
-            return
+        return {"state": "on", "screen_url": self._preview_origin(str(sandbox["id"]))}
 
     def preview_origin(self) -> str | None:
         sandbox = self._find()

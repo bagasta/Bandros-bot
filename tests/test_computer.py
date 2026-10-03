@@ -117,7 +117,43 @@ def test_runtime_parks_after_the_turn(tmp_path) -> None:
     computer = Parking()
     runtime = RunRuntime(repository, FakeGateway(), "test-model", 1, computer=computer)
     asyncio.run(runtime.start_and_wait(run.id))
-    assert computer.parked is True
+    assert computer.parked is False
+
+
+def test_runtime_wakes_and_parks_only_when_a_computer_tool_is_used(tmp_path) -> None:
+    class Desktop:
+        def __init__(self) -> None:
+            self.wakes = 0
+            self.parked = 0
+
+        def wake(self) -> None:
+            self.wakes += 1
+
+        def park(self) -> None:
+            self.parked += 1
+
+        def run(self, command: str) -> dict[str, object]:
+            return {"exit_code": 0, "output": command}
+
+    class ComputerGateway(FakeGateway):
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+            tool = next(item for item in tools if item.name == "run_command")
+            result = await tool.handler({"command": "pwd"})
+            assert result["ok"] is True
+            return "done"
+
+    database = Database(tmp_path / "lazy.db")
+    database.initialize()
+    repository = Repository(database)
+    bot = repository.create_bot("Worker", "", "", None)
+    run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Hi", "test-model")
+    computer = Desktop()
+    runtime = RunRuntime(repository, ComputerGateway(), "test-model", 1, computer=computer)
+
+    asyncio.run(runtime.start_and_wait(run.id))
+
+    assert computer.wakes == 1
+    assert computer.parked == 1
 
 
 def test_held_computer_stays_awake(tmp_path) -> None:

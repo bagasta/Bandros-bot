@@ -45,6 +45,8 @@ class WorkspaceToolset:
         workspace_root: Path | None = None,
         on_group_post: Callable[[UUID, str, UUID], None] | None = None,
         computer: Any | None = None,
+        remote_workspace: bool = True,
+        on_computer_wake: Callable[[], None] | None = None,
     ) -> None:
         self.repository = repository
         self.run_id = run_id
@@ -56,6 +58,8 @@ class WorkspaceToolset:
         self.workspace_root = (workspace_root or Path("/workspace")).resolve()
         self.on_group_post = on_group_post
         self.computer = computer
+        self.remote_workspace = remote_workspace
+        self.on_computer_wake = on_computer_wake
         self.skill_names = {skill.name for skill in repository.list_bot_skills(bot_id)}
         self.continuation: str | None = None
         self.tool_uses = 0
@@ -107,6 +111,13 @@ class WorkspaceToolset:
                 "Call a tool on a connected external MCP plugin. payload: {plugin, tool, arguments}. "
                 + self._plugin_catalog(),
                 self.use_plugin,
+                RiskClass.READ_ONLY,
+            ),
+            ToolDefinition(
+                "use_skill",
+                "Load an installed skill's instructions before using it. payload: {skill}. "
+                + self._skill_catalog(),
+                self.use_skill,
                 RiskClass.READ_ONLY,
             ),
             ToolDefinition("web_search", "Search the public web before a research answer. payload: {query}", self.web_search, RiskClass.READ_ONLY, timeout_seconds=25),
@@ -367,7 +378,7 @@ class WorkspaceToolset:
         return candidate
 
     async def list_workspace_files(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self.computer is not None:
+        if self.computer is not None and self.remote_workspace:
             relative = self._remote_relative(str(payload.get("path", ".")))
             try:
                 entries = await asyncio.to_thread(self.computer.list_dir, relative)
@@ -386,7 +397,7 @@ class WorkspaceToolset:
         return {"ok": True, "entries": entries}
 
     async def read_workspace_file(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self.computer is not None:
+        if self.computer is not None and self.remote_workspace:
             relative = self._remote_relative(self._text(payload, "path"))
             try:
                 content = await asyncio.to_thread(self.computer.read_text, relative)
@@ -399,14 +410,17 @@ class WorkspaceToolset:
         return {"ok": True, "path": str(path.relative_to(self.workspace_root)), "content": path.read_text(encoding="utf-8")[:100_000]}
 
     async def computer_screenshot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        await self._wake_computer()
         image = await asyncio.to_thread(self.computer.screenshot)
         return {"ok": True, "image": image}
 
     async def computer_click(self, payload: dict[str, Any]) -> dict[str, Any]:
+        await self._wake_computer()
         await asyncio.to_thread(self.computer.click, int(payload.get("x", 0)), int(payload.get("y", 0)))
         return {"ok": True}
 
     async def computer_type(self, payload: dict[str, Any]) -> dict[str, Any]:
+        await self._wake_computer()
         text = self._text(payload, "text")
         if len(text) > 2_000:
             raise ValueError("text exceeds 2000 characters")
@@ -414,6 +428,7 @@ class WorkspaceToolset:
         return {"ok": True}
 
     async def run_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        await self._wake_computer()
         command = self._text(payload, "command")
         if len(command) > 2_000:
             raise ValueError("command exceeds 2000 characters")
@@ -424,7 +439,7 @@ class WorkspaceToolset:
         content = str(payload.get("content", ""))
         if len(content) > 100_000:
             raise ValueError("file content exceeds 100000 characters")
-        if self.computer is not None:
+        if self.computer is not None and self.remote_workspace:
             relative = self._remote_relative(self._text(payload, "path"))
             await asyncio.to_thread(self.computer.write_text, relative, content)
             return {"ok": True, "path": relative, "characters": len(content)}
@@ -451,6 +466,22 @@ class WorkspaceToolset:
         if not plugins:
             return "No plugins are connected yet."
         return "Connected plugins: " + "; ".join(f"{plugin.name} ({', '.join(plugin.tools) or 'no tools'})" for plugin in plugins)
+
+    def _skill_catalog(self) -> str:
+        skills = self.repository.list_bot_skills(self.bot_id)
+        if not skills:
+            return "No installed skills are assigned to this Bot."
+        return "Installed skills: " + "; ".join(f"{skill.name}: {skill.description}" for skill in skills)
+
+    async def use_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        requested = self._text(payload, "skill").lower()
+        skill = next(
+            (item for item in self.repository.list_bot_skills(self.bot_id) if item.name.lower() == requested),
+            None,
+        )
+        if skill is None:
+            return {"ok": False, "error": "Skill tidak terpasang untuk Bot ini."}
+        return {"ok": True, "name": skill.name, "description": skill.description, "instructions": skill.content}
 
     async def connect_plugin(self, payload: dict[str, Any]) -> dict[str, Any]:
         from .mcp_client import McpError, discover_tools
@@ -499,7 +530,15 @@ class WorkspaceToolset:
     async def continue_own_work(self, payload: dict[str, Any]) -> dict[str, Any]:
         note = self._text(payload, "note")[:2_000]
         self.continuation = note
+        self.repository.set_run_continuation(self.run_id, note)
         return {"ok": True, "continue": True}
+
+    async def _wake_computer(self) -> None:
+        if self.computer is None:
+            raise RuntimeError("Komputer belum dikonfigurasi.")
+        await asyncio.to_thread(self.computer.wake)
+        if self.on_computer_wake:
+            self.on_computer_wake()
 
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:
