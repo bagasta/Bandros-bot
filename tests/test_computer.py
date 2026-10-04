@@ -146,9 +146,23 @@ def test_wake_returns_preview_without_installing_chrome() -> None:
     computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
     status = computer.wake()
 
-    assert status == {"state": "on", "screen_url": "https://6080-example.daytonaproxy01.net"}
+    signed = "https://6080-example.daytonaproxy01.net/vnc.html?token=secret"
+    assert status == {"state": "on", "screen_url": signed}
     assert commands == []
-    assert computer.status()["screen_url"] == "https://6080-example.daytonaproxy01.net"
+    assert computer.status()["screen_url"] == signed
+
+
+def test_separate_preview_token_stays_in_the_signed_url() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/signed-preview-url"):
+            return httpx.Response(
+                200,
+                json={"url": "https://6080-sandbox.daytonaproxy01.net/vnc.html", "token": "signedtoken"},
+            )
+        return httpx.Response(404, text=request.url.path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    assert computer._signed_preview("sb") == "https://6080-signedtoken.daytonaproxy01.net/vnc.html"
 
 
 def test_preview_origin_is_only_the_desktop_host() -> None:
@@ -210,6 +224,7 @@ def test_screen_url_stays_visible_until_the_preview_is_seen_then_parks() -> None
             assert state["value"] == "started"
             assert stops == []
             seen.append(computer.status()["screen_url"])
+            computer.note_preview_shown()
         clock["t"] += seconds
 
     computer = DaytonaComputer(
@@ -225,9 +240,37 @@ def test_screen_url_stays_visible_until_the_preview_is_seen_then_parks() -> None
     computer.wake()
     computer.park_after_preview()
 
-    assert seen == ["https://6080-example.daytonaproxy01.net"]
+    assert seen == ["https://6080-example.daytonaproxy01.net/vnc.html?token=secret"]
     assert clock["t"] >= 4
     assert clock["t"] < 8
+    assert state["value"] == "archived"
+    assert stops == ["stop", "archive"]
+
+
+def test_a_preview_url_alone_does_not_count_as_the_desktop() -> None:
+    state = {"value": "started"}
+    stops: list[str] = []
+    clock = {"t": 0.0}
+
+    def sleep(seconds: float) -> None:
+        assert state["value"] == "started"
+        computer.status()
+        clock["t"] += seconds
+
+    computer = DaytonaComputer(
+        "test-key",
+        "https://api.test",
+        "acct",
+        client=_client(_started_desktop(state, stops)),
+        sleep=sleep,
+        now=lambda: clock["t"],
+        preview_hold_seconds=8,
+        preview_grace_seconds=4,
+    )
+    computer.wake()
+    computer.park_after_preview()
+
+    assert clock["t"] >= 8
     assert state["value"] == "archived"
     assert stops == ["stop", "archive"]
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
@@ -59,6 +60,7 @@ class RunRuntime:
     _burst_runs: dict[tuple[str, UUID], UUID] = field(default_factory=dict, init=False)
     _computer_held: bool = field(default=False, init=False)
     _computer_used: bool = field(default=False, init=False)
+    _disconnect_probes: dict[UUID, Callable[[], Awaitable[bool]]] = field(default_factory=dict, init=False)
 
     def start(self, run_id: UUID) -> None:
         if task := self._tasks.get(run_id):
@@ -76,6 +78,9 @@ class RunRuntime:
     async def _execute(self, run_id: UUID) -> None:
         try:
             await self._execute_unlocked(run_id)
+        except asyncio.CancelledError:
+            self._keep_stopped_stage(run_id, None)
+            raise
         finally:
             await self._release_computer(run_id)
 
@@ -142,31 +147,40 @@ class RunRuntime:
                 in_group=self.repository.group_for_run(run_id) is not None,
             )
             try:
-                answer = await asyncio.wait_for(
-                    self.model_gateway.complete(
-                        system=system,
-                        prompt=prompt,
-                        model=run.model,
-                        tools=toolset.definitions(),
-                        request_limit=self.max_model_calls,
+                answer = await self._answer_until_stop(
+                    run_id,
+                    asyncio.wait_for(
+                        self.model_gateway.complete(
+                            system=system,
+                            prompt=prompt,
+                            model=run.model,
+                            tools=toolset.definitions(),
+                            request_limit=self.max_model_calls,
+                        ),
+                        timeout=150,
                     ),
-                    timeout=150,
                 )
             except Exception as error:
                 if "request_limit" not in str(error):
                     raise
                 if toolset.tool_uses > 0 and not toolset.continuation:
                     toolset.continuation = "Lanjutkan tahap yang sama dari hasil yang sudah ada. Jangan mengulang pekerjaan yang selesai."
-                answer = await asyncio.wait_for(
-                    self.model_gateway.complete(
-                        system=system,
-                        prompt=f"{prompt}\n\nBalas sekarang dari yang sudah kamu tahu. Jangan panggil alat lagi.",
-                        model=run.model,
-                        tools=(),
-                        request_limit=2,
+                answer = await self._answer_until_stop(
+                    run_id,
+                    asyncio.wait_for(
+                        self.model_gateway.complete(
+                            system=system,
+                            prompt=f"{prompt}\n\nBalas sekarang dari yang sudah kamu tahu. Jangan panggil alat lagi.",
+                            model=run.model,
+                            tools=(),
+                            request_limit=2,
+                        ),
+                        timeout=60,
                     ),
-                    timeout=60,
                 )
+            if answer is None or await self._turn_stopped(run_id):
+                self._keep_stopped_stage(run_id, toolset.continuation)
+                return
         except Exception as error:
             message = "Balasan terlalu lama. Kirim ulang." if isinstance(error, TimeoutError) else _user_facing_error(error)
             self._finish_failed_run(run_id, run.conversation_id, message)
@@ -177,8 +191,8 @@ class RunRuntime:
             note = answer.strip() or "Butuh persetujuanmu sebelum langkah ini dijalankan."
             self.repository.append_message(run.conversation_id, "assistant", note, model=run.model)
             return
-        if current.stop_requested:
-            self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
+        if current.stop_requested or current.status is RunStatus.CANCELLED:
+            self._keep_stopped_stage(run_id, toolset.continuation)
             return
         group_id = self.repository.group_for_run(run_id)
         self._queue_own_continuation(group_id, bot, run_id, toolset)
@@ -197,8 +211,10 @@ class RunRuntime:
             self.repository.record_event(run_id, "assistant.skipped", {"reason": "empty"})
             self.repository.update_run(run_id, RunStatus.COMPLETED)
             return
+        if not self.repository.commit_assistant_turn(run_id, answer, run.model):
+            self._keep_stopped_stage(run_id, toolset.continuation)
+            return
         self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
-        self.repository.append_message(run.conversation_id, "assistant", answer, model=run.model)
         if group_id and not is_silence(answer):
             recent = self.repository.list_group_messages(group_id)
             already_posted = bool(recent) and recent[-1].sender_bot_id == bot.id and recent[-1].content.strip() == answer.strip()
@@ -209,7 +225,6 @@ class RunRuntime:
                 self.queue_group_wake(group_id, answer, bot.id, depth + 1)
         self.repository.record_event(run_id, "assistant.message", {"characters": len(answer)})
         self.repository.record_event(run_id, "model.request.completed", {"model": run.model, "call": 1})
-        self.repository.update_run(run_id, RunStatus.COMPLETED)
         self._resolve_handoffs(run_id, answer, success=True)
         await self.drain_group_wakes()
 
@@ -234,6 +249,49 @@ class RunRuntime:
         for run_id in run_ids:
             self.start(run_id)
         return len(run_ids)
+
+    async def _turn_stopped(self, run_id: UUID) -> bool:
+        probe = self._disconnect_probes.get(run_id)
+        if probe is not None:
+            try:
+                if await probe():
+                    return True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+        run = self.repository.get_run(run_id)
+        return run.stop_requested or run.status is RunStatus.CANCELLED
+
+    async def _answer_until_stop(self, run_id: UUID, pending: Awaitable[str]) -> str | None:
+        """Drop the model result when the user leaves this turn before it is saved."""
+        task = asyncio.create_task(pending)
+        try:
+            while not task.done():
+                if await self._turn_stopped(run_id):
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    return None
+                await asyncio.wait({task}, timeout=0.2)
+            if await self._turn_stopped(run_id):
+                return None
+            return task.result()
+        except asyncio.CancelledError:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise
+
+    def _keep_stopped_stage(self, run_id: UUID, continuation: str | None) -> None:
+        note = (continuation or "").strip()
+        run = self.repository.get_run(run_id)
+        if note and not run.continuation:
+            self.repository.set_run_continuation(run_id, note)
+            run = self.repository.get_run(run_id)
+        if run.stop_requested and run.status not in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL}:
+            return
+        self.stop(run_id)
 
     def interrupt_bot(self, bot_id: UUID) -> None:
         """A new direct message takes priority over work already running for that Bot."""
@@ -260,7 +318,7 @@ class RunRuntime:
         if run.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL}:
             self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
         task = self._tasks.get(run_id)
-        if task and not task.done():
+        if task and not task.done() and task is not asyncio.current_task():
             task.cancel()
 
     def resume_after_approval(self, approval_id: UUID) -> None:

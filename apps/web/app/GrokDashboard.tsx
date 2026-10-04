@@ -41,6 +41,33 @@ function nameColor(name: string) {
   return nameColors[index];
 }
 
+function DesktopScreen({ url, title, frameName, onVisible }: { url: string; title: string; frameName: string; onVisible: () => void }) {
+  const formRef = useRef<HTMLFormElement>(null);
+  const loads = useRef(0);
+  const acceptAction = useMemo(() => {
+    try {
+      const accept = new URL("/accept-daytona-preview-warning", url);
+      accept.searchParams.set("redirect", url);
+      return accept.toString();
+    } catch {
+      return "";
+    }
+  }, [url]);
+  useEffect(() => {
+    loads.current = 0;
+    if (acceptAction) formRef.current?.submit();
+  }, [acceptAction]);
+  return (
+    <>
+      <form ref={formRef} method="POST" action={acceptAction} target={frameName} className="bandros-sr-only" />
+      <iframe name={frameName} title={title} src={url} onLoad={() => {
+        loads.current += 1;
+        if (loads.current >= 2) onVisible();
+      }} />
+    </>
+  );
+}
+
 const bandrosToppings = [
   { cake: "#f6c453", crust: "#e08a2c" },
   { cake: "#c6e38a", crust: "#6aaa4a" },
@@ -382,6 +409,12 @@ export default function GrokDashboard() {
   const [computerState, setComputerState] = useState<"off" | "on" | "unavailable">("off");
   const [screenUrl, setScreenUrl] = useState<string | null>(null);
   const [screenOpen, setScreenOpen] = useState(false);
+  const shownDesktop = useRef<string | null>(null);
+  const markDesktopVisible = () => {
+    if (!screenUrl || shownDesktop.current === screenUrl) return;
+    shownDesktop.current = screenUrl;
+    void request("/computer/shown", { method: "POST" }).catch(() => undefined);
+  };
   const [approvals, setApprovals] = useState<Array<{ id: string; tool_name: string; reason: string }>>([]);
   useEffect(() => {
     setMotionEnabled(window.localStorage.getItem("bandros_motion") !== "off");
@@ -1049,7 +1082,7 @@ export default function GrokDashboard() {
           {selectedGroup.members.map((member) => <button className="bandros-member" type="button" key={member.id} onClick={() => insertMention(member.name)}><BandrosAvatar name={member.name} working={typingPeople.includes(member.name)} />{member.name}</button>)}
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </> : <>
-          <div className={`bandros-screen${screenUrl ? " has-view" : ""}`}>{screenUrl ? <iframe title="Layar komputer kecil" src={screenUrl} /> : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
+          <div className={`bandros-screen${screenUrl ? " has-view" : ""}`}>{screenUrl ? <DesktopScreen url={screenUrl} title="Layar komputer kecil" frameName="bandros-screen" onVisible={markDesktopVisible} /> : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
           <p>{displayName}&apos;s screen</p>
           {screenUrl && <button className="bandros-computer-toggle" type="button" onClick={() => setScreenOpen(true)}>Buka layar</button>}
           <p>{computerState === "on" ? "Desktop aktif selama Bot menggunakannya dan akan diparkir setelah gilirannya selesai." : "Desktop hanya aktif saat Bot meminta bantuan komputer."}</p>
@@ -1084,7 +1117,7 @@ export default function GrokDashboard() {
             <strong>Bandros&apos;s screen</strong>
             <button type="button" aria-label="Tutup layar" onClick={() => setScreenOpen(false)}>×</button>
           </div>
-          <iframe title="Layar komputer" src={screenUrl} />
+          <DesktopScreen url={screenUrl} title="Layar komputer" frameName="bandros-screen-float" onVisible={markDesktopVisible} />
         </div>
       </div>}
       {deviceFlow && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Sign in with ChatGPT">

@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from .database import Database, database_revision, encode_snapshot, hold_snapshot, release_snapshot, stage_snapshot
+from .database import Database, database_revision, encode_snapshot, hold_snapshot, release_snapshot, snapshot_held, stage_snapshot
 from .computer import DaytonaComputer
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, ClawHubInstall, ClawHubListing, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
@@ -276,7 +276,7 @@ class SnapshotEnvelope:
         async def inner_receive():
             nonlocal sent
             if sent:
-                return {"type": "http.request", "body": b"", "more_body": False}
+                return await receive()
             sent = True
             return {"type": "http.request", "body": payload_body, "more_body": False}
 
@@ -405,6 +405,8 @@ async def optional_auth(request: Request, call_next):
             snapshot = request.headers.get("X-Bandros-Snapshot") or request.scope.get("state", {}).get("bandros_snapshot")
             with _STAGE_LOCK:
                 staged = False
+                if snapshot and not snapshot_held(database_path) and not database_path.is_file():
+                    Database(database_path, blob_path=tenant_locations(account_id, settings.database_path.parent, settings.workspace_root)[2]).pull()
                 if snapshot:
                     staged = stage_snapshot(database_path, snapshot)
                     if staged:
@@ -571,6 +573,15 @@ async def computer_start() -> dict[str, str | None]:
         status_code=409,
         detail="Desktop hanya diaktifkan saat Bot memanggil alat komputer.",
     )
+
+
+@app.post("/api/v1/computer/shown")
+async def computer_shown() -> dict[str, bool]:
+    computer = _account_computer()
+    mark = getattr(computer, "note_preview_shown", None)
+    if mark is not None:
+        mark()
+    return {"ok": True}
 
 
 @app.post("/api/v1/computer/stop")
@@ -1442,7 +1453,7 @@ async def regenerate(bot_id: UUID, payload: RegenerateInput | None = None) -> Ru
 
 
 @app.post("/api/v1/bots/{bot_id}/messages", response_model=Run, status_code=status.HTTP_202_ACCEPTED)
-async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
+async def send_message(bot_id: UUID, payload: MessageInput, request: Request) -> Run:
     try:
         bot = repository.get_bot(bot_id)
         if bot.status is not BotStatus.ACTIVE:
@@ -1466,16 +1477,20 @@ async def send_message(bot_id: UUID, payload: MessageInput) -> Run:
         prompt,
         _model_for_bot(bot, payload.model),
     )
-    run_id = runtime.queue_dm(bot_id, run.id, prompt)
-    if settings.await_runs:
-        task = runtime._burst_tasks.get(("dm", bot_id))
-        if task is not None:
-            try:
-                await task
-            except asyncio.CancelledError:
-                runtime.stop(run_id)
-                raise
-    return repository.get_run(run_id)
+    runtime._disconnect_probes[run.id] = request.is_disconnected
+    try:
+        run_id = runtime.queue_dm(bot_id, run.id, prompt)
+        if settings.await_runs:
+            task = runtime._burst_tasks.get(("dm", bot_id))
+            if task is not None:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    runtime.stop(run_id)
+                    raise
+        return repository.get_run(run_id)
+    finally:
+        runtime._disconnect_probes.pop(run.id, None)
 
 
 @app.get("/api/v1/runs/{run_id}", response_model=Run)

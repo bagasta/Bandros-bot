@@ -35,6 +35,22 @@ class ComputerError(RuntimeError):
     pass
 
 
+def _with_signed_token(url: str, token: str) -> str:
+    """Keep the signed preview path and token. A separate token is part of the host."""
+    if not token or token in url:
+        return url
+    parts = urlsplit(url)
+    hostname = parts.hostname or ""
+    if "-" not in hostname or "." not in hostname:
+        return url
+    port_label, domain = hostname.split("-", 1)
+    domain = domain.split(".", 1)[1] if "." in domain else domain
+    netloc = f"{port_label}-{token}.{domain}"
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 class DaytonaComputer:
     """Filesystem and shell on a 1 vCPU container with lazy desktop activation."""
 
@@ -62,6 +78,7 @@ class DaytonaComputer:
         self._sandbox_id: str | None = None
         self._account_lock = _account_lock(account_id)
         self._preview_seen = threading.Event()
+        self._signed_url: str | None = None
 
     def list_dir(self, relative: str) -> list[dict[str, str]]:
         remote = self._remote(relative)
@@ -128,14 +145,16 @@ class DaytonaComputer:
         sandbox = self._find()
         if sandbox is None or sandbox.get("state") != "started":
             return {"state": "off", "screen_url": None}
-        screen_url = self._preview_origin(str(sandbox["id"]))
-        if screen_url:
-            self._preview_seen.set()
-        return {"state": "on", "screen_url": screen_url}
+        return {"state": "on", "screen_url": self._signed_preview(str(sandbox["id"]))}
+
+    def note_preview_shown(self) -> None:
+        """The panel loaded the desktop itself, not merely a preview URL."""
+        self._preview_seen.set()
 
     def wake(self) -> dict[str, str | None]:
         """Start the small sandbox and its desktop. Caller must park it again."""
         self._preview_seen.clear()
+        self._signed_url = None
         with self._account_lock:
             sandbox = self._ensure()
             started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
@@ -151,7 +170,10 @@ class DaytonaComputer:
             return None
         return self._preview_origin(str(sandbox["id"]))
 
-    def _preview_origin(self, sandbox_id: str) -> str | None:
+    def _signed_preview(self, sandbox_id: str) -> str | None:
+        """Full signed preview URL, including path and token. Cached so the iframe does not reload."""
+        if self._signed_url:
+            return self._signed_url
         try:
             response = self._send(
                 "GET",
@@ -160,10 +182,19 @@ class DaytonaComputer:
             )
         except ComputerError:
             return None
-        url = response.json().get("url")
+        body = response.json()
+        url = body.get("url")
         if not url:
             return None
-        parts = urlsplit(str(url))
+        signed = _with_signed_token(str(url), str(body.get("token") or ""))
+        self._signed_url = signed
+        return signed
+
+    def _preview_origin(self, sandbox_id: str) -> str | None:
+        url = self._signed_preview(sandbox_id)
+        if not url:
+            return None
+        parts = urlsplit(url)
         return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
     def park_after_preview(self) -> None:
@@ -182,11 +213,10 @@ class DaytonaComputer:
                 visible_until = now + self.preview_grace_seconds
             if visible_until is not None and now >= visible_until:
                 return
-            if now >= deadline:
+            # A minted URL is not the desktop. Park at the deadline when it never opened.
+            if visible_until is None and now >= deadline:
                 return
-            remaining = deadline - now
-            if visible_until is not None:
-                remaining = min(remaining, visible_until - now)
+            remaining = (visible_until - now) if visible_until is not None else (deadline - now)
             self._sleep(min(0.2, max(remaining, 0)))
 
     def park(self) -> None:
@@ -196,6 +226,7 @@ class DaytonaComputer:
             if sandbox is None:
                 return
             self._park_sandbox(sandbox)
+            self._signed_url = None
 
     def _park_sandbox(self, sandbox: dict[str, Any]) -> None:
         sandbox_id = str(sandbox["id"])
@@ -290,9 +321,9 @@ class DaytonaComputer:
     def _wait_for_preview(self, sandbox_id: str) -> str:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            origin = self._preview_origin(sandbox_id)
-            if origin:
-                return origin
+            signed = self._signed_preview(sandbox_id)
+            if signed:
+                return signed
             self._sleep(0.4)
         raise ComputerError("desktop preview did not become ready")
 

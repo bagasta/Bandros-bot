@@ -221,6 +221,35 @@ class Repository:
         self.record_event(run_id, f"run.{status}", {"error": error} if error else {})
         return self.get_run(run_id)
 
+    def commit_assistant_turn(self, run_id: UUID, content: str, model: str | None) -> bool:
+        """Save the reply only while this run is still the active one."""
+        message_id, timestamp = uuid4(), now()
+        with self.database.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT conversation_id, stop_requested, status FROM runs WHERE id = ?", (str(run_id),)).fetchone()
+            if row is None or row["stop_requested"] or row["status"] != RunStatus.RUNNING:
+                return False
+            db.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, model, usage, attachments, citations, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(message_id),
+                    row["conversation_id"],
+                    "assistant",
+                    content,
+                    model,
+                    "{}",
+                    "[]",
+                    "[]",
+                    dump_time(timestamp),
+                ),
+            )
+            db.execute(
+                "UPDATE runs SET status = ?, completed_at = ? WHERE id = ? AND stop_requested = 0 AND status = ?",
+                (RunStatus.COMPLETED, dump_time(timestamp), str(run_id), RunStatus.RUNNING),
+            )
+        self.record_event(run_id, "run.completed", {})
+        return True
+
     def request_stop(self, run_id: UUID) -> Run:
         with self.database.connection() as db:
             result = db.execute("UPDATE runs SET stop_requested = 1 WHERE id = ?", (str(run_id),))
