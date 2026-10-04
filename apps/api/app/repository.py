@@ -6,7 +6,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from .database import Database
-from .domain import Approval, ApprovalStatus, Bot, BotStatus, GroupMessage, Handoff, Job, Memory, Message, Run, RunEvent, RunStatus, Skill, WorkGroup
+from .domain import Approval, ApprovalStatus, Bot, BotStatus, GroupMessage, Handoff, Job, Memory, Message, Plugin, Run, RunEvent, RunStatus, Skill, WorkGroup
+from .orchestrator import ORCHESTRATOR_NAME
 
 
 def now() -> datetime:
@@ -38,7 +39,8 @@ class Repository:
     def list_bots(self) -> list[Bot]:
         with self.database.connection() as db:
             rows = db.execute("SELECT * FROM bots ORDER BY created_at DESC").fetchall()
-        return [self._bot(row) for row in rows]
+        bots = [self._bot(row) for row in rows]
+        return sorted(bots, key=lambda bot: bot.name.lower() != ORCHESTRATOR_NAME.lower())
 
     def get_bot(self, bot_id: UUID) -> Bot:
         with self.database.connection() as db:
@@ -48,7 +50,11 @@ class Repository:
         return self._bot(row)
 
     def update_bot(self, bot_id: UUID, fields: dict[str, Any]) -> Bot:
-        accepted = {key: value for key, value in fields.items() if value is not None}
+        accepted = {
+            key: value
+            for key, value in fields.items()
+            if value is not None or key == "model"
+        }
         if not accepted:
             return self.get_bot(bot_id)
         accepted["updated_at"] = dump_time(now())
@@ -60,6 +66,34 @@ class Repository:
         if result.rowcount != 1:
             raise KeyError("bot not found")
         return self.get_bot(bot_id)
+
+    def delete_bot(self, bot_id: UUID) -> None:
+        self.get_bot(bot_id)
+        bot = str(bot_id)
+        with self.database.connection() as db:
+            run_ids = [row["id"] for row in db.execute("SELECT id FROM runs WHERE bot_id = ?", (bot,)).fetchall()]
+            conversation_ids = [row["id"] for row in db.execute("SELECT id FROM conversations WHERE bot_id = ?", (bot,)).fetchall()]
+            if run_ids:
+                marks = ",".join("?" * len(run_ids))
+                db.execute(f"DELETE FROM tool_calls WHERE run_id IN ({marks})", run_ids)
+                db.execute(f"DELETE FROM run_events WHERE run_id IN ({marks})", run_ids)
+                db.execute(f"DELETE FROM approvals WHERE run_id IN ({marks})", run_ids)
+                db.execute(f"DELETE FROM group_run_links WHERE run_id IN ({marks})", run_ids)
+                db.execute(
+                    f"DELETE FROM handoffs WHERE parent_run_id IN ({marks}) OR child_run_id IN ({marks})",
+                    [*run_ids, *run_ids],
+                )
+            db.execute("DELETE FROM handoffs WHERE source_bot_id = ? OR target_bot_id = ?", (bot, bot))
+            db.execute("UPDATE jobs SET assignee_bot_id = NULL WHERE assignee_bot_id = ?", (bot,))
+            db.execute("UPDATE jobs SET created_by_bot_id = NULL WHERE created_by_bot_id = ?", (bot,))
+            db.execute("UPDATE group_messages SET sender_bot_id = NULL WHERE sender_bot_id = ?", (bot,))
+            db.execute("DELETE FROM memories WHERE bot_id = ?", (bot,))
+            db.execute("DELETE FROM runs WHERE bot_id = ?", (bot,))
+            if conversation_ids:
+                marks = ",".join("?" * len(conversation_ids))
+                db.execute(f"DELETE FROM messages WHERE conversation_id IN ({marks})", conversation_ids)
+            db.execute("DELETE FROM conversations WHERE bot_id = ?", (bot,))
+            db.execute("DELETE FROM bots WHERE id = ?", (bot,))
 
     def set_bot_status(self, bot_id: UUID, status: BotStatus) -> Bot:
         return self.update_bot(bot_id, {"status": status})
@@ -136,11 +170,31 @@ class Repository:
         run_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
             db.execute(
-                "INSERT INTO runs (id, bot_id, conversation_id, status, prompt, model, error, usage, stop_requested, created_at, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(run_id), str(bot_id), str(conversation_id), RunStatus.QUEUED, prompt, model, None, "{}", 0, dump_time(timestamp), None, None),
+                "INSERT INTO runs (id, bot_id, conversation_id, status, prompt, model, error, continuation, usage, stop_requested, created_at, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(run_id), str(bot_id), str(conversation_id), RunStatus.QUEUED, prompt, model, None, None, "{}", 0, dump_time(timestamp), None, None),
             )
         self.record_event(run_id, "run.queued", {"model": model})
         return self.get_run(run_id)
+
+    def set_run_prompt(self, run_id: UUID, prompt: str) -> None:
+        with self.database.connection() as db:
+            db.execute("UPDATE runs SET prompt = ? WHERE id = ?", (prompt, str(run_id)))
+
+    def set_run_continuation(self, run_id: UUID, continuation: str) -> None:
+        with self.database.connection() as db:
+            db.execute("UPDATE runs SET continuation = ? WHERE id = ?", (continuation[:2_000], str(run_id)))
+
+    def latest_interrupted_run(self, bot_id: UUID) -> Run | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                """
+                SELECT * FROM runs
+                WHERE bot_id = ? AND status = ? AND continuation IS NOT NULL AND continuation != ''
+                ORDER BY completed_at DESC, created_at DESC LIMIT 1
+                """,
+                (str(bot_id), RunStatus.CANCELLED),
+            ).fetchone()
+        return self._run(row) if row else None
 
     def get_run(self, run_id: UUID) -> Run:
         with self.database.connection() as db:
@@ -167,6 +221,35 @@ class Repository:
         self.record_event(run_id, f"run.{status}", {"error": error} if error else {})
         return self.get_run(run_id)
 
+    def commit_assistant_turn(self, run_id: UUID, content: str, model: str | None) -> bool:
+        """Save the reply only while this run is still the active one."""
+        message_id, timestamp = uuid4(), now()
+        with self.database.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT conversation_id, stop_requested, status FROM runs WHERE id = ?", (str(run_id),)).fetchone()
+            if row is None or row["stop_requested"] or row["status"] != RunStatus.RUNNING:
+                return False
+            db.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, model, usage, attachments, citations, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(message_id),
+                    row["conversation_id"],
+                    "assistant",
+                    content,
+                    model,
+                    "{}",
+                    "[]",
+                    "[]",
+                    dump_time(timestamp),
+                ),
+            )
+            db.execute(
+                "UPDATE runs SET status = ?, completed_at = ? WHERE id = ? AND stop_requested = 0 AND status = ?",
+                (RunStatus.COMPLETED, dump_time(timestamp), str(run_id), RunStatus.RUNNING),
+            )
+        self.record_event(run_id, "run.completed", {})
+        return True
+
     def request_stop(self, run_id: UUID) -> Run:
         with self.database.connection() as db:
             result = db.execute("UPDATE runs SET stop_requested = 1 WHERE id = ?", (str(run_id),))
@@ -187,6 +270,27 @@ class Repository:
                 (RunStatus.QUEUED, RunStatus.FAILED_RETRYABLE),
             ).fetchall()
         return [UUID(row["id"]) for row in rows]
+
+    def fail_orphaned_runs(self) -> int:
+        """Close runs whose server process is gone so the chat can show a reply instead of typing forever."""
+        notice = "Balasan terputus. Kirim ulang pesan."
+        with self.database.connection() as db:
+            rows = db.execute(
+                "SELECT id, conversation_id FROM runs WHERE status IN (?, ?)",
+                (RunStatus.QUEUED, RunStatus.RUNNING),
+            ).fetchall()
+        for row in rows:
+            self.append_message(UUID(row["conversation_id"]), "assistant", notice)
+            self.update_run(UUID(row["id"]), RunStatus.FAILED, notice)
+        return len(rows)
+
+    def latest_run_for_bot(self, bot_id: UUID) -> Run | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                "SELECT * FROM runs WHERE bot_id = ? ORDER BY created_at DESC LIMIT 1",
+                (str(bot_id),),
+            ).fetchone()
+        return self._run(row) if row else None
 
     def record_event(self, run_id: UUID, type_: str, payload: dict[str, Any]) -> RunEvent:
         timestamp = now()
@@ -269,6 +373,7 @@ class Repository:
         self,
         client_id: str,
         host_id: str,
+        preferred_model: str | None,
         access_token: str,
         refresh_token: str | None,
         id_token: str | None,
@@ -282,11 +387,12 @@ class Repository:
             db.execute(
                 """
                 INSERT INTO chatgpt_oauth
-                    (id, client_id, host_id, subject, email, access_token, refresh_token, id_token, expires_at, scope, created_at, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, client_id, host_id, preferred_model, subject, email, access_token, refresh_token, id_token, expires_at, scope, created_at, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     client_id = excluded.client_id,
                     host_id = excluded.host_id,
+                    preferred_model = excluded.preferred_model,
                     subject = excluded.subject,
                     email = excluded.email,
                     access_token = excluded.access_token,
@@ -296,8 +402,34 @@ class Repository:
                     scope = excluded.scope,
                     updated_at = excluded.updated_at
                 """,
-                (client_id, host_id, subject, email, access_token, refresh_token, id_token, dump_time(expires_at), scope, timestamp, timestamp),
+                (client_id, host_id, preferred_model, subject, email, access_token, refresh_token, id_token, dump_time(expires_at), scope, timestamp, timestamp),
             )
+
+    def create_oauth_transaction(
+        self,
+        state: str,
+        code_verifier: str,
+        nonce: str,
+        client_id: str,
+        host_id: str,
+        expires_at: datetime,
+    ) -> None:
+        with self.database.connection() as db:
+            db.execute("DELETE FROM oauth_transactions WHERE expires_at < ?", (dump_time(now()),))
+            db.execute(
+                "INSERT INTO oauth_transactions VALUES (?, ?, ?, ?, ?, ?)",
+                (state, code_verifier, nonce, client_id, host_id, dump_time(expires_at)),
+            )
+
+    def consume_oauth_transaction(self, state: str) -> dict[str, Any] | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                "SELECT * FROM oauth_transactions WHERE state = ?", (state,)
+            ).fetchone()
+            db.execute("DELETE FROM oauth_transactions WHERE state = ?", (state,))
+        if not row or load_time(row["expires_at"]) < now():
+            return None
+        return dict(row)
 
     def update_chatgpt_tokens(
         self,
@@ -335,6 +467,24 @@ class Repository:
         with self.database.connection() as db:
             rows = db.execute("SELECT * FROM skills WHERE enabled = 1 ORDER BY name").fetchall()
         return [self._skill(row) for row in rows]
+
+    def upsert_skill(self, name: str, description: str, content: str) -> Skill:
+        timestamp = now()
+        with self.database.connection() as db:
+            row = db.execute("SELECT id FROM skills WHERE name = ?", (name,)).fetchone()
+            if row is None:
+                skill_id = uuid4()
+                db.execute(
+                    "INSERT INTO skills VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (str(skill_id), name, description, content, 1, dump_time(timestamp), dump_time(timestamp)),
+                )
+            else:
+                skill_id = UUID(row["id"])
+                db.execute(
+                    "UPDATE skills SET description = ?, content = ?, enabled = 1, updated_at = ? WHERE id = ?",
+                    (description, content, dump_time(timestamp), str(skill_id)),
+                )
+        return self.get_skill(skill_id)
 
     def get_skill(self, skill_id: UUID) -> Skill:
         with self.database.connection() as db:
@@ -432,12 +582,95 @@ class Repository:
         with self.database.connection() as db:
             db.execute("INSERT OR IGNORE INTO group_members VALUES (?, ?)", (str(group_id), str(bot_id)))
 
+    def remove_group_member(self, group_id: UUID, bot_id: UUID) -> None:
+        self.get_group(group_id)
+        with self.database.connection() as db:
+            db.execute("DELETE FROM group_members WHERE group_id = ? AND bot_id = ?", (str(group_id), str(bot_id)))
+
     def append_group_message(self, group_id: UUID, sender_type: str, content: str, sender_bot_id: UUID | None = None) -> GroupMessage:
         self.get_group(group_id)
         message_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
             db.execute("INSERT INTO group_messages VALUES (?, ?, ?, ?, ?, ?)", (str(message_id), str(group_id), sender_type, str(sender_bot_id) if sender_bot_id else None, content, dump_time(timestamp)))
         return GroupMessage(id=message_id, group_id=group_id, sender_type=sender_type, sender_bot_id=sender_bot_id, content=content, created_at=timestamp)
+
+    def drop_copied_group_context(self) -> None:
+        """Remove private copies of group lines. They made every later request carry a huge snapshot."""
+        with self.database.connection() as db:
+            found = db.execute(
+                "SELECT 1 FROM messages WHERE role = 'group' AND content LIKE '[Grup %' LIMIT 1"
+            ).fetchone()
+        if found is None:
+            return
+        with self.database.connection() as db:
+            db.execute("DELETE FROM messages WHERE role = 'group' AND content LIKE '[Grup %'")
+
+    def enqueue_group_speaker(
+        self,
+        group_id: UUID,
+        bot_id: UUID,
+        content: str,
+        sender_bot_id: UUID | None,
+        depth: int,
+    ) -> bool:
+        """Queue one bot to speak. The same bot is not queued twice for this group."""
+        with self.database.connection() as db:
+            existing = db.execute(
+                "SELECT 1 FROM group_queue WHERE group_id = ? AND bot_id = ?",
+                (str(group_id), str(bot_id)),
+            ).fetchone()
+            if existing is not None:
+                return False
+            count = db.execute("SELECT COUNT(*) AS n FROM group_queue WHERE group_id = ?", (str(group_id),)).fetchone()
+            if count is not None and int(count["n"]) >= 12:
+                return False
+            db.execute(
+                "INSERT INTO group_queue (group_id, bot_id, content, sender_bot_id, depth, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(group_id), str(bot_id), content, str(sender_bot_id) if sender_bot_id else None, depth, dump_time(now())),
+            )
+        return True
+
+    def peek_group_speaker(self, group_id: UUID) -> tuple[int, UUID, str, UUID | None, int] | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                "SELECT * FROM group_queue WHERE group_id = ? ORDER BY id LIMIT 1",
+                (str(group_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return (
+            int(row["id"]),
+            UUID(row["bot_id"]),
+            row["content"],
+            UUID(row["sender_bot_id"]) if row["sender_bot_id"] else None,
+            int(row["depth"]),
+        )
+
+    def drop_group_speaker(self, turn_id: int) -> None:
+        with self.database.connection() as db:
+            db.execute("DELETE FROM group_queue WHERE id = ?", (turn_id,))
+
+    def clear_group_queue(self, group_id: UUID) -> None:
+        with self.database.connection() as db:
+            db.execute("DELETE FROM group_queue WHERE group_id = ?", (str(group_id),))
+
+    def group_queue_size(self, group_id: UUID) -> int:
+        with self.database.connection() as db:
+            row = db.execute("SELECT COUNT(*) AS n FROM group_queue WHERE group_id = ?", (str(group_id),)).fetchone()
+        return int(row["n"]) if row else 0
+
+    def queued_bot_ids(self, group_id: UUID) -> list[UUID]:
+        with self.database.connection() as db:
+            rows = db.execute(
+                "SELECT bot_id FROM group_queue WHERE group_id = ? ORDER BY id",
+                (str(group_id),),
+            ).fetchall()
+        return [UUID(row["bot_id"]) for row in rows]
+
+    def pending_group_ids(self) -> list[UUID]:
+        with self.database.connection() as db:
+            rows = db.execute("SELECT DISTINCT group_id FROM group_queue ORDER BY id").fetchall()
+        return [UUID(row["group_id"]) for row in rows]
 
     def list_group_messages(self, group_id: UUID) -> list[GroupMessage]:
         self.get_group(group_id)
@@ -454,6 +687,14 @@ class Repository:
             row = db.execute("SELECT group_id FROM group_run_links WHERE run_id = ?", (str(run_id),)).fetchone()
         return UUID(row["group_id"]) if row else None
 
+    def active_runs_for_bot(self, bot_id: UUID) -> list[Run]:
+        with self.database.connection() as db:
+            rows = db.execute(
+                "SELECT * FROM runs WHERE bot_id = ? AND status IN (?, ?)",
+                (str(bot_id), RunStatus.QUEUED, RunStatus.RUNNING),
+            ).fetchall()
+        return [self._run(row) for row in rows]
+
     def runs_for_group(self, group_id: UUID) -> list[Run]:
         with self.database.connection() as db:
             rows = db.execute(
@@ -461,6 +702,21 @@ class Repository:
                 (str(group_id), RunStatus.QUEUED, RunStatus.RUNNING),
             ).fetchall()
         return [self._run(row) for row in rows]
+
+    def latest_interrupted_run_for_group(self, group_id: UUID, bot_id: UUID) -> Run | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                """
+                SELECT runs.* FROM runs
+                JOIN group_run_links ON group_run_links.run_id = runs.id
+                WHERE group_run_links.group_id = ? AND runs.bot_id = ?
+                  AND runs.status = ? AND runs.continuation IS NOT NULL
+                  AND runs.continuation != ''
+                ORDER BY runs.completed_at DESC, runs.created_at DESC LIMIT 1
+                """,
+                (str(group_id), str(bot_id), RunStatus.CANCELLED),
+            ).fetchone()
+        return self._run(row) if row else None
 
     def create_handoff(self, source_bot_id: UUID, target_bot_id: UUID, task: str, parent_run_id: UUID | None) -> Handoff:
         if source_bot_id == target_bot_id:
@@ -518,8 +774,47 @@ class Repository:
     def _group(self, row: Any) -> WorkGroup:
         group_id = UUID(row["id"])
         with self.database.connection() as db:
-            member_rows = db.execute("SELECT bots.* FROM bots JOIN group_members ON group_members.bot_id = bots.id WHERE group_members.group_id = ? ORDER BY bots.name", (str(group_id),)).fetchall()
+            member_rows = db.execute("SELECT bots.* FROM bots JOIN group_members ON group_members.bot_id = bots.id WHERE group_members.group_id = ? ORDER BY group_members.rowid", (str(group_id),)).fetchall()
         return WorkGroup(id=group_id, name=row["name"], description=row["description"], members=[self._bot(member) for member in member_rows], created_at=load_time(row["created_at"]))
+
+    def list_plugins(self) -> list[Plugin]:
+        with self.database.connection() as db:
+            rows = db.execute("SELECT * FROM plugins ORDER BY created_at").fetchall()
+        return [self._plugin(row) for row in rows]
+
+    def get_plugin(self, plugin_id: UUID) -> Plugin:
+        with self.database.connection() as db:
+            row = db.execute("SELECT * FROM plugins WHERE id = ?", (str(plugin_id),)).fetchone()
+        if row is None:
+            raise KeyError("plugin not found")
+        return self._plugin(row)
+
+    def get_plugin_by_name(self, name: str) -> tuple[Plugin, str | None]:
+        with self.database.connection() as db:
+            row = db.execute("SELECT * FROM plugins WHERE lower(name) = lower(?)", (name.strip(),)).fetchone()
+        if row is None:
+            raise KeyError("plugin not found")
+        return self._plugin(row), row["token"]
+
+    def create_plugin(self, name: str, url: str, token: str | None, tools: list[dict[str, str]]) -> Plugin:
+        plugin_id, timestamp = uuid4(), now()
+        description = ", ".join(tool["name"] for tool in tools[:8])
+        with self.database.connection() as db:
+            db.execute(
+                "INSERT INTO plugins (id, name, url, description, token, tools_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(plugin_id), name.strip(), url.strip(), description, token or None, json.dumps(tools), dump_time(timestamp)),
+            )
+        return self.get_plugin(plugin_id)
+
+    def delete_plugin(self, plugin_id: UUID) -> None:
+        self.get_plugin(plugin_id)
+        with self.database.connection() as db:
+            db.execute("DELETE FROM plugins WHERE id = ?", (str(plugin_id),))
+
+    def _plugin(self, row: Any) -> Plugin:
+        tools = json.loads(row["tools_json"] or "[]")
+        names = [str(tool.get("name")) for tool in tools if isinstance(tool, dict) and tool.get("name")]
+        return Plugin(id=UUID(row["id"]), name=row["name"], url=row["url"], description=row["description"], tools=names, created_at=load_time(row["created_at"]))
 
     def _handoff(self, row: Any) -> Handoff:
         return Handoff(id=UUID(row["id"]), source_bot_id=UUID(row["source_bot_id"]), target_bot_id=UUID(row["target_bot_id"]), parent_run_id=UUID(row["parent_run_id"]) if row["parent_run_id"] else None, child_run_id=UUID(row["child_run_id"]) if row["child_run_id"] else None, task=row["task"], status=row["status"], result=row["result"], created_at=load_time(row["created_at"]), completed_at=load_time(row["completed_at"]))
@@ -548,6 +843,7 @@ class Repository:
             error=row["error"],
             usage=json.loads(row["usage"] or "{}"),
             stop_requested=bool(row["stop_requested"]),
+            continuation=row["continuation"] if "continuation" in row.keys() else None,
             created_at=load_time(row["created_at"]),
             started_at=load_time(row["started_at"]),
             completed_at=load_time(row["completed_at"]),

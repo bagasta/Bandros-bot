@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -13,7 +14,7 @@ from apps.api.app.workspace_tools import WorkspaceToolset
 
 
 class FakeGateway:
-    async def complete(self, *, system: str, prompt: str, model: str, tools=()) -> str:
+    async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
         return f"completed: {prompt}"
 
 
@@ -31,14 +32,43 @@ def test_run_completes_and_persists_message(tmp_path: Path) -> None:
     runtime = RunRuntime(repository, FakeGateway(), "test-model", 1)
 
     async def execute() -> None:
-        runtime.start(run.id)
-        await asyncio.sleep(0.02)
+        await runtime.start_and_wait(run.id)
 
     asyncio.run(execute())
 
     completed = repository.get_run(run.id)
     assert completed.status is RunStatus.COMPLETED
     assert repository.list_messages(conversation_id)[0].content == "completed: Check project health"
+
+
+def test_run_prompt_includes_skill_and_shared_computer(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "product.db")
+    bot = repository.create_bot("Research", "Riset sumber.", "Cek sumber terkini.", None)
+    skill = repository.create_skill("research", "Riset", "Buka sumber, lalu simpan ringkasan di workspace.")
+    repository.assign_skill(bot.id, skill.id)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    run = repository.create_run(bot.id, conversation_id, "Rangkum risiko", "test-model")
+    captured: dict[str, str] = {}
+
+    class CaptureGateway(FakeGateway):
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+            captured["system"] = system
+            captured["tools"] = ",".join(tool.name for tool in tools)
+            captured["request_limit"] = str(request_limit)
+            return "selesai"
+
+    runtime = RunRuntime(repository, CaptureGateway(), "test-model", 3)
+    asyncio.run(runtime.start_and_wait(run.id))
+
+    assert "shared computer" in captured["system"]
+    assert "private conversation" in captured["system"]
+    assert "call the computer tools" in captured["system"]
+    assert "Desktop computer use is off" not in captured["system"]
+    assert "This run is the group conversation" not in captured["system"]
+    assert "Buka sumber" in captured["system"]
+    assert captured["request_limit"] == "3"
+    assert "save_memory" in captured["tools"]
+    assert "write_workspace_file" in captured["tools"]
 
 
 def test_protected_action_requires_a_durable_approval(tmp_path: Path) -> None:
@@ -67,7 +97,7 @@ def test_every_agent_has_orchestration_tools(tmp_path: Path) -> None:
     run = repository.create_run(manager.id, repository.conversation_for_bot(manager.id), "Organize team", "test-model")
 
     worker_tools = WorkspaceToolset(repository, run.id, worker.id, lambda _: None)
-    assert {"handoff_to_bot", "post_to_group", "create_job"} <= {
+    assert {"handoff_to_bot", "post_to_group", "create_job", "create_bot", "create_group", "list_bots", "archive_bot", "restore_bot"} <= {
         tool.name for tool in worker_tools.definitions()
     }
 
@@ -121,7 +151,7 @@ def test_stop_marks_run_cancelled(tmp_path: Path) -> None:
     bot = repository.create_bot("Worker", "", "", None)
     run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Stop", "test-model")
     class SlowGateway(FakeGateway):
-        async def complete(self, *, system: str, prompt: str, model: str, tools=()) -> str:
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
             await asyncio.sleep(0.1)
             return "completed"
 
@@ -135,6 +165,42 @@ def test_stop_marks_run_cancelled(tmp_path: Path) -> None:
     asyncio.run(execute())
     assert repository.get_run(run.id).status is RunStatus.CANCELLED
     assert repository.list_events(run.id)[-1].type == "run.cancelled"
+
+
+def test_interrupted_direct_message_gets_a_fresh_run(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "replacement.db")
+    bot = repository.create_bot("Worker", "", "", None)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    first = repository.create_run(bot.id, conversation_id, "first task", "test-model")
+    started = asyncio.Event()
+
+    class ReplacementGateway(FakeGateway):
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+            started.set()
+            if "stop" in prompt.lower():
+                return f"completed: {prompt}"
+            await asyncio.sleep(10)
+            return f"completed: {prompt}"
+
+    runtime = RunRuntime(repository, ReplacementGateway(), "test-model", 1)
+
+    async def execute() -> None:
+        runtime.queue_dm(bot.id, first.id, first.prompt)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        runtime.interrupt_bot(bot.id)
+        repository.append_message(conversation_id, "user", "stop")
+        second = repository.create_run(bot.id, conversation_id, "stop", "test-model")
+        runtime.queue_dm(bot.id, second.id, second.prompt)
+        task = runtime._burst_tasks[("dm", bot.id)]
+        await asyncio.wait_for(task, timeout=1)
+        assert repository.get_run(first.id).status is RunStatus.CANCELLED
+        assert repository.get_run(second.id).status is RunStatus.COMPLETED
+
+    asyncio.run(execute())
+    assert [message.content for message in repository.list_messages(conversation_id)] == [
+        "stop",
+        "completed: stop",
+    ]
 
 
 def test_bot_workspace_tools_persist_files_and_memory(tmp_path: Path) -> None:
@@ -166,3 +232,21 @@ def test_bot_workspace_tools_reject_path_escape(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert "inside" in result["error"]
+
+
+def test_oauth_transaction_is_persistent_and_one_time(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "oauth.db")
+    repository.create_oauth_transaction(
+        "state",
+        "verifier",
+        "nonce",
+        "oaiapp_test",
+        "urn:uuid:test",
+        datetime.now(UTC) + timedelta(minutes=10),
+    )
+
+    transaction = repository.consume_oauth_transaction("state")
+
+    assert transaction is not None
+    assert transaction["code_verifier"] == "verifier"
+    assert repository.consume_oauth_transaction("state") is None

@@ -1,0 +1,64 @@
+from pathlib import Path
+
+from apps.api.app.database import Database
+from apps.api.app.main import ensure_latest_codex_models, listed_codex_models
+from apps.api.app.repository import Repository
+
+
+def test_listed_codex_models_keeps_picker_models_in_priority_order() -> None:
+    models = listed_codex_models(
+        {
+            "models": [
+                {"slug": "gpt-hidden", "display_name": "Hidden", "visibility": "hide", "priority": 0},
+                {"slug": "gpt-api-off", "display_name": "Off", "visibility": "list", "supported_in_api": False, "priority": 0},
+                {"slug": "gpt-5.4", "display_name": "GPT-5.4", "visibility": "list", "supported_in_api": True, "priority": 20},
+                {"slug": "gpt-5.3-codex", "display_name": "GPT-5.3 Codex", "visibility": "list", "supported_in_api": True, "priority": 1},
+                {"display_name": "Missing slug", "visibility": "list"},
+            ]
+        }
+    )
+
+    assert models == [
+        {"id": "gpt-5.3-codex", "display_name": "GPT-5.3 Codex"},
+        {"id": "gpt-5.4", "display_name": "GPT-5.4"},
+    ]
+
+
+def test_listed_codex_models_falls_back_when_nothing_is_marked_visible() -> None:
+    models = listed_codex_models(
+        {"models": [{"slug": "gpt-5.4", "display_name": "GPT-5.4", "visibility": "hide", "supported_in_api": True}]}
+    )
+
+    assert models == [{"id": "gpt-5.4", "display_name": "GPT-5.4"}]
+
+
+def test_gpt6_luna_is_offered_even_when_the_catalog_omits_it() -> None:
+    models = ensure_latest_codex_models(
+        listed_codex_models(
+            {"models": [{"slug": "gpt-5.3-codex", "display_name": "GPT-5.3 Codex", "visibility": "list", "supported_in_api": True}]}
+        )
+    )
+
+    assert models[0] == {"id": "gpt-6-luna", "display_name": "GPT-6 Luna"}
+    assert [item["id"] for item in models].count("gpt-6-luna") == 1
+
+
+def test_gpt6_luna_from_the_catalog_is_not_duplicated() -> None:
+    models = ensure_latest_codex_models(
+        listed_codex_models(
+            {"models": [{"slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list", "supported_in_api": True, "priority": 1}]}
+        )
+    )
+
+    assert models == [{"id": "gpt-6-luna", "display_name": "GPT-6 Luna"}]
+
+
+def test_bot_model_can_return_to_automatic(tmp_path: Path) -> None:
+    database = Database(tmp_path / "product.db")
+    database.initialize()
+    repository = Repository(database)
+    bot = repository.create_bot("Research", "", "", "chatgpt/gpt-5.4")
+
+    cleared = repository.update_bot(bot.id, {"model": None})
+
+    assert cleared.model is None

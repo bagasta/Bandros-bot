@@ -93,6 +93,7 @@ class Run(APIModel):
     prompt: str
     model: str
     error: str | None
+    continuation: str | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     stop_requested: bool = False
     created_at: datetime
@@ -213,6 +214,22 @@ class WorkGroup(APIModel):
     created_at: datetime
 
 
+class GroupMemberInput(APIModel):
+    bot_id: UUID
+
+
+class GroupActivity(APIModel):
+    bot_id: UUID
+    name: str
+    status: str
+
+
+class BotActivity(APIModel):
+    working: bool
+    error: str | None = None
+    approvals: list[Approval] = Field(default_factory=list)
+
+
 class GroupMessageInput(APIModel):
     content: str = Field(min_length=1, max_length=50_000)
 
@@ -224,6 +241,39 @@ class GroupMessage(APIModel):
     sender_bot_id: UUID | None
     content: str
     created_at: datetime
+
+
+class PluginInput(APIModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=8, max_length=500)
+    token: str | None = Field(default=None, max_length=2_000)
+
+
+class Plugin(APIModel):
+    id: UUID
+    name: str
+    url: str
+    description: str
+    tools: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+class ClawHubQuery(APIModel):
+    q: str = Field(min_length=1, max_length=120)
+
+
+class ClawHubListing(APIModel):
+    slug: str
+    owner_handle: str
+    name: str
+    summary: str
+    url: str
+
+
+class ClawHubInstall(APIModel):
+    slug: str = Field(min_length=1, max_length=120)
+    owner_handle: str = Field(min_length=1, max_length=80)
+    bot_id: UUID | None = None
 
 
 class HandoffInput(APIModel):

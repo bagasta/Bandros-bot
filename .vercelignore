@@ -1,0 +1,11 @@
+**/*.pyc
+**/__pycache__
+**/.pytest_cache
+.git
+.venv
+data
+node_modules
+.next
+apps/web
+tests
+*.md
