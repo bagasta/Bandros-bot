@@ -215,18 +215,26 @@ class Repository:
         status: RunStatus,
         error: str | None = None,
         usage: dict[str, Any] | None = None,
-    ) -> Run:
+        *,
+        expect: RunStatus | set[RunStatus],
+    ) -> bool:
+        """Move a run only while it still has one of the expected statuses."""
+        allowed = (expect,) if isinstance(expect, RunStatus) else tuple(expect)
         timestamp = now()
         started_at = dump_time(timestamp) if status is RunStatus.RUNNING else None
         completed_at = dump_time(timestamp) if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED} else None
         heartbeat_at = dump_time(timestamp) if status is RunStatus.RUNNING else None
+        placeholders = ", ".join("?" for _ in allowed)
         with self.database.connection() as db:
-            db.execute(
-                "UPDATE runs SET status = ?, error = COALESCE(?, error), usage = COALESCE(?, usage), started_at = COALESCE(?, started_at), completed_at = COALESCE(?, completed_at), heartbeat_at = COALESCE(?, heartbeat_at) WHERE id = ?",
-                (status, error, json.dumps(usage) if usage is not None else None, started_at, completed_at, heartbeat_at, str(run_id)),
+            result = db.execute(
+                f"UPDATE runs SET status = ?, error = COALESCE(?, error), usage = COALESCE(?, usage), started_at = COALESCE(?, started_at), completed_at = COALESCE(?, completed_at), heartbeat_at = COALESCE(?, heartbeat_at) WHERE id = ? AND status IN ({placeholders})",
+                (status, error, json.dumps(usage) if usage is not None else None, started_at, completed_at, heartbeat_at, str(run_id), *allowed),
             )
+            changed = result.rowcount == 1
+        if not changed:
+            return False
         self.record_event(run_id, f"run.{status}", {"error": error} if error else {})
-        return self.get_run(run_id)
+        return True
 
     def commit_assistant_turn(self, run_id: UUID, content: str, model: str | None) -> bool:
         """Save the reply only while this run is still the active one."""
@@ -287,17 +295,17 @@ class Repository:
         return [UUID(row["id"]) for row in rows]
 
     def fail_orphaned_runs(self, *, skip: set[UUID] | None = None) -> int:
-        """Close queued or running work whose shared lease has expired.
+        """Close running work whose shared lease has expired.
 
-        A fresh heartbeat means some instance is still in the run. Another
-        process must not report that work as interrupted.
+        Queued work can sit until another instance starts it. A fresh heartbeat
+        means some instance is still inside a running turn, including tool calls.
         """
         protected = skip or set()
         cutoff = now() - RUN_LEASE
         with self.database.connection() as db:
             rows = db.execute(
-                "SELECT * FROM runs WHERE status IN (?, ?)",
-                (RunStatus.QUEUED, RunStatus.RUNNING),
+                "SELECT * FROM runs WHERE status = ?",
+                (RunStatus.RUNNING,),
             ).fetchall()
         closed = 0
         for row in rows:
@@ -311,26 +319,34 @@ class Repository:
         return closed
 
     def close_orphaned_run(self, run_id: UUID) -> bool:
-        """Mark one dead run failed and leave a visible reply. No-op if it already moved on."""
-        run = self.get_run(run_id)
-        if run.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
+        """Mark one dead run failed and leave a single visible reply.
+
+        The status change is claimed first, so a second instance or a late
+        finish cannot append another interrupt or put the run back.
+        """
+        if not self.update_run(
+            run_id,
+            RunStatus.FAILED,
+            ORPHAN_NOTICE,
+            expect={RunStatus.QUEUED, RunStatus.RUNNING},
+        ):
             return False
+        run = self.get_run(run_id)
         self.append_message(run.conversation_id, "assistant", ORPHAN_NOTICE)
         group_id = self.group_for_run(run_id)
         if group_id is not None:
             self.append_group_message(group_id, "bot", ORPHAN_NOTICE, run.bot_id)
-        current = self.get_run(run_id)
-        if current.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
-            return False
-        self.update_run(run_id, RunStatus.FAILED, ORPHAN_NOTICE)
         return True
 
     def _leased_at(self, row: Any) -> datetime:
+        """Lease clock for a running row. Queue age is not a lease."""
         raw = None
         if "heartbeat_at" in row.keys():
             raw = row["heartbeat_at"]
-        raw = raw or row["started_at"] or row["created_at"]
-        parsed = load_time(raw) or now()
+        raw = raw or row["started_at"]
+        parsed = load_time(raw)
+        if parsed is None:
+            return datetime.min.replace(tzinfo=UTC)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed

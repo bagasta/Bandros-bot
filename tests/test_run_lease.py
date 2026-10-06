@@ -10,6 +10,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from apps.api.app import main
+from apps.api.app import repository as repository_module
+from apps.api.app import runtime as runtime_module
 from apps.api.app.database import Database
 from apps.api.app.domain import RunStatus
 from apps.api.app.repository import ORPHAN_NOTICE, Repository
@@ -37,7 +39,7 @@ def test_fresh_database_run_survives_another_instance(tmp_path: Path) -> None:
     bot = repository.create_bot("Bandros", "", "", None)
     conversation_id = repository.conversation_for_bot(bot.id)
     run = repository.create_run(bot.id, conversation_id, "lanjut", "test-model")
-    repository.update_run(run.id, RunStatus.RUNNING)
+    repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
 
     stranger = RunRuntime(repository, None, "test-model", 1)  # type: ignore[arg-type]
     assert stranger.recover(resume=False) == 0
@@ -52,7 +54,7 @@ def test_stale_running_run_is_closed_and_leaves_the_group_typing_set(tmp_path: P
     group = repository.create_group("QA", "", [bot.id])
     run = repository.create_run(bot.id, conversation_id, "kerja", "test-model")
     repository.link_run_to_group(run.id, group.id)
-    repository.update_run(run.id, RunStatus.RUNNING)
+    repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
     _backdate(repository, run.id)
 
     stranger = RunRuntime(repository, None, "test-model", 1)  # type: ignore[arg-type]
@@ -101,7 +103,7 @@ def test_finished_local_task_does_not_leave_running(tmp_path: Path) -> None:
     bot = repository.create_bot("Bandros", "", "", None)
     conversation_id = repository.conversation_for_bot(bot.id)
     run = repository.create_run(bot.id, conversation_id, "kerja", "test-model")
-    repository.update_run(run.id, RunStatus.RUNNING)
+    repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
     owner = RunRuntime(repository, None, "test-model", 1)  # type: ignore[arg-type]
 
     async def scenario() -> None:
@@ -142,6 +144,77 @@ def _client(tmp_path: Path, monkeypatch, account: str, token: str) -> tuple[Test
     return TestClient(main.app), {"X-Bandros-Session": token}, database_path
 
 
+def test_tool_longer_than_the_lease_stays_alive(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "RUN_LEASE", timedelta(milliseconds=350))
+    monkeypatch.setattr(runtime_module, "HEARTBEAT_INTERVAL", 0.05)
+    repository = make_repository(tmp_path / "tool.db")
+    bot = repository.create_bot("Bandros", "", "", None)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    run = repository.create_run(bot.id, conversation_id, "cari sumber", "test-model")
+    started = asyncio.Event()
+
+    class SlowToolGateway:
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+            started.set()
+            await asyncio.sleep(0.9)
+            return "hasil alat"
+
+    owner = RunRuntime(repository, SlowToolGateway(), "test-model", 1)
+
+    async def scenario() -> None:
+        work = asyncio.create_task(owner.start_and_wait(run.id))
+        await started.wait()
+        _backdate(repository, run.id)
+        await asyncio.sleep(0.25)
+        stranger = RunRuntime(repository, SlowToolGateway(), "test-model", 1)
+        assert stranger.reconcile_runs() == 0
+        current = repository.get_run(run.id)
+        assert current.status is RunStatus.RUNNING
+        assert current.heartbeat_at is not None
+        assert datetime.now(UTC) - current.heartbeat_at < timedelta(milliseconds=350)
+        await work
+
+    asyncio.run(scenario())
+    assert repository.get_run(run.id).status is RunStatus.COMPLETED
+    assert repository.list_messages(conversation_id)[-1].content == "hasil alat"
+    assert all(message.content != ORPHAN_NOTICE for message in repository.list_messages(conversation_id))
+
+
+def test_queued_run_survives_a_long_wait(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "queued.db")
+    bot = repository.create_bot("Bandros", "", "", None)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    run = repository.create_run(bot.id, conversation_id, "menunggu giliran", "test-model")
+    stale = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    with repository.database.connection() as db:
+        db.execute("UPDATE runs SET created_at = ? WHERE id = ?", (stale, str(run.id)))
+
+    stranger = RunRuntime(repository, None, "test-model", 1)  # type: ignore[arg-type]
+    assert stranger.reconcile_runs() == 0
+    assert repository.get_run(run.id).status is RunStatus.QUEUED
+    assert repository.list_messages(conversation_id) == []
+
+
+def test_orphan_close_is_conditional(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "conditional.db")
+    bot = repository.create_bot("Tester", "", "", None)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    group = repository.create_group("QA", "", [bot.id])
+    run = repository.create_run(bot.id, conversation_id, "kerja", "test-model")
+    repository.link_run_to_group(run.id, group.id)
+    repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
+
+    assert repository.close_orphaned_run(run.id) is True
+    assert repository.close_orphaned_run(run.id) is False
+    assert repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED) is False
+    assert repository.update_run(run.id, RunStatus.COMPLETED, expect=RunStatus.RUNNING) is False
+    assert repository.commit_assistant_turn(run.id, "jawaban asli", "test-model") is False
+
+    assert repository.get_run(run.id).status is RunStatus.FAILED
+    assert [message.content for message in repository.list_messages(conversation_id)] == [ORPHAN_NOTICE]
+    assert [message.content for message in repository.list_group_messages(group.id)] == [ORPHAN_NOTICE]
+
+
 def test_activity_on_a_new_instance_keeps_a_leased_run(tmp_path: Path, monkeypatch) -> None:
     client, headers, database_path = _client(tmp_path, monkeypatch, "acct_lease", "token-lease")
     with client:
@@ -150,7 +223,7 @@ def test_activity_on_a_new_instance_keeps_a_leased_run(tmp_path: Path, monkeypat
         repository = Repository(Database(database_path))
         bot = next(item for item in repository.list_bots() if item.name == "Bandros")
         run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "status", "test-model")
-        repository.update_run(run.id, RunStatus.RUNNING)
+        repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
         main._workspaces.clear()
 
         activity = client.get(f"/api/v1/bots/{bot.id}/activity", headers=headers)
@@ -174,7 +247,7 @@ def test_activity_on_a_new_instance_clears_an_orphaned_run(tmp_path: Path, monke
         group = repository.create_group("QA", "", [bot.id])
         run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "status", "test-model")
         repository.link_run_to_group(run.id, group.id)
-        repository.update_run(run.id, RunStatus.RUNNING)
+        repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
         _backdate(repository, run.id)
         main._workspaces.clear()
 

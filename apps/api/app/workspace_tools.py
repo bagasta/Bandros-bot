@@ -191,7 +191,7 @@ class WorkspaceToolset:
                     decision.reason or "explicit approval required",
                     payload,
                 )
-                self.repository.update_run(self.run_id, RunStatus.WAITING_APPROVAL)
+                self.repository.update_run(self.run_id, RunStatus.WAITING_APPROVAL, expect=RunStatus.RUNNING)
                 self.repository.record_event(
                     self.run_id,
                     "tool.approval_required",
@@ -537,7 +537,7 @@ class WorkspaceToolset:
                     f"{plugin.name}.{tool_name} changes an external app",
                     {"plugin": plugin.name, "tool": tool_name, "arguments": arguments},
                 )
-                self.repository.update_run(self.run_id, RunStatus.WAITING_APPROVAL)
+                self.repository.update_run(self.run_id, RunStatus.WAITING_APPROVAL, expect=RunStatus.RUNNING)
                 return {"ok": False, "requires_approval": True, "approval_id": str(approval.id)}
         try:
             result = await call_tool(plugin.url, token, tool_name, arguments)
