@@ -99,6 +99,7 @@ class Run(APIModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    heartbeat_at: datetime | None = None
 
 
 class RunEvent(APIModel):

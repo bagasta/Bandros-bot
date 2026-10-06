@@ -75,14 +75,14 @@ def test_protected_action_requires_a_durable_approval(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "product.db")
     bot = repository.create_bot("Ops", "", "", None)
     run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "Deploy", "test-model")
-    repository.update_run(run.id, RunStatus.RUNNING)
+    repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
 
     decision = PolicyEngine().decide(RiskClass.EXTERNAL_WRITE)
     assert decision.requires_approval
     approval = repository.create_approval(
         run.id, "git_push", RiskClass.EXTERNAL_WRITE, decision.reason or "", {"remote": "origin"}
     )
-    repository.update_run(run.id, RunStatus.WAITING_APPROVAL)
+    repository.update_run(run.id, RunStatus.WAITING_APPROVAL, expect=RunStatus.RUNNING)
     repository.decide_approval(approval.id, ApprovalStatus.REJECTED)
 
     assert repository.get_approval(approval.id).status is ApprovalStatus.REJECTED

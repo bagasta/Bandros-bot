@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from typing import Any
 from uuid import UUID, uuid4
@@ -30,6 +30,12 @@ def _json_list(row: Any, key: str) -> list[dict[str, Any]]:
         return []
     loaded = json.loads(raw)
     return loaded if isinstance(loaded, list) else []
+
+
+# A run is still owned by whichever instance last wrote its heartbeat.
+# Missing in-memory tasks are not enough to call the reply interrupted.
+RUN_LEASE = timedelta(seconds=20)
+ORPHAN_NOTICE = "Balasan terputus. Kirim ulang pesan."
 
 
 class Repository:
@@ -219,17 +225,26 @@ class Repository:
         status: RunStatus,
         error: str | None = None,
         usage: dict[str, Any] | None = None,
-    ) -> Run:
+        *,
+        expect: RunStatus | set[RunStatus],
+    ) -> bool:
+        """Move a run only while it still has one of the expected statuses."""
+        allowed = (expect,) if isinstance(expect, RunStatus) else tuple(expect)
         timestamp = now()
         started_at = dump_time(timestamp) if status is RunStatus.RUNNING else None
         completed_at = dump_time(timestamp) if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED} else None
+        heartbeat_at = dump_time(timestamp) if status is RunStatus.RUNNING else None
+        placeholders = ", ".join("?" for _ in allowed)
         with self.database.connection() as db:
-            db.execute(
-                "UPDATE runs SET status = ?, error = COALESCE(?, error), usage = COALESCE(?, usage), started_at = COALESCE(?, started_at), completed_at = COALESCE(?, completed_at) WHERE id = ?",
-                (status, error, json.dumps(usage) if usage is not None else None, started_at, completed_at, str(run_id)),
+            result = db.execute(
+                f"UPDATE runs SET status = ?, error = COALESCE(?, error), usage = COALESCE(?, usage), started_at = COALESCE(?, started_at), completed_at = COALESCE(?, completed_at), heartbeat_at = COALESCE(?, heartbeat_at) WHERE id = ? AND status IN ({placeholders})",
+                (status, error, json.dumps(usage) if usage is not None else None, started_at, completed_at, heartbeat_at, str(run_id), *allowed),
             )
+            changed = result.rowcount == 1
+        if not changed:
+            return False
         self.record_event(run_id, f"run.{status}", {"error": error} if error else {})
-        return self.get_run(run_id)
+        return True
 
     def commit_assistant_turn(
         self,
@@ -274,6 +289,14 @@ class Repository:
         self.record_event(run_id, "run.stop_requested", {})
         return self.get_run(run_id)
 
+    def touch_run(self, run_id: UUID) -> None:
+        """Refresh the shared lease while this process is still inside the run."""
+        with self.database.connection() as db:
+            db.execute(
+                "UPDATE runs SET heartbeat_at = ? WHERE id = ? AND status = ?",
+                (dump_time(now()), str(run_id), RunStatus.RUNNING),
+            )
+
     def recover_incomplete_runs(self) -> list[UUID]:
         """Return work safe to retry; preserve approval waits as durable user decisions."""
         with self.database.connection() as db:
@@ -287,18 +310,62 @@ class Repository:
             ).fetchall()
         return [UUID(row["id"]) for row in rows]
 
-    def fail_orphaned_runs(self) -> int:
-        """Close runs whose server process is gone so the chat can show a reply instead of typing forever."""
-        notice = "Balasan terputus. Kirim ulang pesan."
+    def fail_orphaned_runs(self, *, skip: set[UUID] | None = None) -> int:
+        """Close running work whose shared lease has expired.
+
+        Queued work can sit until another instance starts it. A fresh heartbeat
+        means some instance is still inside a running turn, including tool calls.
+        """
+        protected = skip or set()
+        cutoff = now() - RUN_LEASE
         with self.database.connection() as db:
             rows = db.execute(
-                "SELECT id, conversation_id FROM runs WHERE status IN (?, ?)",
-                (RunStatus.QUEUED, RunStatus.RUNNING),
+                "SELECT * FROM runs WHERE status = ?",
+                (RunStatus.RUNNING,),
             ).fetchall()
+        closed = 0
         for row in rows:
-            self.append_message(UUID(row["conversation_id"]), "assistant", notice)
-            self.update_run(UUID(row["id"]), RunStatus.FAILED, notice)
-        return len(rows)
+            run_id = UUID(row["id"])
+            if run_id in protected:
+                continue
+            if self._leased_at(row) >= cutoff:
+                continue
+            if self.close_orphaned_run(run_id):
+                closed += 1
+        return closed
+
+    def close_orphaned_run(self, run_id: UUID) -> bool:
+        """Mark one dead run failed and leave a single visible reply.
+
+        The status change is claimed first, so a second instance or a late
+        finish cannot append another interrupt or put the run back.
+        """
+        if not self.update_run(
+            run_id,
+            RunStatus.FAILED,
+            ORPHAN_NOTICE,
+            expect={RunStatus.QUEUED, RunStatus.RUNNING},
+        ):
+            return False
+        run = self.get_run(run_id)
+        self.append_message(run.conversation_id, "assistant", ORPHAN_NOTICE)
+        group_id = self.group_for_run(run_id)
+        if group_id is not None:
+            self.append_group_message(group_id, "bot", ORPHAN_NOTICE, run.bot_id)
+        return True
+
+    def _leased_at(self, row: Any) -> datetime:
+        """Lease clock for a running row. Queue age is not a lease."""
+        raw = None
+        if "heartbeat_at" in row.keys():
+            raw = row["heartbeat_at"]
+        raw = raw or row["started_at"]
+        parsed = load_time(raw)
+        if parsed is None:
+            return datetime.min.replace(tzinfo=UTC)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed
 
     def latest_run_for_bot(self, bot_id: UUID) -> Run | None:
         with self.database.connection() as db:
@@ -918,6 +985,7 @@ class Repository:
             created_at=load_time(row["created_at"]),
             started_at=load_time(row["started_at"]),
             completed_at=load_time(row["completed_at"]),
+            heartbeat_at=load_time(row["heartbeat_at"]) if "heartbeat_at" in row.keys() else None,
         )
 
     def _approval(self, row: Any) -> Approval:

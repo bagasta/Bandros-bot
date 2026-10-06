@@ -238,7 +238,7 @@ def test_search_sources_are_saved_and_the_running_tool_is_visible(tmp_path: Path
     group = repository.create_group("Tim", "", [bot.id])
     conversation_id = repository.conversation_for_bot(bot.id)
     run = repository.create_run(bot.id, conversation_id, "kurs", "test-model")
-    repository.update_run(run.id, RunStatus.RUNNING)
+    repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
     repository.link_run_to_group(run.id, group.id)
     source = {"title": "BI", "url": "https://example.com/bi", "snippet": "USD/IDR"}
     call_id = repository.create_tool_call(run.id, "web_search", {"query": "USD IDR"})

@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS runs (
     stop_requested INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     started_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    heartbeat_at TEXT
 );
 CREATE TABLE IF NOT EXISTS run_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +275,7 @@ class Database:
                 "continuation": "TEXT",
                 "usage": "TEXT NOT NULL DEFAULT '{}'",
                 "stop_requested": "INTEGER NOT NULL DEFAULT 0",
+                "heartbeat_at": "TEXT",
             },
             "group_messages": {
                 "citations": "TEXT NOT NULL DEFAULT '[]'",
