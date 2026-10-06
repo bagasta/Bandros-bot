@@ -253,14 +253,17 @@ class RunRuntime:
                 return
 
             current = self.repository.get_run(run_id)
+            group_id = self.repository.group_for_run(run_id)
             if current.status is RunStatus.WAITING_APPROVAL:
                 note = answer.strip() or "Butuh persetujuanmu sebelum langkah ini dijalankan."
-                self.repository.append_message(run.conversation_id, "assistant", note, model=run.model)
+                if group_id is not None:
+                    self.repository.append_group_message(group_id, "bot", note, bot.id)
+                else:
+                    self.repository.append_message(run.conversation_id, "assistant", note, model=run.model)
                 return
             if current.stop_requested or current.status is RunStatus.CANCELLED:
                 self._keep_stopped_stage(run_id, toolset.continuation)
                 return
-            group_id = self.repository.group_for_run(run_id)
             self._queue_own_continuation(group_id, bot, run_id, toolset)
             if group_id:
                 answer = visible_reply(answer)
@@ -321,11 +324,12 @@ class RunRuntime:
         ):
             return
         try:
-            self.repository.append_message(conversation_id, "assistant", note)
             group_id = self.repository.group_for_run(run_id)
             if group_id is not None:
                 bot_id = self.repository.get_run(run_id).bot_id
                 self.repository.append_group_message(group_id, "bot", note, bot_id)
+            else:
+                self.repository.append_message(conversation_id, "assistant", note)
         except Exception:
             return
         self._resolve_handoffs(run_id, note, success=False)
@@ -384,19 +388,25 @@ class RunRuntime:
         try:
             while not task.done():
                 if await self._turn_stopped(run_id):
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
+                    # Mark the row before the HTTP call unwinds so a late finish cannot insert.
+                    with suppress(KeyError):
+                        self.repository.request_stop(run_id)
+                    await self._cancel_model_call(task)
                     return None
-                await asyncio.wait({task}, timeout=0.2)
+                await asyncio.wait({task}, timeout=0.05)
             if await self._turn_stopped(run_id):
                 return None
             return task.result()
         except asyncio.CancelledError:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            await self._cancel_model_call(task)
             raise
+
+    async def _cancel_model_call(self, task: asyncio.Task[str]) -> None:
+        """Stop the in-flight model call and discard whatever it returns."""
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
 
     def _keep_stopped_stage(self, run_id: UUID, continuation: str | None) -> None:
         note = (continuation or "").strip()
@@ -507,10 +517,19 @@ class RunRuntime:
             self._burst_tasks[key] = asyncio.create_task(self._flush_group(group_id))
 
     async def _quiet_burst(self, key: tuple[str, UUID]) -> list[str]:
+        """Batch rapid sends, but leave immediately once this run is stopped."""
+        loop = asyncio.get_running_loop()
+        quiet_since = loop.time()
         while True:
             generation = self._burst_gen.get(key, 0)
-            await asyncio.sleep(0.25)
-            if self._burst_gen.get(key, 0) == generation:
+            await asyncio.sleep(0.05)
+            run_id = self._burst_runs.get(key)
+            if run_id is not None and await self._turn_stopped(run_id):
+                return self._bursts.pop(key, [])
+            if self._burst_gen.get(key, 0) != generation:
+                quiet_since = loop.time()
+                continue
+            if loop.time() - quiet_since >= 0.25:
                 return self._bursts.pop(key, [])
 
     async def _flush_group(self, group_id: UUID) -> None:
@@ -538,6 +557,11 @@ class RunRuntime:
                     if self._bursts.get(key):
                         continue
                     return
+                if await self._turn_stopped(run_id):
+                    self._keep_stopped_stage(run_id, None)
+                    if not self._bursts.get(key):
+                        return
+                    continue
                 batches = cluster_topics(lines)
                 existing = self.repository.get_run(run_id)
                 merged = burst_prompt(batches[0])
@@ -556,6 +580,11 @@ class RunRuntime:
                     # A newer direct message interrupts this run. Keep the
                     # burst task alive so its fresh run can execute below.
                     pass
+                if await self._turn_stopped(run_id):
+                    self._keep_stopped_stage(run_id, None)
+                    if not self._bursts.get(key):
+                        return
+                    continue
                 run = self.repository.get_run(run_id)
                 for batch in batches[1:]:
                     follow = self.repository.create_run(run.bot_id, run.conversation_id, burst_prompt(batch), run.model)

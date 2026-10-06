@@ -172,8 +172,28 @@ class Repository:
         )
 
     def list_messages(self, conversation_id: UUID, limit: int = 50) -> list[Message]:
+        """1:1 history. Group replies stay in the group room and are not returned."""
         with self.database.connection() as db:
-            rows = db.execute("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?", (str(conversation_id), limit)).fetchall()
+            rows = db.execute(
+                """
+                SELECT messages.* FROM messages
+                WHERE messages.conversation_id = ?
+                  AND messages.role != 'group'
+                  AND NOT (
+                    messages.role = 'assistant'
+                    AND EXISTS (
+                      SELECT 1
+                      FROM group_messages
+                      JOIN conversations ON conversations.bot_id = group_messages.sender_bot_id
+                      WHERE conversations.id = messages.conversation_id
+                        AND group_messages.content = messages.content
+                    )
+                  )
+                ORDER BY messages.created_at DESC
+                LIMIT ?
+                """,
+                (str(conversation_id), limit),
+            ).fetchall()
         return [self._message(row) for row in reversed(rows)]
 
     def get_message(self, message_id: UUID) -> Message:
@@ -264,7 +284,12 @@ class Repository:
         model: str | None,
         citations: list[dict[str, Any]] | None = None,
     ) -> bool:
-        """Save the reply only while this run is still the active one."""
+        """Save the reply only while this run is still the active one.
+
+        The completion claim happens before the insert. A stop that lands first
+        leaves no assistant row. Group runs complete without a private copy.
+        """
+        in_group = self.group_for_run(run_id) is not None
         message_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -275,24 +300,27 @@ class Repository:
             ).fetchone()
             if row is None or row["stop_requested"] or row["status"] != RunStatus.RUNNING:
                 return False
-            db.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, model, usage, attachments, citations, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(message_id),
-                    row["conversation_id"],
-                    "assistant",
-                    content,
-                    model,
-                    "{}",
-                    "[]",
-                    json.dumps(citations or []),
-                    dump_time(timestamp),
-                ),
-            )
-            db.execute(
+            claimed = db.execute(
                 "UPDATE runs SET status = ?, completed_at = ? WHERE id = ? AND stop_requested = 0 AND status = ?",
                 (RunStatus.COMPLETED, dump_time(timestamp), str(run_id), RunStatus.RUNNING),
             )
+            if claimed.rowcount != 1:
+                return False
+            if not in_group:
+                db.execute(
+                    "INSERT INTO messages (id, conversation_id, role, content, model, usage, attachments, citations, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(message_id),
+                        row["conversation_id"],
+                        "assistant",
+                        content,
+                        model,
+                        "{}",
+                        "[]",
+                        json.dumps(citations or []),
+                        dump_time(timestamp),
+                    ),
+                )
         self.record_event(run_id, "run.completed", {})
         return True
 
@@ -400,10 +428,11 @@ class Repository:
         ):
             return False
         run = self.get_run(run_id)
-        self.append_message(run.conversation_id, "assistant", ORPHAN_NOTICE)
         group_id = self.group_for_run(run_id)
         if group_id is not None:
             self.append_group_message(group_id, "bot", ORPHAN_NOTICE, run.bot_id)
+        else:
+            self.append_message(run.conversation_id, "assistant", ORPHAN_NOTICE)
         return True
 
     def _leased_at(self, row: Any) -> datetime:
@@ -765,13 +794,19 @@ class Repository:
     def drop_copied_group_context(self) -> None:
         """Remove private copies of group lines. They made every later request carry a huge snapshot."""
         with self.database.connection() as db:
-            found = db.execute(
-                "SELECT 1 FROM messages WHERE role = 'group' AND content LIKE '[Grup %' LIMIT 1"
-            ).fetchone()
-        if found is None:
-            return
-        with self.database.connection() as db:
             db.execute("DELETE FROM messages WHERE role = 'group' AND content LIKE '[Grup %'")
+            db.execute(
+                """
+                DELETE FROM messages
+                WHERE role = 'assistant'
+                AND EXISTS (
+                    SELECT 1 FROM group_messages
+                    JOIN conversations ON conversations.bot_id = group_messages.sender_bot_id
+                    WHERE conversations.id = messages.conversation_id
+                      AND group_messages.content = messages.content
+                )
+                """
+            )
 
     def enqueue_group_speaker(
         self,
@@ -835,7 +870,9 @@ class Repository:
 
     def pending_group_ids(self) -> list[UUID]:
         with self.database.connection() as db:
-            rows = db.execute("SELECT DISTINCT group_id FROM group_queue ORDER BY id").fetchall()
+            rows = db.execute(
+                "SELECT group_id FROM group_queue GROUP BY group_id ORDER BY MIN(id)"
+            ).fetchall()
         return [UUID(row["group_id"]) for row in rows]
 
     def list_group_messages(self, group_id: UUID) -> list[GroupMessage]:

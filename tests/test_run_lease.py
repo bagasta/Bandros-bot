@@ -63,7 +63,7 @@ def test_stale_running_run_is_closed_and_leaves_the_group_typing_set(tmp_path: P
     closed = repository.get_run(run.id)
     assert closed.status is RunStatus.FAILED
     assert closed.error == ORPHAN_NOTICE
-    assert repository.list_messages(conversation_id)[-1].content == ORPHAN_NOTICE
+    assert all(message.content != ORPHAN_NOTICE for message in repository.list_messages(conversation_id))
     assert repository.list_group_messages(group.id)[-1].content == ORPHAN_NOTICE
     assert repository.live_runs_for_group(group.id) == []
 
@@ -324,7 +324,7 @@ def test_orphan_close_is_conditional(tmp_path: Path) -> None:
     assert repository.commit_assistant_turn(run.id, "jawaban asli", "test-model") is False
 
     assert repository.get_run(run.id).status is RunStatus.FAILED
-    assert [message.content for message in repository.list_messages(conversation_id)] == [ORPHAN_NOTICE]
+    assert [message.content for message in repository.list_messages(conversation_id)] == []
     assert [message.content for message in repository.list_group_messages(group.id)] == [ORPHAN_NOTICE]
 
 
@@ -373,7 +373,7 @@ def test_activity_on_a_new_instance_clears_an_orphaned_run(tmp_path: Path, monke
     assert activity.json()["working"] is False
     assert activity.json()["error"] == ORPHAN_NOTICE
     assert repository.get_run(run.id).status is RunStatus.FAILED
-    assert any(message["content"] == ORPHAN_NOTICE for message in messages.json())
+    assert all(message["content"] != ORPHAN_NOTICE for message in messages.json())
     assert group_activity.json() == []
     assert any(message["content"] == ORPHAN_NOTICE for message in group_messages.json())
     main._workspaces.clear()
