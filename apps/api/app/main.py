@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 import asyncio
 import json
+import os
 import base64
 import hashlib
 import secrets
@@ -726,10 +727,19 @@ def _account_computer() -> DaytonaComputer | None:
     return computer if isinstance(computer, DaytonaComputer) else None
 
 
+def _git_commit_sha() -> str:
+    commit = os.environ.get("VERCEL_GIT_COMMIT_SHA", "").strip()
+    return commit or "unknown"
+
+
 @app.get("/")
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "environment": settings.environment_name}
+    return {
+        "status": "ok",
+        "environment": settings.environment_name,
+        "commit": _git_commit_sha(),
+    }
 
 
 @app.post("/api/v1/auth/chatgpt/device/start")
