@@ -66,6 +66,7 @@ class RunRuntime:
     _repeat_ok: bool = field(default=False, init=False)
     _wake_budget: int = field(default=12, init=False)
     _anticipated: dict[UUID, list[str]] = field(default_factory=dict, init=False)
+    _composing: dict[UUID, UUID] = field(default_factory=dict, init=False)
     _bursts: dict[tuple[str, UUID], list[str]] = field(default_factory=dict, init=False)
     _burst_gen: dict[tuple[str, UUID], int] = field(default_factory=dict, init=False)
     _burst_tasks: dict[tuple[str, UUID], asyncio.Task[None]] = field(default_factory=dict, init=False)
@@ -125,6 +126,7 @@ class RunRuntime:
             return
 
         self.repository.update_run(run_id, RunStatus.RUNNING)
+        self._leave_group_queue(run_id, bot.id)
         self.repository.record_event(run_id, "model.request.started", {"model": run.model, "call": 1})
         toolset = WorkspaceToolset(
             self.repository,
@@ -319,6 +321,7 @@ class RunRuntime:
         """A new group message redirects the team and drops wakes from the previous turn."""
         self._pending_wakes = [wake for wake in self._pending_wakes if wake[0] != group_id]
         self._anticipated.pop(group_id, None)
+        self._composing.pop(group_id, None)
         self.repository.clear_group_queue(group_id)
         for run in self.repository.runs_for_group(group_id):
             self.stop(run.id)
@@ -455,6 +458,23 @@ class RunRuntime:
 
     def typing_names(self, group_id: UUID) -> list[str]:
         return list(self._anticipated.get(group_id, []))
+
+    def composing_bot_id(self, group_id: UUID) -> UUID | None:
+        """The bot whose model call is in flight. Waiters are not included."""
+        return self._composing.get(group_id)
+
+    def _leave_group_queue(self, run_id: UUID, bot_id: UUID) -> None:
+        """Drop the speaker once their run is actually running.
+
+        The queue row is shared state. After this, another instance can tell
+        the writer (live run, no longer queued) from the next waiter.
+        """
+        group_id = self.repository.group_for_run(run_id)
+        if group_id is None:
+            return
+        item = self.repository.peek_group_speaker(group_id)
+        if item is not None and item[1] == bot_id:
+            self.repository.drop_group_speaker(item[0])
 
     def schedule_group_reply(self, group_id: UUID, content: str, sender_bot_id: UUID | None, depth: int) -> list[str]:
         """Remember who should speak next. The model call happens in advance_group."""
@@ -597,15 +617,20 @@ class RunRuntime:
             for message in self.repository.list_group_messages(group_id)
             if message.sender_bot_id == target.id
         )
+        self._composing[group_id] = target.id
         try:
-            await asyncio.wait_for(self.start_and_wait(run.id), timeout=60)
-        except TimeoutError:
-            self.stop(run.id)
-            if self._target_message_count(group_id, target.id) == target_messages_before:
-                self.repository.append_group_message(group_id, "bot", "Balasan terlalu lama. Tahap ini dihentikan; kirim lanjutkan untuk meneruskannya.", target.id)
-        except Exception:
-            if self._target_message_count(group_id, target.id) == target_messages_before:
-                self.repository.append_group_message(group_id, "bot", "Tahap ini gagal dijalankan. Kirim lanjutkan untuk meneruskannya.", target.id)
+            try:
+                await asyncio.wait_for(self.start_and_wait(run.id), timeout=60)
+            except TimeoutError:
+                self.stop(run.id)
+                if self._target_message_count(group_id, target.id) == target_messages_before:
+                    self.repository.append_group_message(group_id, "bot", "Balasan terlalu lama. Tahap ini dihentikan; kirim lanjutkan untuk meneruskannya.", target.id)
+            except Exception:
+                if self._target_message_count(group_id, target.id) == target_messages_before:
+                    self.repository.append_group_message(group_id, "bot", "Tahap ini gagal dijalankan. Kirim lanjutkan untuk meneruskannya.", target.id)
+        finally:
+            if self._composing.get(group_id) == target.id:
+                self._composing.pop(group_id, None)
         remaining = [name for name in self._anticipated.get(group_id, []) if name != target.name]
         if remaining:
             self._anticipated[group_id] = remaining

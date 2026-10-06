@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { groupMemberSubtitle, hasVisibleBubble, turnSignalNames, typingBubbleNames } from "./chat-presentation";
+import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, turnSignalNames, typingBubbleNames } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 
@@ -465,7 +465,7 @@ export default function GrokDashboard() {
         request<Group[]>("/groups", undefined, groupMeta),
       ]);
       if (botMeta.fresh) setBots(nextBots);
-      if (groupMeta.fresh) setGroups(nextGroups);
+      setGroups((current) => mergeGroupRosters(current, nextGroups, groupMeta.fresh));
       const orchestrator = nextBots.find((bot) => bot.status === "active" && bot.name.toLowerCase() === "bandros");
       setSelectedBot((current) => {
         if (current) return nextBots.find((bot) => bot.id === current.id) ?? null;
@@ -475,7 +475,8 @@ export default function GrokDashboard() {
       setSelectedGroup((current) => {
         if (!current) return null;
         const next = nextGroups.find((group) => group.id === current.id);
-        if (!next) return null;
+        if (!next) return groupMeta.fresh ? null : current;
+        if (!groupMeta.fresh && next.members.length < current.members.length) return current;
         const sameMembers = next.members.length === current.members.length && next.members.every((member, index) => member.id === current.members[index]?.id && member.name === current.members[index]?.name);
         return next.name === current.name && sameMembers ? current : next;
       });
@@ -651,6 +652,8 @@ export default function GrokDashboard() {
             if (active) setTypingActivity(activity);
             const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
             groupPending.current = turn.pending > 0;
+            const nextGroups = await request<Group[]>("/groups");
+            if (active) setGroups(nextGroups);
             const messageMeta: RequestMeta = { fresh: true };
             const nextMessages = await request<GroupMessage[]>(`/groups/${groupId}/messages`, undefined, messageMeta);
             if (!active || !messageMeta.fresh) return;
@@ -725,8 +728,12 @@ export default function GrokDashboard() {
           groupPending.current = true;
         }
         setTypingActivity([]);
-        const refreshed = nextGroups.find((group) => group.id === groupId);
-        if (refreshed) setSelectedGroup(refreshed);
+        const latestGroups = await request<Group[]>("/groups");
+        if (selectedGroupId.current === groupId) {
+          setGroups(latestGroups);
+          const refreshed = latestGroups.find((group) => group.id === groupId);
+          if (refreshed) setSelectedGroup(refreshed);
+        }
         return;
       }
       const botId = selectedBot?.id;
@@ -1009,6 +1016,7 @@ export default function GrokDashboard() {
     }
   };
 
+  const openRoster = selectedGroup ? presentGroupMembers(selectedGroup.members, bots) : [];
   const displayName = selectedGroup?.name || selectedBot?.name || "New Bot";
   const availableMembers = selectedGroup ? activeBots.filter((bot) => !selectedGroup.members.some((member) => member.id === bot.id)) : [];
   const typingPeople = selectedGroup
@@ -1042,7 +1050,10 @@ export default function GrokDashboard() {
         </div>
         <div className="bandros-group-list">
           <div className="bandros-groups-heading"><span>Groups</span></div>
-          {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-mark"><BandrosAvatar name={group.name} working={selectedGroup?.id === group.id && typingPeople.length > 0} /><em>{group.members.length}</em></span><span className="bandros-agent-copy"><strong>{group.name}</strong><small>{groupMemberSubtitle(group.members)}</small></span></button>)}
+          {groups.map((group) => {
+            const roster = presentGroupMembers(group.members, bots, selectedGroup?.id === group.id ? selectedGroup.members : []);
+            return <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-mark"><BandrosAvatar name={group.name} working={selectedGroup?.id === group.id && typingPeople.length > 0} /><em>{roster.length}</em></span><span className="bandros-agent-copy"><strong>{group.name}</strong><small>{groupMemberSubtitle(roster)}</small></span></button>;
+          })}
         </div>
         <button className="bandros-account" type="button" onClick={() => chatGPT.connected ? void disconnectChatGPT() : void connectChatGPT()}><BandrosAvatar name="Marketplace" /><span><strong>Marketplace</strong><small>{chatGPT.connected ? chatGPT.email || "ChatGPT terhubung" : "Sign in with ChatGPT"}</small></span></button>
       </aside>
@@ -1051,7 +1062,7 @@ export default function GrokDashboard() {
           <button className="bandros-back" type="button" onClick={() => { setMobilePane("list"); setSettingsOpen(false); }} aria-label="Kembali ke daftar Bot">‹</button>
           {chatGPT.connected && (selectedBot || selectedGroup) && <button className="bandros-title" type="button" onClick={openSettings} disabled={!selectedBot}>
             <span className={`bandros-status-dot ${turnActive ? "is-live" : ""}`} />
-            <span><strong>{displayName}</strong><small>{typingPeople.length > 0 ? `${typingPeople.join(", ")} mengetik…` : selectedGroup ? selectedGroup.members.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
+            <span><strong>{displayName}</strong><small>{typingPeople.length > 0 ? `${typingPeople.join(", ")} mengetik…` : selectedGroup ? openRoster.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
           </button>}
           {selectedBot && !selectedGroup && <button type="button" className="bandros-panel-toggle" aria-label="Pengaturan bot" title="Pengaturan bot" onClick={openSettings}>⋯</button>}
           {selectedGroup && <button type="button" className="bandros-panel-toggle" aria-label={membersOpen ? "Tutup anggota" : "Buka anggota"} title={membersOpen ? "Tutup anggota" : "Buka anggota"} aria-expanded={membersOpen} onClick={() => setMembersOpen((open) => !open)}>{membersOpen ? "»" : "«"}</button>}

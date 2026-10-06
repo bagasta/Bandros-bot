@@ -1,5 +1,9 @@
 export type TypingActivity = { name: string; status: string };
 
+export type RosterMember = { id?: string; name?: string | null };
+
+export type RosterGroup<T extends RosterMember = RosterMember> = { id: string; members: readonly T[] };
+
 const liveTypingStatuses = new Set(["running", "waiting_approval"]);
 
 function uniqueNames(names: string[]): string[] {
@@ -13,9 +17,75 @@ function uniqueNames(names: string[]): string[] {
   return unique;
 }
 
+function cleaned(value: string | null | undefined): string {
+  return (value ?? "").trim();
+}
+
+/**
+ * Member rows for the badge and the subtitle.
+ * Names are taken from the live bot directory when a stored row is blank,
+ * then from the open group when the sidebar list is missing someone.
+ * A short cached label is not an input: the roster is the only source.
+ */
+export function presentGroupMembers(
+  members: readonly RosterMember[],
+  directory: readonly RosterMember[] = [],
+  extras: readonly RosterMember[] = [],
+): { id: string; name: string }[] {
+  const known = new Map<string, string>();
+  for (const bot of directory) {
+    const id = cleaned(bot.id);
+    const name = cleaned(bot.name);
+    if (id && name) known.set(id, name);
+  }
+  const seen = new Set<string>();
+  const roster: { id: string; name: string }[] = [];
+  const add = (member: RosterMember) => {
+    const id = cleaned(member.id);
+    const name = cleaned(member.name) || (id ? known.get(id) ?? "" : "");
+    const key = id || `name:${name}`;
+    if (!name || seen.has(key)) return;
+    seen.add(key);
+    roster.push({ id, name });
+  };
+  for (const member of members) add(member);
+  for (const member of extras) add(member);
+  return roster;
+}
+
+/**
+ * Apply a group-list response to the sidebar.
+ * A fresh response replaces the list. A stale one cannot shrink a roster,
+ * but it can add a group or members the sidebar has not shown yet.
+ */
+export function mergeGroupRosters<T extends RosterGroup>(
+  current: readonly T[],
+  incoming: readonly T[],
+  incomingFresh: boolean,
+): T[] {
+  if (incomingFresh) return [...incoming];
+  const incomingById = new Map(incoming.map((group) => [group.id, group]));
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const group of current) {
+    seen.add(group.id);
+    const next = incomingById.get(group.id);
+    if (next && next.members.length > group.members.length) merged.push(next);
+    else merged.push(group);
+  }
+  for (const group of incoming) {
+    if (!seen.has(group.id)) merged.push(group);
+  }
+  return merged;
+}
+
 /** Every member name, in roster order, so the subtitle matches the count badge. */
-export function groupMemberSubtitle(members: readonly { name: string }[]): string {
-  const names = members.map((member) => member.name.trim()).filter((name) => name.length > 0);
+export function groupMemberSubtitle(
+  members: readonly RosterMember[],
+  directory: readonly RosterMember[] = [],
+  extras: readonly RosterMember[] = [],
+): string {
+  const names = presentGroupMembers(members, directory, extras).map((member) => member.name);
   return names.length > 0 ? names.join(", ") : "Grup kosong";
 }
 
@@ -24,7 +94,7 @@ export function turnSignalNames(activity: readonly TypingActivity[]): string[] {
   return uniqueNames(activity.map((item) => item.name.trim()).filter((name) => name.length > 0));
 }
 
-/** Typing bubbles only for members who are composing. A queued name has nothing to show. */
+/** Typing bubbles only for the bot who is composing. A queued name has nothing to show. */
 export function typingBubbleNames(activity: readonly TypingActivity[]): string[] {
   return uniqueNames(
     activity
