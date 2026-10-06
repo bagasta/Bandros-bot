@@ -64,6 +64,22 @@ def test_mention_prefers_the_longest_bot_name() -> None:
     assert [item.name for item in found] == ["Bot Riset", "Bot"]
 
 
+def test_a_bare_name_is_not_a_mention() -> None:
+    frontend = bot("Frontend")
+    backend = bot("Backend")
+    assert mentioned_bots("Frontend dan Backend, perkenalkan diri", [frontend, backend]) == []
+    assert [item.name for item in mentioned_bots("@Frontend dan Backend", [frontend, backend])] == ["Frontend"]
+
+
+def test_shared_introduction_is_not_a_status_roll_call() -> None:
+    from apps.api.app.mentions import asks_roll_call
+
+    assert asks_roll_call("@Bandros @Frontend @Backend perkenalkan diri masing-masing dalam satu kalimat") is False
+    assert asks_roll_call("@everyone each bot introduce yourself in one sentence") is False
+    assert asks_roll_call("@Bandros cek kesiapan masing2 bot") is True
+    assert asks_roll_call("Cek kesiapan semua tim @Bandros") is True
+
+
 class ScriptedGateway:
     def __init__(self, replies: dict[str, str]) -> None:
         self.replies = replies
@@ -332,6 +348,97 @@ def test_roll_call_mentions_every_teammate_and_their_status_does_not_bounce(tmp_
     assert "@Frontend" in messages[1].content and "@Backend" in messages[1].content
     assert "Frontend aktif" not in messages[1].content
     assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, backend.id]
+
+
+def test_mentioned_bandros_answers_a_shared_introduction(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "intro.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    backend = repository.create_bot("Backend", "Membuat API.", "TOKEN:backend", None)
+    group = repository.create_group("Tim Produk", "", [bandros.id, frontend.id, backend.id])
+    text = "@Bandros @Frontend @Backend perkenalkan diri masing-masing dalam satu kalimat"
+    repository.append_group_message(group.id, "user", text)
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:bandros": "Saya Bandros, orkestrator yang mengarahkan tim ini.",
+            "TOKEN:frontend": "Saya Frontend, yang membuat antarmuka.",
+            "TOKEN:backend": "Saya Backend, yang membuat API.",
+        }),
+        "test-model",
+        4,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    messages = repository.list_group_messages(group.id)
+    bandros_message = next(message.content for message in messages if message.sender_bot_id == bandros.id)
+    assert bandros_message == "Saya Bandros, orkestrator yang mengarahkan tim ini."
+    assert "Cek siap" not in bandros_message
+    by_sender = {message.sender_bot_id: message.content for message in messages if message.sender_type == "bot"}
+    assert by_sender == {
+        bandros.id: "Saya Bandros, orkestrator yang mengarahkan tim ini.",
+        frontend.id: "Saya Frontend, yang membuat antarmuka.",
+        backend.id: "Saya Backend, yang membuat API.",
+    }
+
+
+def test_handoff_wakes_exactly_one_mentioned_bot(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "one-mention.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    backend = repository.create_bot("Backend", "Membuat API.", "TOKEN:backend", None)
+    group = repository.create_group("Tim Produk", "", [bandros.id, frontend.id, backend.id])
+    text = "Buatkan halaman produk"
+    repository.append_group_message(group.id, "user", text)
+
+    def bandros_reply(prompt: str) -> str:
+        if "Halaman selesai" in prompt:
+            return "Hasil akhir: halaman produk sudah ada."
+        return "@Frontend @Backend kerjakan bersamaan. Backend tanpa simbol tetap tidak dipanggil."
+
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:bandros": bandros_reply,
+            "TOKEN:frontend": "Halaman selesai. @Bandros",
+            "TOKEN:backend": "Tidak boleh terpanggil.",
+        }),
+        "test-model",
+        4,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    messages = repository.list_group_messages(group.id)
+    bandros_handoff = next(message.content for message in messages if message.sender_bot_id == bandros.id)
+    assert bandros_handoff.count("@") == 1
+    assert "@Frontend" in bandros_handoff
+    assert "@Backend" not in bandros_handoff
+    assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, bandros.id]
+
+
+def test_bare_name_does_not_wake_a_teammate(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "bare.db")
+    bandros = repository.create_bot("Bandros", "Orkestrator utama.", "TOKEN:bandros", None)
+    frontend = repository.create_bot("Frontend", "Membuat antarmuka.", "TOKEN:frontend", None)
+    group = repository.create_group("Tim Produk", "", [bandros.id, frontend.id])
+    text = "Frontend perkenalkan diri"
+    repository.append_group_message(group.id, "user", text)
+    runtime = RunRuntime(
+        repository,
+        ScriptedGateway({
+            "TOKEN:bandros": "Saya Bandros. Frontend bisa memperkenalkan diri sendiri.",
+            "TOKEN:frontend": "Tidak boleh terpanggil.",
+        }),
+        "test-model",
+        3,
+    )
+
+    asyncio.run(runtime.speak_in_group(group.id, text, None, 0))
+
+    speakers = [message.sender_bot_id for message in repository.list_group_messages(group.id) if message.sender_type == "bot"]
+    assert speakers == [bandros.id]
 
 
 def test_everyone_mention_posts_a_reply_from_each_member(tmp_path: Path) -> None:

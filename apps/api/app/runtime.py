@@ -657,7 +657,7 @@ class RunRuntime:
             for message in messages[last_user + 1 :]
             if message.sender_bot_id and continues_the_work(message.content)
         }
-        allow_many = asks_roll_call(user_text) or addresses_everyone(user_text)
+        allow_many = asks_roll_call(user_text)
         return route_next_owner(answer, members, bot, finished, allow_many)
 
     def _drop_answered_peer_mentions(self, group_id: UUID, bot, answer: str) -> str:
@@ -721,6 +721,8 @@ class RunRuntime:
                 "No headings, no status essay, and no recap of these rules. "
                 "The transcript is context you already read, including lines that did not mention you. "
                 "Mention exactly one @Name only when that teammate owns the next step, and include the data they need. "
+                "A name without @ does not wake anyone. "
+                "If the user mentioned you in the same request as other bots, answer that request yourself. Do not replace it with a status check. "
                 "If you are the orchestrator and a teammate already posted a result, mention the one teammate who has not finished, or give the user the final result with no @mention. "
                 "Work the stage yourself until there is a result: read memory and skills, prefer a connected MCP plugin when it can do the job, otherwise use web_search, fetch_url, or write_workspace_file. "
                 "Do not claim a file, bot, or job exists unless the tool result says ok. "
