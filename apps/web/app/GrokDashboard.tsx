@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
+import { entityId, isAbortError, isTerminalRunStatus, planStop, recordsWithId, replyHasFinished } from "./stop-turn";
 
 type Bot = { id: string; name: string; description: string; instructions?: string; model?: string | null; status: "active" | "archived" };
 type Citation = { title?: string; url?: string };
@@ -184,10 +185,11 @@ function CreateMenu({ disabled, onCreateBot, onCreateGroup }: { disabled: boolea
   </div>;
 }
 
-function hasOlderMessages<T extends { id: string }>(current: T[], next: T[]): boolean {
-  const nextIds = new Set(next.map((item) => item.id));
-  const kept = current.filter((item) => !item.id.startsWith("local-"));
-  return kept.some((item) => !nextIds.has(item.id)) && next.length < kept.length;
+function hasOlderMessages<T extends { id?: string | null }>(current: readonly (T | null | undefined)[], next: readonly (T | null | undefined)[] | null | undefined): boolean {
+  const nextRows = recordsWithId<T>(next);
+  const kept = recordsWithId<T>(current).filter((item) => !String(item.id).startsWith("local-"));
+  const nextIds = new Set(nextRows.map((item) => item.id));
+  return kept.some((item) => !nextIds.has(item.id)) && nextRows.length < kept.length;
 }
 
 const quickPrompts = [
@@ -464,6 +466,7 @@ export default function GrokDashboard() {
   const groupPending = useRef(false);
   const advancing = useRef(false);
   const submissionId = useRef(0);
+  const replyFinished = useRef(false);
   workingRef.current = working;
   selectedGroupId.current = selectedGroup?.id ?? null;
 
@@ -473,10 +476,12 @@ export default function GrokDashboard() {
     try {
       const botMeta: RequestMeta = { fresh: true };
       const groupMeta: RequestMeta = { fresh: true };
-      const [nextBots, nextGroups] = await Promise.all([
+      const [loadedBots, loadedGroups] = await Promise.all([
         request<Bot[]>("/bots", undefined, botMeta),
         request<Group[]>("/groups", undefined, groupMeta),
       ]);
+      const nextBots = recordsWithId<Bot>(loadedBots);
+      const nextGroups = recordsWithId<Group>(loadedGroups);
       if (botMeta.fresh) setBots(nextBots);
       setGroups((current) => mergeGroupRosters(current, nextGroups, groupMeta.fresh));
       const orchestrator = nextBots.find((bot) => bot.status === "active" && bot.name.toLowerCase() === "bandros");
@@ -489,8 +494,9 @@ export default function GrokDashboard() {
         if (!current) return null;
         const next = nextGroups.find((group) => group.id === current.id);
         if (!next) return groupMeta.fresh ? null : current;
-        if (!groupMeta.fresh && next.members.length < current.members.length) return current;
-        const sameMembers = next.members.length === current.members.length && next.members.every((member, index) => member.id === current.members[index]?.id && member.name === current.members[index]?.name);
+        const nextMembers = (next.members ?? []).filter((member) => member != null);
+        if (!groupMeta.fresh && nextMembers.length < current.members.length) return current;
+        const sameMembers = nextMembers.length === current.members.length && nextMembers.every((member, index) => member.id === current.members[index]?.id && member.name === current.members[index]?.name);
         return next.name === current.name && sameMembers ? current : next;
       });
     } catch (cause) {
@@ -607,16 +613,16 @@ export default function GrokDashboard() {
     const tick = async () => {
       try {
         const messageMeta: RequestMeta = { fresh: true };
-        const nextMessages = await request<Message[]>(`/bots/${botId}/messages`, undefined, messageMeta);
+        const nextMessages = recordsWithId<Message>(await request<Message[] | null>(`/bots/${botId}/messages`, undefined, messageMeta));
         if (!active || !messageMeta.fresh) return;
         const visible = nextMessages.filter((message) => message.role !== "group");
         setMessages((current) => {
-          const kept = current.filter((item) => !item.id.startsWith("local-"));
+          const kept = recordsWithId<Message>(current).filter((item) => !item.id.startsWith("local-"));
           const nextIds = new Set(visible.map((message) => message.id));
           const sameRoom = kept.length === 0 || kept.some((item) => nextIds.has(item.id));
           if (!sameRoom) return visible;
           if (hasOlderMessages(current, visible)) return current;
-          const pending = current.filter((item) => item.id.startsWith("local-") && !visible.some((message) => message.role === item.role && message.content === item.content));
+          const pending = recordsWithId<Message>(current).filter((item) => item.id.startsWith("local-") && !visible.some((message) => message.role === item.role && message.content === item.content));
           return [...visible, ...pending];
         });
         const activity = await request<{ working: boolean; error?: string | null; tool?: string | null; approvals?: Array<{ id: string; tool_name: string; reason: string }> }>(`/bots/${botId}/activity`);
@@ -647,13 +653,15 @@ export default function GrokDashboard() {
     groupPending.current = true;
     let active = true;
     const groupId = selectedGroup.id;
-    const applyMessages = (nextMessages: GroupMessage[]) => {
+    const applyMessages = (incoming: unknown) => {
+      const nextMessages = recordsWithId<GroupMessage>(incoming);
       setGroupMessages((current) => {
+        const rows = recordsWithId<GroupMessage>(current);
         const nextIds = new Set(nextMessages.map((message) => message.id));
-        const sameRoom = current.length === 0 || current.some((item) => nextIds.has(item.id));
+        const sameRoom = rows.length === 0 || rows.some((item) => nextIds.has(item.id));
         if (!sameRoom) return nextMessages;
-        if (hasOlderMessages(current, nextMessages)) return current;
-        const pending = current.filter((item) => item.id.startsWith("local-") && !nextMessages.some((message) => message.sender_type === item.sender_type && message.content === item.content));
+        if (hasOlderMessages(rows, nextMessages)) return current;
+        const pending = rows.filter((item) => item.id.startsWith("local-") && !nextMessages.some((message) => message.sender_type === item.sender_type && message.content === item.content));
         return [...nextMessages, ...pending];
       });
     };
@@ -715,6 +723,7 @@ export default function GrokDashboard() {
 
   const sendMessage = async (content: string, currentSubmission: number) => {
     stickToBottom.current = true;
+    replyFinished.current = false;
     setPrompt(""); setWorking(true); workingRef.current = true; advancing.current = true; setError(null);
     try {
       if (selectedGroup) {
@@ -726,25 +735,26 @@ export default function GrokDashboard() {
           request<Group[]>("/groups"),
         ]);
         if (selectedGroup?.id !== groupId) return;
-        setGroupMessages(nextMessages);
-        setGroups(nextGroups);
+        setGroupMessages(recordsWithId<GroupMessage>(nextMessages));
+        setGroups(recordsWithId<Group>(nextGroups));
         for (let step = 0; step < 8; step += 1) {
           if (selectedGroupId.current !== groupId) return;
-          const activity = await request<GroupActivity[]>(`/groups/${groupId}/activity`);
-          if (selectedGroupId.current === groupId) setTypingActivity(activity);
-          const turn = await request<{ speaker: string | null; pending: number; activity?: GroupActivity[] }>(`/groups/${groupId}/advance`, { method: "POST" });
-          if (selectedGroupId.current === groupId) setTypingActivity((current) => typingActivityAfterTurn(current, turn));
-          const spoken = await request<GroupMessage[]>(`/groups/${groupId}/messages`);
+          const activity = await request<GroupActivity[] | null>(`/groups/${groupId}/activity`);
+          if (selectedGroupId.current === groupId) setTypingActivity(Array.isArray(activity) ? activity.filter((item) => item != null) : []);
+          const turn = await request<{ speaker: string | null; pending: number; activity?: GroupActivity[] } | null>(`/groups/${groupId}/advance`, { method: "POST" });
+          if (selectedGroupId.current === groupId && turn) setTypingActivity((current) => typingActivityAfterTurn(current, turn));
+          const spoken = await request<GroupMessage[] | null>(`/groups/${groupId}/messages`);
           if (selectedGroupId.current !== groupId) return;
-          setGroupMessages(spoken);
-          if (!turn.pending) {
+          setGroupMessages(recordsWithId<GroupMessage>(spoken));
+          if (!turn?.pending) {
             groupPending.current = false;
+            replyFinished.current = true;
             break;
           }
           groupPending.current = true;
         }
         if (!groupPending.current) setTypingActivity([]);
-        const latestGroups = await request<Group[]>("/groups");
+        const latestGroups = recordsWithId<Group>(await request<Group[] | null>("/groups"));
         if (selectedGroupId.current === groupId) {
           setGroups(latestGroups);
           const refreshed = latestGroups.find((group) => group.id === groupId);
@@ -756,19 +766,25 @@ export default function GrokDashboard() {
       if (!botId) return;
       const model = modelByBot[botId] ?? selectedBot?.model ?? null;
       setMessages((current) => [...current, { id: `local-${Date.now()}`, role: "user", content }]);
-      const run = await request<Run>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content, model }) });
+      const run = await request<Run | null>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content, model }) });
+      const runId = entityId(run);
       if (currentSubmission !== submissionId.current) return;
-      setActiveRunId(run.id);
-      if (["completed", "failed", "failed_retryable", "cancelled"].includes(run.status)) {
+      if (!run || !runId) {
+        replyFinished.current = true;
+        return;
+      }
+      setActiveRunId(runId);
+      if (isTerminalRunStatus(run.status)) {
+        replyFinished.current = true;
         if (selectedBot?.id !== botId) return;
-        const nextMessages = await request<Message[]>(`/bots/${botId}/messages`);
+        const nextMessages = recordsWithId<Message>(await request<Message[] | null>(`/bots/${botId}/messages`));
         setMessages(nextMessages.filter((message) => message.role !== "group"));
         if (run.error) setError(run.error);
         void loadBots();
         return;
       }
       const session = window.localStorage.getItem("bandros_chatgpt_session");
-      const response = await fetch(`${apiBase}/runs/${run.id}/events/stream`, {
+      const response = await fetch(`${apiBase}/runs/${runId}/events/stream`, {
         headers: session ? { "X-Bandros-Session": session } : {},
         signal: turnAbort.signal,
       });
@@ -787,19 +803,26 @@ export default function GrokDashboard() {
           const eventName = block.match(/^event: (.+)$/m)?.[1];
           const data = block.match(/^data: (.+)$/m)?.[1];
           if (!data) continue;
-          const parsed = JSON.parse(data) as { payload?: { content?: string } } & Run;
+          let parsed: { payload?: { content?: string; tool?: string } | null; error?: string | null; status?: string } | null = null;
+          try {
+            parsed = JSON.parse(data) as { payload?: { content?: string; tool?: string } | null; error?: string | null; status?: string } | null;
+          } catch {
+            continue;
+          }
+          if (parsed == null || typeof parsed !== "object") continue;
+          if (replyHasFinished(eventName, parsed)) replyFinished.current = true;
           if (eventName === "tool.started") {
-            const tool = (parsed.payload as { tool?: string } | undefined)?.tool;
+            const tool = parsed.payload?.tool;
             if (tool) setActiveTool(tool);
           } else if (eventName === "assistant.delta") {
             if (currentSubmission !== submissionId.current) continue;
             const streamedContent = parsed.payload?.content || "";
             setMessages((current) => [
-              ...current.filter((message) => message.id !== `streaming-${run.id}`),
-              { id: `streaming-${run.id}`, role: "assistant", content: streamedContent },
+              ...current.filter((message) => message != null && message.id !== `streaming-${runId}`),
+              { id: `streaming-${runId}`, role: "assistant", content: streamedContent },
             ]);
-          } else if (eventName === "run.completed") {
-            completed = parsed;
+          } else if (eventName === "run.completed" || eventName === "run.failed" || eventName === "run.cancelled") {
+            completed = parsed as Run;
           }
         }
       }
@@ -807,7 +830,8 @@ export default function GrokDashboard() {
       if (completed.error) throw new Error(completed.error);
       if (currentSubmission !== submissionId.current) return;
       if (selectedBot?.id !== botId) return;
-      setMessages(await request<Message[]>(`/bots/${botId}/messages`));
+      replyFinished.current = true;
+      setMessages(recordsWithId<Message>(await request<Message[] | null>(`/bots/${botId}/messages`)).filter((message) => message.role !== "group"));
       void loadBots();
     } catch (cause) {
       if (currentSubmission !== submissionId.current) return;
@@ -834,22 +858,46 @@ export default function GrokDashboard() {
   };
 
   const stopRun = async () => {
-    const groupId = selectedGroup?.id;
-    const runId = activeRunId;
+    const plan = planStop({
+      replyFinished: replyFinished.current,
+      groupId: selectedGroup?.id ?? null,
+      runId: activeRunId,
+      turnBusy: workingRef.current || botWorking || turnSignalNames(typingActivity).length > 0,
+    });
+    if (plan.kind === "noop") {
+      workingRef.current = false;
+      groupPending.current = false;
+      advancing.current = false;
+      setWorking(false);
+      setBotWorking(false);
+      setActiveTool(null);
+      setTypingActivity([]);
+      setActiveRunId(null);
+      return;
+    }
     stopCurrentTurn();
     groupPending.current = false;
     advancing.current = false;
     workingRef.current = false;
     setWorking(false);
+    setActiveTool(null);
     setTypingActivity([]);
+    if (plan.kind === "abort") return;
     try {
-      if (groupId) {
-        await request<Run[]>(`/groups/${groupId}/cancel`, { method: "POST" });
-      } else if (runId) {
-        await request<Run>(`/runs/${runId}/cancel`, { method: "POST" });
+      switch (plan.kind) {
+        case "group":
+          await request<Run[] | null>(`/groups/${plan.groupId}/cancel`, { method: "POST" });
+          return;
+        case "run":
+          await request<Run | null>(`/runs/${plan.runId}/cancel`, { method: "POST" });
+          return;
+        default: {
+          const exhaustive: never = plan;
+          return exhaustive;
+        }
       }
     } catch (cause) {
-      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      if (isAbortError(cause) || replyFinished.current) return;
       setError(cause instanceof Error ? cause.message : "Run tidak dapat dihentikan.");
     }
   };
