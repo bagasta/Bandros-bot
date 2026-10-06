@@ -21,7 +21,7 @@ def test_placeholder_paths_use_local_data_dir(monkeypatch) -> None:
     assert settings.environment_name == "local"
 
 
-def test_vercel_defaults_use_tmp_and_mock_gateway(monkeypatch) -> None:
+def test_vercel_defaults_use_tmp_and_a_real_gateway(monkeypatch) -> None:
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_ENV", "production")
     monkeypatch.setenv("DATABASE_PATH", "[REDACTED]")
@@ -31,7 +31,25 @@ def test_vercel_defaults_use_tmp_and_mock_gateway(monkeypatch) -> None:
     settings = Settings.from_environment()
     assert settings.database_path == Path("/tmp/bandros/workspace.db")
     assert settings.workspace_root == Path("/tmp/bandros/workspace")
-    assert settings.model_gateway == "mock"
+    assert settings.model_gateway == "openrouter"
     assert settings.await_runs is True
     assert settings.cors_allow_all is True
     assert settings.environment_name == "production"
+
+
+def test_vercel_ignores_an_explicit_mock_gateway(monkeypatch) -> None:
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("MODEL_GATEWAY", "mock")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    settings = Settings.from_environment()
+    assert settings.model_gateway == "openrouter"
+
+
+def test_local_mock_gateway_stays_available(monkeypatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("VERCEL_ENV", raising=False)
+    monkeypatch.setenv("MODEL_GATEWAY", "mock")
+    settings = Settings.from_environment()
+    assert settings.model_gateway == "mock"
+    assert settings.environment_name == "local"
