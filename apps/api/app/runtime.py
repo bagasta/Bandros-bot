@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -256,10 +257,35 @@ class RunRuntime:
             return
         self._resolve_handoffs(run_id, note, success=False)
 
+    def reconcile_runs(self) -> int:
+        """Drop runs this process already finished, then runs whose shared lease expired.
+
+        A run that is still executing here is kept even if its heartbeat is late.
+        A run that exists only in the database is kept while that lease is fresh,
+        so a poll on another instance does not call a live reply interrupted.
+        """
+        closed = self._close_finished_local_runs()
+        protected = {run_id for run_id, task in self._tasks.items() if not task.done()}
+        return closed + self.repository.fail_orphaned_runs(skip=protected)
+
+    def _close_finished_local_runs(self) -> int:
+        closed = 0
+        for run_id, task in list(self._tasks.items()):
+            if not task.done():
+                continue
+            run = self.repository.get_run(run_id)
+            if run.status in {RunStatus.QUEUED, RunStatus.RUNNING} and self.repository.close_orphaned_run(run_id):
+                closed += 1
+            if task.done() and not task.cancelled():
+                with suppress(asyncio.CancelledError, Exception):
+                    task.exception()
+            self._tasks.pop(run_id, None)
+        return closed
+
     def recover(self, *, resume: bool = True) -> int:
-        """Resume interrupted work locally. On a serverless copy, close it so the user can send again."""
+        """Resume interrupted work locally. On a serverless copy, close only leases that expired."""
         if not resume:
-            return self.repository.fail_orphaned_runs()
+            return self.reconcile_runs()
         run_ids = self.repository.recover_incomplete_runs()
         for run_id in run_ids:
             self.start(run_id)
@@ -281,6 +307,7 @@ class RunRuntime:
     async def _answer_until_stop(self, run_id: UUID, pending: Awaitable[str]) -> str | None:
         """Drop the model result when the user leaves this turn before it is saved."""
         task = asyncio.create_task(pending)
+        last_beat = 0.0
         try:
             while not task.done():
                 if await self._turn_stopped(run_id):
@@ -288,6 +315,10 @@ class RunRuntime:
                     with suppress(asyncio.CancelledError):
                         await task
                     return None
+                mono = time.monotonic()
+                if mono - last_beat >= 5:
+                    self.repository.touch_run(run_id)
+                    last_beat = mono
                 await asyncio.wait({task}, timeout=0.2)
             if await self._turn_stopped(run_id):
                 return None
@@ -533,6 +564,7 @@ class RunRuntime:
 
     async def advance_group(self, group_id: UUID) -> str | None:
         """One selected bot replies, then the turn is saved before the next bot speaks."""
+        self.reconcile_runs()
         item = self.repository.peek_group_speaker(group_id)
         if item is None:
             self._anticipated.pop(group_id, None)

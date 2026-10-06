@@ -39,7 +39,7 @@ from .model_gateway import (
 from .policy import PolicyEngine
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
 from .mentions import is_resume_request, prompt_for_direct_message
-from .repository import Repository
+from .repository import ORPHAN_NOTICE, Repository
 from .runtime import RunRuntime
 from .settings import Settings, running_on_vercel
 from .tenancy import tenant_digest, tenant_locations
@@ -1266,6 +1266,7 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
         repository.get_group(group_id)
     except KeyError as error:
         raise not_found(error) from error
+    runtime.reconcile_runs()
     live: list[tuple[UUID, str, str]] = []
     for run in repository.live_runs_for_group(group_id):
         status = str(run.status)
@@ -1286,11 +1287,6 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
     ]
 
 
-def _run_is_live(run_id: UUID) -> bool:
-    task = runtime._tasks.get(run_id)
-    return task is not None and not task.done()
-
-
 @app.get("/api/v1/bots/{bot_id}/activity", response_model=BotActivity)
 def bot_activity(bot_id: UUID) -> BotActivity:
     try:
@@ -1298,6 +1294,7 @@ def bot_activity(bot_id: UUID) -> BotActivity:
         conversation_id = repository.conversation_for_bot(bot_id)
     except KeyError as error:
         raise not_found(error) from error
+    runtime.reconcile_runs()
     active = repository.active_runs_for_bot(bot_id)
     latest = repository.latest_run_for_bot(bot_id)
     pending = [
@@ -1305,10 +1302,10 @@ def bot_activity(bot_id: UUID) -> BotActivity:
         for approval in repository.list_approvals(ApprovalStatus.PENDING)
         if latest is not None and approval.run_id == latest.id and latest.status is RunStatus.WAITING_APPROVAL
     ]
-    if any(_run_is_live(run.id) for run in active):
-        return BotActivity(working=True, approvals=pending)
     if active:
-        return BotActivity(working=False, error="Balasan terputus. Kirim ulang pesan.", approvals=pending)
+        return BotActivity(working=True, approvals=pending)
+    if latest is not None and latest.status is RunStatus.FAILED and latest.error == ORPHAN_NOTICE:
+        return BotActivity(working=False, error=latest.error, approvals=pending)
     if pending:
         return BotActivity(working=False, approvals=pending)
     messages = repository.list_messages(conversation_id)
