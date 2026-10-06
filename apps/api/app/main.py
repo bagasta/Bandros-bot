@@ -749,6 +749,7 @@ def health() -> dict[str, str]:
         "status": "ok",
         "environment": settings.environment_name,
         "commit": _git_commit_sha(),
+        "db": "postgres" if settings.database_url else "sqlite",
     }
 
 

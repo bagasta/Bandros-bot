@@ -4,7 +4,8 @@ Run the SQLite suite (no Neon required):
 
     pytest
 
-Run this Postgres suite against a reachable server:
+Run this Postgres suite against a reachable server. CI sets BANDROS_TEST_POSTGRES
+for the same command:
 
     BANDROS_TEST_POSTGRES=postgresql://USER:PASS@127.0.0.1:5432/DB pytest tests/test_postgres_store.py
 """

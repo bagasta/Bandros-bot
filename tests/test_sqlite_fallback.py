@@ -4,9 +4,10 @@ Run just this path:
 
     pytest tests/test_sqlite_fallback.py
 
-Run the whole suite the same way (Postgres cases skip unless BANDROS_TEST_POSTGRES is set):
+CI runs this file without BANDROS_TEST_POSTGRES, then runs the Postgres file
+with that DSN set. Locally:
 
-    pytest
+    pytest tests/test_sqlite_fallback.py
 """
 
 from __future__ import annotations
@@ -66,7 +67,11 @@ def test_health_and_bots_use_sqlite_when_database_url_is_blank(tmp_path: Path, m
         )
 
     assert health.status_code == 200
-    assert health.json()["status"] == "ok"
+    body = health.json()
+    assert body["status"] == "ok"
+    assert body["db"] == "sqlite"
+    assert "commit" in body
+    assert "environment" in body
     assert anonymous.status_code == 401
     assert listed.status_code == 200
     assert any(bot["name"] == "Bandros" for bot in listed.json())
@@ -94,7 +99,11 @@ def test_health_starts_when_database_url_points_at_an_unreachable_host(monkeypat
         health = client.get("/health")
         anonymous = client.get("/api/v1/bots")
     assert health.status_code == 200
-    assert health.json()["status"] == "ok"
+    body = health.json()
+    assert body["status"] == "ok"
+    assert body["db"] == "postgres"
+    assert body["environment"]
+    assert "commit" in body
     assert anonymous.status_code == 401
 
 

@@ -7,6 +7,20 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bandros
+          POSTGRES_DB: bandros
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bandros -d bandros"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -14,7 +28,12 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
-      - run: pytest -q
+      - name: SQLite fallback
+        run: pytest -q --ignore=tests/test_postgres_store.py
+      - name: Postgres
+        env:
+          BANDROS_TEST_POSTGRES: postgresql://bandros@127.0.0.1:5432/bandros
+        run: pytest -q tests/test_postgres_store.py
 
   frontend:
     runs-on: ubuntu-latest
