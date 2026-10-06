@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { groupMemberSubtitle, hasVisibleBubble, turnSignalNames, typingBubbleNames } from "./chat-presentation";
+import { groupMemberSubtitle, hasVisibleBubble, presentGroupMembers, turnSignalNames, typingBubbleNames } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 
@@ -1009,6 +1009,7 @@ export default function GrokDashboard() {
     }
   };
 
+  const openRoster = selectedGroup ? presentGroupMembers(selectedGroup.members, bots) : [];
   const displayName = selectedGroup?.name || selectedBot?.name || "New Bot";
   const availableMembers = selectedGroup ? activeBots.filter((bot) => !selectedGroup.members.some((member) => member.id === bot.id)) : [];
   const typingPeople = selectedGroup
@@ -1042,7 +1043,10 @@ export default function GrokDashboard() {
         </div>
         <div className="bandros-group-list">
           <div className="bandros-groups-heading"><span>Groups</span></div>
-          {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-mark"><BandrosAvatar name={group.name} working={selectedGroup?.id === group.id && typingPeople.length > 0} /><em>{group.members.length}</em></span><span className="bandros-agent-copy"><strong>{group.name}</strong><small>{groupMemberSubtitle(group.members)}</small></span></button>)}
+          {groups.map((group) => {
+            const roster = presentGroupMembers(group.members, bots, selectedGroup?.id === group.id ? selectedGroup.members : []);
+            return <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-mark"><BandrosAvatar name={group.name} working={selectedGroup?.id === group.id && typingPeople.length > 0} /><em>{roster.length}</em></span><span className="bandros-agent-copy"><strong>{group.name}</strong><small>{groupMemberSubtitle(roster)}</small></span></button>;
+          })}
         </div>
         <button className="bandros-account" type="button" onClick={() => chatGPT.connected ? void disconnectChatGPT() : void connectChatGPT()}><BandrosAvatar name="Marketplace" /><span><strong>Marketplace</strong><small>{chatGPT.connected ? chatGPT.email || "ChatGPT terhubung" : "Sign in with ChatGPT"}</small></span></button>
       </aside>
@@ -1051,7 +1055,7 @@ export default function GrokDashboard() {
           <button className="bandros-back" type="button" onClick={() => { setMobilePane("list"); setSettingsOpen(false); }} aria-label="Kembali ke daftar Bot">‹</button>
           {chatGPT.connected && (selectedBot || selectedGroup) && <button className="bandros-title" type="button" onClick={openSettings} disabled={!selectedBot}>
             <span className={`bandros-status-dot ${turnActive ? "is-live" : ""}`} />
-            <span><strong>{displayName}</strong><small>{typingPeople.length > 0 ? `${typingPeople.join(", ")} mengetik…` : selectedGroup ? selectedGroup.members.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
+            <span><strong>{displayName}</strong><small>{typingPeople.length > 0 ? `${typingPeople.join(", ")} mengetik…` : selectedGroup ? openRoster.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
           </button>}
           {selectedBot && !selectedGroup && <button type="button" className="bandros-panel-toggle" aria-label="Pengaturan bot" title="Pengaturan bot" onClick={openSettings}>⋯</button>}
           {selectedGroup && <button type="button" className="bandros-panel-toggle" aria-label={membersOpen ? "Tutup anggota" : "Buka anggota"} title={membersOpen ? "Tutup anggota" : "Buka anggota"} aria-expanded={membersOpen} onClick={() => setMembersOpen((open) => !open)}>{membersOpen ? "»" : "«"}</button>}

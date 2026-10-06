@@ -1281,7 +1281,7 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
         queued.append((member.id, member.name))
     return [
         GroupActivity(bot_id=bot_id, name=name, status=status)
-        for bot_id, name, status in describe_group_activity(live, queued)
+        for bot_id, name, status in describe_group_activity(live, queued, runtime.composing_bot_id(group_id))
     ]
 
 
