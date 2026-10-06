@@ -124,11 +124,17 @@
 .bandros-message.from-user .bandros-bubble { background: var(--bubble-user); color: #fff; white-space: pre-wrap; border-color: transparent; border-radius: 16px; }
 .bandros-message.from-user .bandros-bubble time { color: rgba(255, 255, 255, .62); }
 .bandros-rich p { margin: 0 0 8px; }
-.bandros-rich p:last-child, .bandros-rich ul:last-child, .bandros-rich ol:last-child, .bandros-rich pre:last-child { margin-bottom: 0; }
+.bandros-rich p:last-child, .bandros-rich ul:last-child, .bandros-rich ol:last-child, .bandros-rich pre:last-child, .bandros-rich .bandros-table-wrap:last-child { margin-bottom: 0; }
 .bandros-rich strong { font-weight: 700; }
 .bandros-rich ul, .bandros-rich ol { margin: 4px 0 8px; padding-left: 1.15em; list-style: disc; }
-.bandros-rich ol { list-style: decimal; }
+.bandros-app .bandros-rich ol { margin: 4px 0 8px; padding-left: 0; list-style: none; counter-reset: bandros-ol; }
+.bandros-app .bandros-rich ol > li { display: block; margin: 3px 0; padding: 0 0 0 1.4em; border: 0; gap: 0; position: relative; counter-increment: bandros-ol; }
+.bandros-app .bandros-rich ol > li::before { content: counter(bandros-ol) ". "; position: absolute; left: 0; }
 .bandros-rich li { display: list-item; margin: 3px 0; padding: 0; border: 0; gap: 0; }
+.bandros-rich .bandros-table-wrap { margin: 8px 0; overflow-x: auto; }
+.bandros-rich table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.bandros-rich th, .bandros-rich td { padding: 6px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.bandros-rich th { font-weight: 650; background: rgba(255, 255, 255, .04); }
 .bandros-rich h3, .bandros-rich h4, .bandros-rich h5 { margin: 0 0 6px; font-size: 15px; letter-spacing: -.02em; }
 .bandros-rich a { color: inherit; }
 .bandros-rich code { padding: 1px 5px; background: rgba(0, 0, 0, .06); border-radius: 6px; font-size: .92em; }
