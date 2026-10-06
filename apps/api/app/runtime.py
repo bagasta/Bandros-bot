@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from .domain import ApprovalStatus, BotStatus, RunStatus
@@ -25,16 +26,26 @@ from .mentions import (
     without_peer_mentions,
     without_self_mention,
 )
-from .model_gateway import ModelGateway
+from .model_gateway import MODEL_UNAVAILABLE, ModelGateway, ModelUnavailable
+from .settings import running_on_vercel
 from .repository import Repository
 from .workspace_tools import WorkspaceToolset
 
 
 def _user_facing_error(error: Exception) -> str:
     text = str(error).strip() or "Balasan gagal."
+    if "Mock response for:" in text or isinstance(error, ModelUnavailable):
+        return MODEL_UNAVAILABLE
     if "request_limit" in text:
         return "Langkahnya kepanjangan. Kirim ulang bagian yang belum selesai."
     return text
+
+
+def _public_answer(answer: str) -> str:
+    """Production must not save a mock gateway echo of the prompt."""
+    if running_on_vercel() and "Mock response for:" in answer:
+        return MODEL_UNAVAILABLE
+    return answer
 
 
 @dataclass(slots=True)
@@ -45,6 +56,7 @@ class RunRuntime:
     max_model_calls: int
     workspace_root: Path = Path("/workspace")
     computer: object | None = None
+    resolve_group_model: Callable[[Any], str] | None = None
     _tasks: dict[UUID, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _approved_tools: dict[UUID, dict[str, list[dict[str, object]]]] = field(default_factory=dict, init=False)
     _group_depth: dict[UUID, int] = field(default_factory=dict, init=False)
@@ -181,6 +193,7 @@ class RunRuntime:
             if answer is None or await self._turn_stopped(run_id):
                 self._keep_stopped_stage(run_id, toolset.continuation)
                 return
+            answer = _public_answer(answer)
         except Exception as error:
             message = "Balasan terlalu lama. Kirim ulang." if isinstance(error, TimeoutError) else _user_facing_error(error)
             self._finish_failed_run(run_id, run.conversation_id, message)
@@ -571,7 +584,12 @@ class RunRuntime:
                     f"{prompt}\n\nLanjutkan tahap yang sama yang terhenti. "
                     f"Catatan tahap sebelumnya: {interrupted.continuation}"
                 )
-        run = self.repository.create_run(target.id, conversation_id, prompt, target.model or self.default_model)
+        try:
+            model = self._group_model(target)
+        except ModelUnavailable:
+            self.repository.append_group_message(group_id, "bot", MODEL_UNAVAILABLE, target.id)
+            return
+        run = self.repository.create_run(target.id, conversation_id, prompt, model)
         self.repository.link_run_to_group(run.id, group_id)
         self._group_depth[run.id] = depth
         target_messages_before = sum(
@@ -591,6 +609,12 @@ class RunRuntime:
         remaining = [name for name in self._anticipated.get(group_id, []) if name != target.name]
         if remaining:
             self._anticipated[group_id] = remaining
+
+    def _group_model(self, target: Any) -> str:
+        resolver = self.resolve_group_model
+        if resolver is None:
+            return target.model or self.default_model
+        return resolver(target)
 
     def _target_message_count(self, group_id: UUID, bot_id: UUID) -> int:
         return sum(

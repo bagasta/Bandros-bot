@@ -6,7 +6,10 @@ from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 import httpx
 
+from .settings import running_on_vercel
 from .workspace_tools import ToolDefinition
+
+MODEL_UNAVAILABLE = "Model belum tersedia."
 
 
 class ApprovalRequired(Exception):
@@ -22,6 +25,51 @@ def _find_approval(error: BaseException) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+class ModelUnavailable(RuntimeError):
+    """Raised when a turn has no real model to call."""
+
+
+def preferred_chatgpt_model(connection: dict[str, Any] | None, fallback: str | None = None) -> str | None:
+    """Return the session ChatGPT model, prefixed so the composite gateway will not use mock."""
+    if not connection:
+        return None
+    scope = str(connection.get("scope") or "").split()
+    usable = connection.get("auth_mode") == "codex" or "chatgpt.tokens.use.direct" in scope
+    token = connection.get("access_token")
+    if not usable or not isinstance(token, str) or not token.strip():
+        return None
+    preferred = connection.get("preferred_model")
+    if isinstance(preferred, str) and preferred.strip():
+        name = preferred.strip()
+        return name if name.startswith("chatgpt/") else f"chatgpt/{name}"
+    if isinstance(fallback, str) and fallback.strip():
+        name = fallback.strip()
+        return name if name.startswith("chatgpt/") else f"chatgpt/{name}"
+    return None
+
+
+def resolve_group_model(
+    bot_model: str | None,
+    connection: dict[str, Any] | None,
+    *,
+    openrouter_ready: bool,
+    default_model: str,
+    fallback_chatgpt_model: str | None = None,
+) -> str:
+    """Pick a real model for a group turn. Unprefixed models must not fall through to mock."""
+    stored = (bot_model or "").strip()
+    if stored.startswith("chatgpt/"):
+        return stored
+    chatgpt = preferred_chatgpt_model(connection, fallback_chatgpt_model)
+    if chatgpt:
+        return chatgpt
+    if openrouter_ready:
+        fallback = stored or default_model.strip()
+        if fallback:
+            return fallback
+    raise ModelUnavailable(MODEL_UNAVAILABLE)
 
 
 class ModelGateway(Protocol):
@@ -49,6 +97,8 @@ class MockGateway:
         tools: Sequence[ToolDefinition] = (),
         request_limit: int = 8,
     ) -> str:
+        if running_on_vercel():
+            raise ModelUnavailable(MODEL_UNAVAILABLE)
         return f"Mock response for: {prompt}"
 
 
@@ -179,9 +229,7 @@ class OpenRouterGateway:
         request_limit: int = 8,
     ) -> str:
         if not self.api_key:
-            raise RuntimeError(
-                "OPENROUTER_API_KEY is not configured. Add it to .env before starting model runs."
-            )
+            raise ModelUnavailable(MODEL_UNAVAILABLE)
         from pydantic_ai.models.openai import OpenAIChatModel
         from pydantic_ai.providers.openai import OpenAIProvider
 

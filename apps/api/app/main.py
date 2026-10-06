@@ -28,7 +28,13 @@ from .database import Database, database_revision, encode_snapshot, hold_snapsho
 from .computer import DaytonaComputer
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, ClawHubInstall, ClawHubListing, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
-from .model_gateway import ChatGPTGateway, CompositeGateway, MockGateway, OpenRouterGateway
+from .model_gateway import (
+    ChatGPTGateway,
+    CompositeGateway,
+    MockGateway,
+    OpenRouterGateway,
+    resolve_group_model,
+)
 from .policy import PolicyEngine
 from .orchestrator import ORCHESTRATOR_DESCRIPTION, ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_NAME
 from .mentions import is_resume_request, prompt_for_direct_message
@@ -67,10 +73,26 @@ class _Active:
 
 repository = _Active(current_repository)
 runtime = _Active(current_runtime)
+
+
+def _openrouter_gateway() -> MockGateway | OpenRouterGateway:
+    if settings.model_gateway == "mock" and not running_on_vercel():
+        return MockGateway()
+    return OpenRouterGateway(settings.openrouter_api_key, settings.openrouter_base_url)
+
+
+def _model_for_group_bot(bot: Bot) -> str:
+    return resolve_group_model(
+        bot.model,
+        _chatgpt_connection(),
+        openrouter_ready=settings.model_gateway != "mock" and bool(settings.openrouter_api_key),
+        default_model=settings.default_model,
+        fallback_chatgpt_model=LATEST_CODEX_MODEL["id"],
+    )
+
+
 _gateway = CompositeGateway(
-    MockGateway()
-    if settings.model_gateway == "mock"
-    else OpenRouterGateway(settings.openrouter_api_key, settings.openrouter_base_url),
+    _openrouter_gateway(),
     ChatGPTGateway(
         _chatgpt_connection,
         lambda connection: _refresh_chatgpt_token(connection),
@@ -212,6 +234,7 @@ def activate_account(account_id: str) -> tuple[object, object]:
             default_model=settings.default_model,
             max_model_calls=settings.max_model_calls_per_run,
             workspace_root=files,
+            resolve_group_model=_model_for_group_bot,
             computer=DaytonaComputer(
                 api_key=settings.daytona_api_key,
                 api_url=settings.daytona_api_url,

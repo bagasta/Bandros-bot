@@ -59,8 +59,9 @@ class Settings:
         data_root = Path("/tmp/bandros") if vercel else PROJECT_ROOT / "data"
         openrouter_key = _env_value("OPENROUTER_API_KEY")
         gateway = _env_value("MODEL_GATEWAY")
-        if gateway is None:
-            gateway = "mock" if vercel and not openrouter_key else "openrouter"
+        # A missing key must not silently echo prompts. Mock stays local-only.
+        if gateway is None or (vercel and gateway == "mock"):
+            gateway = "openrouter"
         return cls(
             database_path=_env_path("DATABASE_PATH", data_root / "workspace.db"),
             workspace_root=_env_path("WORKSPACE_ROOT", data_root / "workspace"),
