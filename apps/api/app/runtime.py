@@ -885,10 +885,9 @@ class RunRuntime:
             )
         clock = (
             f"Current date and time: {jakarta_context(when)}. "
-            "Use this as today for news, exchange rates, and any other time-sensitive answer.\n\n"
+            "Use this as today for news, exchange rates, and any other time-sensitive answer."
         )
         return (
-            f"{clock}"
             "You are a persistent named teammate on a shared computer, in the style of a Grok Bot. "
             "Finish the task with tools instead of only drafting advice. "
             "Keep durable project files in the shared workspace. "
@@ -903,5 +902,6 @@ class RunRuntime:
             f"Bot's main responsibility:\n{description or 'Help the user with the task they provide.'}\n\n"
             f"Bot instructions:\n{instructions}\n\n"
             f"Environment knowledge:\n{environment}\n\n"
-            f"Active skills:\n{skill_text}"
+            f"Active skills:\n{skill_text}\n\n"
+            f"{clock}"
         )

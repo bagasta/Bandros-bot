@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from uuid import UUID
 
 import httpx
+from fastapi.testclient import TestClient
 
+from apps.api.app import main
 from apps.api.app.database import Database
 from apps.api.app.domain import RunStatus
 from apps.api.app.openrouter_search import citations_from_payload, openrouter_web_search, search_body, search_model
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime, jakarta_context
+from apps.api.app.tenancy import tenant_locations
 from apps.api.app.workspace_tools import WorkspaceToolset, visible_page_text
 
 
@@ -227,8 +231,14 @@ def test_system_prompt_includes_jakarta_clock() -> None:
     moment = datetime(2026, 10, 6, 4, 22, tzinfo=UTC)
     prompt = RunRuntime._system_prompt("Kerjakan riset.", "Riset FX", when=moment)
 
+    clock = (
+        f"Current date and time: {jakarta_context(moment)}. "
+        "Use this as today for news, exchange rates, and any other time-sensitive answer."
+    )
     assert jakarta_context(moment) == "Tuesday, 6 October 2026, 11:22 WIB (Asia/Jakarta)"
-    assert prompt.startswith(f"Current date and time: {jakarta_context(moment)}.")
+    assert prompt.startswith("You are a persistent named teammate")
+    assert prompt.endswith(clock)
+    assert prompt.index("Active skills:") < prompt.index("Current date and time:")
     assert "May 2025" not in prompt
 
 
@@ -251,3 +261,58 @@ def test_search_sources_are_saved_and_the_running_tool_is_visible(tmp_path: Path
     assert posted.citations == [source]
     repository.complete_tool_call(call_id, {"ok": True, "results": [source]}, True)
     assert repository.running_tool_name(run.id) is None
+
+
+def test_direct_chat_api_returns_citations(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(
+            main.settings,
+            database_path=tmp_path / "workspace.db",
+            workspace_root=tmp_path / "workspace",
+            await_runs=True,
+        ),
+    )
+    main._workspaces.clear()
+    asyncio.run(
+        main.credential_store.put(
+            "sessions",
+            "token-dm",
+            {"auth_mode": "codex", "account_id": "acct_dm", "access_token": "a"},
+        )
+    )
+    headers = {"X-Bandros-Session": "token-dm"}
+    source = {"title": "BI", "url": "https://example.com/bi", "snippet": "USD/IDR"}
+
+    with TestClient(main.app) as client:
+        listed = client.get("/api/v1/bots", headers=headers)
+        bot_id = next(bot["id"] for bot in listed.json() if bot["name"] == "Bandros")
+        database_path, _, _ = tenant_locations("acct_dm", tmp_path, tmp_path / "workspace")
+        repository = Repository(Database(database_path))
+        conversation_id = repository.conversation_for_bot(UUID(bot_id))
+        run = repository.create_run(UUID(bot_id), conversation_id, "kurs", "test-model")
+        repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED)
+        assert repository.commit_assistant_turn(run.id, "Kurs hari ini.", "test-model", [source]) is True
+        direct = client.get(f"/api/v1/bots/{bot_id}/messages", headers=headers)
+        enveloped = client.get(
+            f"/api/v1/bots/{bot_id}/messages",
+            headers={**headers, "X-Bandros-Envelope": "1"},
+        )
+    main._workspaces.clear()
+
+    assert direct.status_code == 200
+    assert _assistant_citations(direct.json()) == [source]
+    assert enveloped.status_code == 200
+    payload = enveloped.json()
+    messages = payload["data"] if isinstance(payload, dict) and "data" in payload else payload
+    assert _assistant_citations(messages) == [source]
+
+
+def _assistant_citations(messages: list[dict[str, object]]) -> list[object]:
+    assistant = next(item for item in messages if item["role"] == "assistant")
+    citations = assistant["citations"]
+    assert isinstance(citations, list)
+    return citations

@@ -84,7 +84,7 @@ function SourceList({ citations }: { citations?: Citation[] }) {
   if (items.length === 0) return null;
   return (
     <div className="bandros-sources">
-      <span className="bandros-tool-use">Mencari web</span>
+      <span className="bandros-tool-use">Sumber</span>
       {items.map((item) => <a key={item.url} href={item.url} target="_blank" rel="noreferrer">{item.title || item.url}</a>)}
     </div>
   );
