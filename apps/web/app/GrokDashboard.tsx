@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, toolUseLabel, turnSignalNames, typingBubbleNames, typingToolLabel } from "./chat-presentation";
+import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 
@@ -665,15 +665,15 @@ export default function GrokDashboard() {
           try {
             const activity = await request<GroupActivity[]>(`/groups/${groupId}/activity`);
             if (active) setTypingActivity(activity);
-            const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
+            const turn = await request<{ speaker: string | null; pending: number; activity?: GroupActivity[] }>(`/groups/${groupId}/advance`, { method: "POST" });
             groupPending.current = turn.pending > 0;
+            if (active) setTypingActivity((current) => typingActivityAfterTurn(current, turn));
             const nextGroups = await request<Group[]>("/groups");
             if (active) setGroups(nextGroups);
             const messageMeta: RequestMeta = { fresh: true };
             const nextMessages = await request<GroupMessage[]>(`/groups/${groupId}/messages`, undefined, messageMeta);
             if (!active || !messageMeta.fresh) return;
             applyMessages(nextMessages);
-            if (!turn.pending) setTypingActivity([]);
           } finally {
             advancing.current = false;
           }
@@ -732,7 +732,8 @@ export default function GrokDashboard() {
           if (selectedGroupId.current !== groupId) return;
           const activity = await request<GroupActivity[]>(`/groups/${groupId}/activity`);
           if (selectedGroupId.current === groupId) setTypingActivity(activity);
-          const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
+          const turn = await request<{ speaker: string | null; pending: number; activity?: GroupActivity[] }>(`/groups/${groupId}/advance`, { method: "POST" });
+          if (selectedGroupId.current === groupId) setTypingActivity((current) => typingActivityAfterTurn(current, turn));
           const spoken = await request<GroupMessage[]>(`/groups/${groupId}/messages`);
           if (selectedGroupId.current !== groupId) return;
           setGroupMessages(spoken);
@@ -742,7 +743,7 @@ export default function GrokDashboard() {
           }
           groupPending.current = true;
         }
-        setTypingActivity([]);
+        if (!groupPending.current) setTypingActivity([]);
         const latestGroups = await request<Group[]>("/groups");
         if (selectedGroupId.current === groupId) {
           setGroups(latestGroups);

@@ -104,6 +104,40 @@ export function typingBubbleNames(activity: readonly TypingActivity[]): string[]
   );
 }
 
+export type TurnActivityUpdate<T extends TypingActivity = TypingActivity> = {
+  speaker?: string | null;
+  pending: number;
+  activity?: readonly T[];
+};
+
+/**
+ * The turn response is the moment the composer changes. Keep that payload,
+ * and otherwise hand the bubble to the next queued bot. The previous
+ * speaker's name must not stay on screen until the next activity poll.
+ */
+export function typingActivityAfterTurn<T extends TypingActivity>(
+  previous: readonly T[],
+  turn: TurnActivityUpdate<T>,
+): T[] {
+  if (turn.pending <= 0) return [];
+  const incoming = (turn.activity ?? [])
+    .map((item) => ({ ...item, name: item.name.trim() }))
+    .filter((item) => item.name.length > 0);
+  if (incoming.length > 0) return incoming;
+  return releaseFinishedTyper(previous, turn.speaker ?? null);
+}
+
+function releaseFinishedTyper<T extends TypingActivity>(activity: readonly T[], finishedName: string | null): T[] {
+  const finished = (finishedName ?? "").trim();
+  const kept = activity
+    .map((item) => ({ ...item, name: item.name.trim() }))
+    .filter((item) => item.name.length > 0 && item.name !== finished);
+  if (kept.some((item) => liveTypingStatuses.has(item.status))) return kept;
+  const nextIndex = kept.findIndex((item) => item.name.length > 0);
+  if (nextIndex < 0) return [];
+  return kept.map((item, index) => (index === nextIndex ? { ...item, status: "running" } : item));
+}
+
 export function hasVisibleBubble(content: string): boolean {
   return content.trim().length > 0;
 }

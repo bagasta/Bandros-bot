@@ -28,7 +28,7 @@ from .database import Database, database_revision, encode_snapshot, hold_snapsho
 from .computer import DaytonaComputer
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, ClawHubInstall, ClawHubListing, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
-from .group_activity import LIVE_TYPING_STATUSES, describe_group_activity
+from .group_activity import load_group_activity
 from .model_gateway import (
     ChatGPTGateway,
     CompositeGateway,
@@ -1260,6 +1260,18 @@ def add_group_member(group_id: UUID, payload: GroupMemberInput) -> WorkGroup:
         raise not_found(error) from error
 
 
+def _group_activity_rows(group_id: UUID) -> list[GroupActivity]:
+    tool_by_bot: dict[UUID, str] = {}
+    for run in repository.live_runs_for_group(group_id):
+        tool = repository.running_tool_name(run.id)
+        if tool:
+            tool_by_bot.setdefault(run.bot_id, tool)
+    return [
+        GroupActivity(bot_id=bot_id, name=name, status=status, tool=tool_by_bot.get(bot_id))
+        for bot_id, name, status in load_group_activity(repository, group_id, runtime.composing_bot_id(group_id))
+    ]
+
+
 @app.get("/api/v1/groups/{group_id}/activity", response_model=list[GroupActivity])
 def group_activity(group_id: UUID) -> list[GroupActivity]:
     try:
@@ -1267,28 +1279,7 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
     except KeyError as error:
         raise not_found(error) from error
     runtime.reconcile_runs()
-    live: list[tuple[UUID, str, str]] = []
-    tool_by_bot: dict[UUID, str] = {}
-    for run in repository.live_runs_for_group(group_id):
-        status = str(run.status)
-        if status not in LIVE_TYPING_STATUSES:
-            continue
-        bot = repository.get_bot(run.bot_id)
-        live.append((bot.id, bot.name, status))
-        tool = repository.running_tool_name(run.id)
-        if tool:
-            tool_by_bot.setdefault(bot.id, tool)
-    group = repository.get_group(group_id)
-    queued: list[tuple[UUID, str]] = []
-    for bot_id in repository.queued_bot_ids(group_id):
-        member = next((item for item in group.members if item.id == bot_id), None)
-        if member is None:
-            continue
-        queued.append((member.id, member.name))
-    return [
-        GroupActivity(bot_id=bot_id, name=name, status=status, tool=tool_by_bot.get(bot_id))
-        for bot_id, name, status in describe_group_activity(live, queued, runtime.composing_bot_id(group_id))
-    ]
+    return _group_activity_rows(group_id)
 
 
 @app.get("/api/v1/bots/{bot_id}/activity", response_model=BotActivity)
@@ -1341,6 +1332,7 @@ def list_group_messages(group_id: UUID) -> list[GroupMessage]:
 class GroupStep(BaseModel):
     speaker: str | None = None
     pending: int = 0
+    activity: list[GroupActivity] = []
 
 
 @app.post("/api/v1/groups/{group_id}/messages", response_model=GroupMessage, status_code=status.HTTP_201_CREATED)
@@ -1362,8 +1354,10 @@ async def advance_group_message(group_id: UUID) -> GroupStep:
         repository.get_group(group_id)
     except KeyError as error:
         raise not_found(error) from error
+    runtime.reconcile_runs()
     speaker = await runtime.advance_group(group_id)
-    return GroupStep(speaker=speaker, pending=repository.group_queue_size(group_id))
+    activity = _group_activity_rows(group_id)
+    return GroupStep(speaker=speaker, pending=repository.group_queue_size(group_id), activity=activity)
 
 
 @app.post("/api/v1/groups/{group_id}/cancel", response_model=list[Run])

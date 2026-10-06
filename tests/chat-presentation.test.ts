@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, toolUseLabel, turnSignalNames, typingBubbleNames, typingToolLabel } from "../apps/web/app/chat-presentation.ts";
+import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "../apps/web/app/chat-presentation.ts";
 
 const roster = [
   { name: "Bandros" },
@@ -98,6 +98,36 @@ test("only a live composer gets a typing bubble", () => {
   ];
   assert.deepEqual(typingBubbleNames(activity), ["Tester Tiga"]);
   assert.equal(typingBubbleNames(activity).some((name) => name === "Bandros" || name === "Tester Satu" || name === "Tester Dua"), false);
+});
+
+test("a finished speaker does not keep the typing label on the next turn", () => {
+  const previous = [
+    { name: "QA-Penulis", status: "running" },
+    { name: "QA-Analis", status: "queued" },
+  ];
+  const handed = typingActivityAfterTurn(previous, {
+    speaker: "QA-Penulis",
+    pending: 1,
+    activity: [
+      { name: "QA-Analis", status: "running" },
+      { name: "QA-Reviewer", status: "queued" },
+    ],
+  });
+  assert.deepEqual(typingBubbleNames(handed), ["QA-Analis"]);
+});
+
+test("handoff drops the finished name when the turn has no fresh activity", () => {
+  const previous = [
+    { name: "QA-Penulis", status: "running" },
+    { name: "QA-Analis", status: "queued" },
+  ];
+  const handed = typingActivityAfterTurn(previous, { speaker: "QA-Penulis", pending: 1 });
+  assert.deepEqual(typingBubbleNames(handed), ["QA-Analis"]);
+});
+
+test("a finished turn clears the typing label", () => {
+  const previous = [{ name: "QA-Penulis", status: "running" }];
+  assert.deepEqual(typingActivityAfterTurn(previous, { speaker: "QA-Penulis", pending: 0, activity: previous }), []);
 });
 
 test("approval wait is still typing for that bot alone", () => {
