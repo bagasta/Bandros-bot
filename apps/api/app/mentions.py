@@ -159,7 +159,7 @@ def route_next_owner(answer: str, members: list[Bot], sender: Bot, finished_ids:
 
 
 def _keep_one_handoff_mention(answer: str, members: list[Bot], sender: Bot) -> str:
-    """A handoff wakes one teammate. Extra @Name tokens are removed; a bare name is not a mention."""
+    """A handoff wakes one teammate. Later @Name tokens lose only the @, so the name stays readable."""
     spans: list[tuple[int, int]] = []
     occupied: list[tuple[int, int]] = []
     for member in sorted(members, key=lambda item: len(item.name), reverse=True):
@@ -172,8 +172,8 @@ def _keep_one_handoff_mention(answer: str, members: list[Bot], sender: Bot) -> s
             spans.append((start, end))
             occupied.append((start, end))
     ordered = sorted(spans)
-    for start, end in reversed(ordered[1:]):
-        answer = f"{answer[:start]}{answer[end:]}"
+    for start, _end in reversed(ordered[1:]):
+        answer = f"{answer[:start]}{answer[start + 1:]}"
     return answer
 
 

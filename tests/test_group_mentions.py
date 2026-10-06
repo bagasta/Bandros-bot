@@ -395,7 +395,7 @@ def test_handoff_wakes_exactly_one_mentioned_bot(tmp_path: Path) -> None:
     def bandros_reply(prompt: str) -> str:
         if "Halaman selesai" in prompt:
             return "Hasil akhir: halaman produk sudah ada."
-        return "@Frontend @Backend kerjakan bersamaan. Backend tanpa simbol tetap tidak dipanggil."
+        return "@Frontend lalu @Backend cek API"
 
     runtime = RunRuntime(
         repository,
@@ -412,9 +412,8 @@ def test_handoff_wakes_exactly_one_mentioned_bot(tmp_path: Path) -> None:
 
     messages = repository.list_group_messages(group.id)
     bandros_handoff = next(message.content for message in messages if message.sender_bot_id == bandros.id)
+    assert bandros_handoff == "@Frontend lalu Backend cek API"
     assert bandros_handoff.count("@") == 1
-    assert "@Frontend" in bandros_handoff
-    assert "@Backend" not in bandros_handoff
     assert [message.sender_bot_id for message in messages] == [None, bandros.id, frontend.id, bandros.id]
 
 
