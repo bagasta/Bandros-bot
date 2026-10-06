@@ -17,7 +17,7 @@ from apps.api.app.openrouter_search import citations_from_payload, openrouter_we
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime, jakarta_context
 from apps.api.app.tenancy import tenant_locations
-from apps.api.app.workspace_tools import WorkspaceToolset, visible_page_text
+from apps.api.app.workspace_tools import WEB_SEARCH_REPLY_GUIDANCE, WorkspaceToolset, visible_page_text
 
 
 WIKIPEDIA = """
@@ -225,6 +225,11 @@ def test_web_search_tool_returns_sources(tmp_path: Path, monkeypatch) -> None:
         "model": "openai/gpt-test",
     }
     assert toolset.sources == [{"title": "Kurs", "url": "https://example.com/idr", "snippet": "USD/IDR"}]
+    assert result["instruction"] == WEB_SEARCH_REPLY_GUIDANCE
+    description = next(item.description for item in toolset.definitions() if item.name == "web_search")
+    assert WEB_SEARCH_REPLY_GUIDANCE in description
+    assert "Sumber" in WEB_SEARCH_REPLY_GUIDANCE
+    assert "Do not restate" in WEB_SEARCH_REPLY_GUIDANCE
 
 
 def test_system_prompt_includes_jakarta_clock() -> None:
