@@ -222,11 +222,13 @@ class GroupActivity(APIModel):
     bot_id: UUID
     name: str
     status: str
+    tool: str | None = None
 
 
 class BotActivity(APIModel):
     working: bool
     error: str | None = None
+    tool: str | None = None
     approvals: list[Approval] = Field(default_factory=list)
 
 
@@ -240,6 +242,7 @@ class GroupMessage(APIModel):
     sender_type: str
     sender_bot_id: UUID | None
     content: str
+    citations: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
 
 

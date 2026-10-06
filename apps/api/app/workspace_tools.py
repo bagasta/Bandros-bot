@@ -6,18 +6,20 @@ import re
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
 
+from .openrouter_search import openrouter_web_search, search_model
 from .repository import Repository
 from .domain import BotStatus, RiskClass, RunStatus
 from .orchestrator import missing_instruction_details
 from .policy import PolicyEngine
+from .settings import Settings
 from .weather import WeatherError, forecast
 
 
@@ -66,6 +68,7 @@ class WorkspaceToolset:
         self.skill_names = {skill.name for skill in repository.list_bot_skills(bot_id)}
         self.continuation: str | None = None
         self.tool_uses = 0
+        self.sources: list[dict[str, str]] = []
 
     def definitions(self) -> list[ToolDefinition]:
         # Every persistent Agent is an orchestrator. Description, instructions,
@@ -123,7 +126,13 @@ class WorkspaceToolset:
                 self.use_skill,
                 RiskClass.READ_ONLY,
             ),
-            ToolDefinition("web_search", "Search the public web before a research answer. payload: {query}", self.web_search, RiskClass.READ_ONLY, timeout_seconds=25),
+            ToolDefinition(
+                "web_search",
+                "Search the public web with OpenRouter before a research answer. Returns titles, https sources, and snippets. payload: {query}",
+                self.web_search,
+                RiskClass.READ_ONLY,
+                timeout_seconds=45,
+            ),
             ToolDefinition("fetch_url", "Read a public https page. payload: {url}", self.fetch_url, RiskClass.READ_ONLY, timeout_seconds=25),
         ]
         if any(name.lower() == "weather" for name in self.skill_names):
@@ -571,14 +580,42 @@ class WorkspaceToolset:
 
     async def web_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = self._text(payload, "query")[:300]
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": "BandrosBot/1.0"}) as client:
-            response = await client.post("https://html.duckduckgo.com/html/", data={"q": query})
-        if response.status_code >= 400:
-            return {"ok": False, "error": f"pencarian gagal ({response.status_code}). Lanjut dengan pengetahuan yang ada dan tulis asumsinya."}
-        results = parse_search_results(response.text)
-        if not results:
-            return {"ok": False, "error": "pencarian tidak mengembalikan hasil. Lanjut dengan pengetahuan yang ada dan tulis asumsinya."}
-        return {"ok": True, "results": results}
+        settings = Settings.from_environment()
+        if not settings.openrouter_api_key:
+            return {
+                "ok": False,
+                "error": "OPENROUTER_API_KEY belum diatur. Lanjut dengan pengetahuan yang ada dan tulis asumsinya.",
+            }
+        run = self.repository.get_run(self.run_id)
+        model = search_model(run.model, self.default_model or settings.default_model)
+        async with httpx.AsyncClient(timeout=40) as client:
+            result = await openrouter_web_search(
+                query,
+                api_key=settings.openrouter_api_key,
+                base_url=settings.openrouter_base_url,
+                model=model,
+                client=client,
+            )
+        if result.get("ok"):
+            self._remember_sources(result.get("results") or [])
+        return result
+
+    def _remember_sources(self, results: list[Any]) -> None:
+        seen = {item["url"] for item in self.sources}
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "")
+            if not url.startswith("https://") or url in seen or len(self.sources) == 5:
+                continue
+            seen.add(url)
+            self.sources.append(
+                {
+                    "title": str(item.get("title") or "")[:180],
+                    "url": url[:500],
+                    "snippet": str(item.get("snippet") or "")[:700],
+                }
+            )
 
     async def fetch_url(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = self._text(payload, "url")
@@ -597,25 +634,115 @@ class WorkspaceToolset:
         except WeatherError as error:
             return {"ok": False, "error": str(error)}
 
-def parse_search_results(html: str) -> list[dict[str, str]]:
-    results: list[dict[str, str]] = []
-    for match in re.finditer(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, flags=re.IGNORECASE | re.DOTALL):
-        url = unescape(match.group(1))
-        parsed = urlparse(url)
-        target = parse_qs(parsed.query).get("uddg", [url])[0]
-        title = re.sub(r"<[^>]+>", "", unescape(match.group(2)))
-        title = re.sub(r"\s+", " ", title).strip()
-        if title and target.startswith("https://"):
-            results.append({"title": title[:180], "url": target[:500]})
-        if len(results) == 5:
-            break
-    return results
+_SKIP_TAGS = {"script", "style", "noscript", "template", "svg", "nav", "header", "footer", "aside", "form", "iframe"}
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+_CHROME_IDS = {
+    "mw-navigation",
+    "mw-panel",
+    "mw-head",
+    "mw-page-base",
+    "mw-head-base",
+    "footer",
+    "p-navigation",
+    "p-personal",
+    "p-lang",
+    "p-tb",
+    "p-search",
+    "p-logo",
+    "vector-toc",
+    "mw-panel-toc",
+    "toc",
+    "sitesub",
+    "contentsub",
+    "jump-to-nav",
+    "catlinks",
+    "mw-data-after-content",
+    "vector-page-toolbar",
+    "right-navigation",
+    "left-navigation",
+}
+_CHROME_CLASSES = {"vector-toc", "toc", "mw-jump-link", "navbox", "vertical-navbox", "navbar", "sidebar-toc"}
+_CHROME_ROLES = {"navigation", "banner", "contentinfo", "search"}
+_MAIN_IDS = {"mw-content-text", "bodycontent"}
+
+
+class _ArticleTextParser(HTMLParser):
+    """Keep the article body and drop navigation, scripts, and tables of contents."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._stack: list[tuple[str, str]] = []
+        self.main_parts: list[str] = []
+        self.other_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        name = tag.lower()
+        if name in _VOID_TAGS:
+            return
+        self._stack.append((name, self._kind(name, attrs)))
+
+    def handle_endtag(self, tag: str) -> None:
+        name = tag.lower()
+        if name in _VOID_TAGS:
+            return
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == name:
+                del self._stack[index:]
+                return
+
+    def handle_data(self, data: str) -> None:
+        if not data or not data.strip() or self._skipping():
+            return
+        if self._in_main():
+            self.main_parts.append(data)
+        else:
+            self.other_parts.append(data)
+
+    def _kind(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
+        if self._stack and self._stack[-1][1] == "skip":
+            return "skip"
+        ident, classes, role = _attr_bits(attrs)
+        if tag in _SKIP_TAGS or _is_chrome(ident, classes, role):
+            return "skip"
+        if _is_main(tag, ident, classes, role) or (self._stack and self._stack[-1][1] == "main"):
+            return "main"
+        return "text"
+
+    def _skipping(self) -> bool:
+        return bool(self._stack) and self._stack[-1][1] == "skip"
+
+    def _in_main(self) -> bool:
+        return any(kind == "main" for _, kind in self._stack)
 
 
 def visible_page_text(html: str) -> str:
-    without_blocks = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<[^>]+>", " ", unescape(without_blocks))
-    return re.sub(r"\s+", " ", text).strip()
+    parser = _ArticleTextParser()
+    parser.feed(html)
+    parser.close()
+    main_text = _collapse_text(parser.main_parts)
+    if len(main_text) >= 40:
+        return main_text
+    return _collapse_text([*parser.main_parts, *parser.other_parts])
+
+
+def _attr_bits(attrs: list[tuple[str, str | None]]) -> tuple[str, set[str], str]:
+    values = {key.lower(): (value or "") for key, value in attrs}
+    classes = {item for item in values.get("class", "").lower().split() if item}
+    return values.get("id", "").lower(), classes, values.get("role", "").lower()
+
+
+def _is_chrome(ident: str, classes: set[str], role: str) -> bool:
+    if role in _CHROME_ROLES or ident in _CHROME_IDS or classes & _CHROME_CLASSES:
+        return True
+    return any(item.startswith(("vector-menu", "vector-header", "mw-editsection")) for item in classes)
+
+
+def _is_main(tag: str, ident: str, classes: set[str], role: str) -> bool:
+    return tag in {"main", "article"} or role == "main" or ident in _MAIN_IDS or "mw-parser-output" in classes
+
+
+def _collapse_text(parts: list[str]) -> str:
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
 
 async def public_https_url(url: str) -> bool:

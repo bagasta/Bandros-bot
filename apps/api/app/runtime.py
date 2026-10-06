@@ -4,9 +4,11 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from .domain import ApprovalStatus, BotStatus, RunStatus
 from .mentions import (
@@ -30,6 +32,40 @@ from .model_gateway import MODEL_UNAVAILABLE, ModelGateway, ModelUnavailable
 from .settings import running_on_vercel
 from .repository import Repository
 from .workspace_tools import WorkspaceToolset
+
+
+_JAKARTA = ZoneInfo("Asia/Jakarta")
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_MONTHS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
+def jakarta_context(moment: datetime | None = None) -> str:
+    """Wall clock the bot should treat as today, in Western Indonesia Time."""
+    if moment is None:
+        current = datetime.now(_JAKARTA)
+    elif moment.tzinfo is None:
+        current = moment.replace(tzinfo=_JAKARTA)
+    else:
+        current = moment.astimezone(_JAKARTA)
+    weekday = _WEEKDAYS[current.weekday()]
+    month = _MONTHS[current.month - 1]
+    return (
+        f"{weekday}, {current.day} {month} {current.year}, "
+        f"{current.hour:02d}:{current.minute:02d} WIB (Asia/Jakarta)"
+    )
 
 
 def _user_facing_error(error: Exception) -> str:
@@ -226,7 +262,8 @@ class RunRuntime:
             self.repository.record_event(run_id, "assistant.skipped", {"reason": "empty"})
             self.repository.update_run(run_id, RunStatus.COMPLETED)
             return
-        if not self.repository.commit_assistant_turn(run_id, answer, run.model):
+        citations = list(toolset.sources)
+        if not self.repository.commit_assistant_turn(run_id, answer, run.model, citations):
             self._keep_stopped_stage(run_id, toolset.continuation)
             return
         self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
@@ -234,7 +271,7 @@ class RunRuntime:
             recent = self.repository.list_group_messages(group_id)
             already_posted = bool(recent) and recent[-1].sender_bot_id == bot.id and recent[-1].content.strip() == answer.strip()
             if not already_posted:
-                self.repository.append_group_message(group_id, "bot", answer, bot.id)
+                self.repository.append_group_message(group_id, "bot", answer, bot.id, citations)
             depth = self._group_depth.get(run_id, 0)
             if depth < 5:
                 self.queue_group_wake(group_id, answer, bot.id, depth + 1)
@@ -722,7 +759,14 @@ class RunRuntime:
         )
 
     @staticmethod
-    def _system_prompt(instructions: str, description: str = "", environment: str = "", skills: Sequence[object] | None = None, in_group: bool = False) -> str:
+    def _system_prompt(
+        instructions: str,
+        description: str = "",
+        environment: str = "",
+        skills: Sequence[object] | None = None,
+        in_group: bool = False,
+        when: datetime | None = None,
+    ) -> str:
         skill_blocks = []
         for skill in skills or ():
             name = getattr(skill, "name", "skill")
@@ -766,7 +810,12 @@ class RunRuntime:
                 "Every Bot can list, create, update, archive, and restore Bots, and can list, create, and edit groups. "
                 "When asked to make a Bot and a group with it, call create_bot and then create_group. "
             )
+        clock = (
+            f"Current date and time: {jakarta_context(when)}. "
+            "Use this as today for news, exchange rates, and any other time-sensitive answer.\n\n"
+        )
         return (
+            f"{clock}"
             "You are a persistent named teammate on a shared computer, in the style of a Grok Bot. "
             "Finish the task with tools instead of only drafting advice. "
             "Keep durable project files in the shared workspace. "

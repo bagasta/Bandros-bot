@@ -1267,12 +1267,16 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
     except KeyError as error:
         raise not_found(error) from error
     live: list[tuple[UUID, str, str]] = []
+    tool_by_bot: dict[UUID, str] = {}
     for run in repository.live_runs_for_group(group_id):
         status = str(run.status)
         if status not in LIVE_TYPING_STATUSES:
             continue
         bot = repository.get_bot(run.bot_id)
         live.append((bot.id, bot.name, status))
+        tool = repository.running_tool_name(run.id)
+        if tool:
+            tool_by_bot.setdefault(bot.id, tool)
     group = repository.get_group(group_id)
     queued: list[tuple[UUID, str]] = []
     for bot_id in repository.queued_bot_ids(group_id):
@@ -1281,7 +1285,7 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
             continue
         queued.append((member.id, member.name))
     return [
-        GroupActivity(bot_id=bot_id, name=name, status=status)
+        GroupActivity(bot_id=bot_id, name=name, status=status, tool=tool_by_bot.get(bot_id))
         for bot_id, name, status in describe_group_activity(live, queued, runtime.composing_bot_id(group_id))
     ]
 
@@ -1306,7 +1310,12 @@ def bot_activity(bot_id: UUID) -> BotActivity:
         if latest is not None and approval.run_id == latest.id and latest.status is RunStatus.WAITING_APPROVAL
     ]
     if any(_run_is_live(run.id) for run in active):
-        return BotActivity(working=True, approvals=pending)
+        tool = None
+        for run in active:
+            tool = repository.running_tool_name(run.id)
+            if tool:
+                break
+        return BotActivity(working=True, approvals=pending, tool=tool)
     if active:
         return BotActivity(working=False, error="Balasan terputus. Kirim ulang pesan.", approvals=pending)
     if pending:
