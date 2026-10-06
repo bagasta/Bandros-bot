@@ -28,7 +28,7 @@ from .database import Database, database_revision, encode_snapshot, hold_snapsho
 from .computer import DaytonaComputer
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, ClawHubInstall, ClawHubListing, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
-from .group_activity import LIVE_TYPING_STATUSES, describe_group_activity
+from .group_activity import load_group_activity
 from .model_gateway import (
     ChatGPTGateway,
     CompositeGateway,
@@ -1266,23 +1266,9 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
         repository.get_group(group_id)
     except KeyError as error:
         raise not_found(error) from error
-    live: list[tuple[UUID, str, str]] = []
-    for run in repository.live_runs_for_group(group_id):
-        status = str(run.status)
-        if status not in LIVE_TYPING_STATUSES:
-            continue
-        bot = repository.get_bot(run.bot_id)
-        live.append((bot.id, bot.name, status))
-    group = repository.get_group(group_id)
-    queued: list[tuple[UUID, str]] = []
-    for bot_id in repository.queued_bot_ids(group_id):
-        member = next((item for item in group.members if item.id == bot_id), None)
-        if member is None:
-            continue
-        queued.append((member.id, member.name))
     return [
         GroupActivity(bot_id=bot_id, name=name, status=status)
-        for bot_id, name, status in describe_group_activity(live, queued, runtime.composing_bot_id(group_id))
+        for bot_id, name, status in load_group_activity(repository, group_id, runtime.composing_bot_id(group_id))
     ]
 
 
@@ -1335,6 +1321,7 @@ def list_group_messages(group_id: UUID) -> list[GroupMessage]:
 class GroupStep(BaseModel):
     speaker: str | None = None
     pending: int = 0
+    activity: list[GroupActivity] = []
 
 
 @app.post("/api/v1/groups/{group_id}/messages", response_model=GroupMessage, status_code=status.HTTP_201_CREATED)
@@ -1357,7 +1344,11 @@ async def advance_group_message(group_id: UUID) -> GroupStep:
     except KeyError as error:
         raise not_found(error) from error
     speaker = await runtime.advance_group(group_id)
-    return GroupStep(speaker=speaker, pending=repository.group_queue_size(group_id))
+    activity = [
+        GroupActivity(bot_id=bot_id, name=name, status=status)
+        for bot_id, name, status in load_group_activity(repository, group_id, runtime.composing_bot_id(group_id))
+    ]
+    return GroupStep(speaker=speaker, pending=repository.group_queue_size(group_id), activity=activity)
 
 
 @app.post("/api/v1/groups/{group_id}/cancel", response_model=list[Run])
