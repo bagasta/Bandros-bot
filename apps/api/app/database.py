@@ -131,7 +131,8 @@ CREATE TABLE IF NOT EXISTS group_messages (
     sender_type TEXT NOT NULL,
     sender_bot_id TEXT REFERENCES bots(id),
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    citations TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS group_run_links (
     run_id TEXT PRIMARY KEY REFERENCES runs(id),
@@ -275,6 +276,9 @@ class Database:
                 "usage": "TEXT NOT NULL DEFAULT '{}'",
                 "stop_requested": "INTEGER NOT NULL DEFAULT 0",
                 "heartbeat_at": "TEXT",
+            },
+            "group_messages": {
+                "citations": "TEXT NOT NULL DEFAULT '[]'",
             },
             "chatgpt_oauth": {
                 "client_id": "TEXT",

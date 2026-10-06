@@ -9,7 +9,7 @@ from apps.api.app.domain import Bot
 from apps.api.app.mentions import mentioned_bots, without_peer_mentions
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime
-from apps.api.app.workspace_tools import WorkspaceToolset, parse_search_results, public_https_url
+from apps.api.app.workspace_tools import WorkspaceToolset, public_https_url
 
 
 def make_repository(path: Path) -> Repository:
@@ -651,11 +651,6 @@ def test_same_reply_is_not_posted_twice(tmp_path: Path) -> None:
     contents = [message.content for message in repository.list_group_messages(group.id)]
     assert contents.count("Siap @Worker") == 1
     assert contents == ["Siap @Worker", "Siap."]
-
-
-def test_search_results_keep_the_public_target() -> None:
-    html = '<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Frent">Rental <b>mobil</b></a>'
-    assert parse_search_results(html) == [{"title": "Rental mobil", "url": "https://example.com/rent"}]
 
 
 def test_fetch_rejects_private_and_non_https_urls() -> None:

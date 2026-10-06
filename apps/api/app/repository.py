@@ -22,6 +22,16 @@ def load_time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def _json_list(row: Any, key: str) -> list[dict[str, Any]]:
+    if key not in row.keys():
+        return []
+    raw = row[key]
+    if not raw:
+        return []
+    loaded = json.loads(raw)
+    return loaded if isinstance(loaded, list) else []
+
+
 # A run is still owned by whichever instance last wrote its heartbeat.
 # Missing in-memory tasks are not enough to call the reply interrupted.
 RUN_LEASE = timedelta(seconds=20)
@@ -236,7 +246,13 @@ class Repository:
         self.record_event(run_id, f"run.{status}", {"error": error} if error else {})
         return True
 
-    def commit_assistant_turn(self, run_id: UUID, content: str, model: str | None) -> bool:
+    def commit_assistant_turn(
+        self,
+        run_id: UUID,
+        content: str,
+        model: str | None,
+        citations: list[dict[str, Any]] | None = None,
+    ) -> bool:
         """Save the reply only while this run is still the active one."""
         message_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
@@ -254,7 +270,7 @@ class Repository:
                     model,
                     "{}",
                     "[]",
-                    "[]",
+                    json.dumps(citations or []),
                     dump_time(timestamp),
                 ),
             )
@@ -654,12 +670,39 @@ class Repository:
         with self.database.connection() as db:
             db.execute("DELETE FROM group_members WHERE group_id = ? AND bot_id = ?", (str(group_id), str(bot_id)))
 
-    def append_group_message(self, group_id: UUID, sender_type: str, content: str, sender_bot_id: UUID | None = None) -> GroupMessage:
+    def append_group_message(
+        self,
+        group_id: UUID,
+        sender_type: str,
+        content: str,
+        sender_bot_id: UUID | None = None,
+        citations: list[dict[str, Any]] | None = None,
+    ) -> GroupMessage:
         self.get_group(group_id)
         message_id, timestamp = uuid4(), now()
+        saved = citations or []
         with self.database.connection() as db:
-            db.execute("INSERT INTO group_messages VALUES (?, ?, ?, ?, ?, ?)", (str(message_id), str(group_id), sender_type, str(sender_bot_id) if sender_bot_id else None, content, dump_time(timestamp)))
-        return GroupMessage(id=message_id, group_id=group_id, sender_type=sender_type, sender_bot_id=sender_bot_id, content=content, created_at=timestamp)
+            db.execute(
+                "INSERT INTO group_messages (id, group_id, sender_type, sender_bot_id, content, created_at, citations) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(message_id),
+                    str(group_id),
+                    sender_type,
+                    str(sender_bot_id) if sender_bot_id else None,
+                    content,
+                    dump_time(timestamp),
+                    json.dumps(saved),
+                ),
+            )
+        return GroupMessage(
+            id=message_id,
+            group_id=group_id,
+            sender_type=sender_type,
+            sender_bot_id=sender_bot_id,
+            content=content,
+            citations=saved,
+            created_at=timestamp,
+        )
 
     def drop_copied_group_context(self) -> None:
         """Remove private copies of group lines. They made every later request carry a huge snapshot."""
@@ -743,7 +786,7 @@ class Repository:
         self.get_group(group_id)
         with self.database.connection() as db:
             rows = db.execute("SELECT * FROM group_messages WHERE group_id = ? ORDER BY created_at", (str(group_id),)).fetchall()
-        return [GroupMessage(id=UUID(row["id"]), group_id=UUID(row["group_id"]), sender_type=row["sender_type"], sender_bot_id=UUID(row["sender_bot_id"]) if row["sender_bot_id"] else None, content=row["content"], created_at=load_time(row["created_at"])) for row in rows]
+        return [self._group_message(row) for row in rows]
 
     def link_run_to_group(self, run_id: UUID, group_id: UUID) -> None:
         with self.database.connection() as db:
@@ -828,6 +871,14 @@ class Repository:
             rows = db.execute("SELECT * FROM handoffs WHERE source_bot_id = ? OR target_bot_id = ? ORDER BY created_at DESC", (str(bot_id), str(bot_id))).fetchall() if bot_id else db.execute("SELECT * FROM handoffs ORDER BY created_at DESC").fetchall()
         return [self._handoff(row) for row in rows]
 
+    def running_tool_name(self, run_id: UUID) -> str | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                "SELECT tool_name FROM tool_calls WHERE run_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1",
+                (str(run_id),),
+            ).fetchone()
+        return str(row["tool_name"]) if row else None
+
     def create_tool_call(self, run_id: UUID, tool_name: str, arguments: dict[str, Any]) -> UUID:
         tool_call_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
@@ -837,6 +888,17 @@ class Repository:
     def complete_tool_call(self, tool_call_id: UUID, result: dict[str, Any], success: bool) -> None:
         with self.database.connection() as db:
             db.execute("UPDATE tool_calls SET status = ?, result = ?, completed_at = ? WHERE id = ?", ("completed" if success else "failed", json.dumps(result), dump_time(now()), str(tool_call_id)))
+
+    def _group_message(self, row: Any) -> GroupMessage:
+        return GroupMessage(
+            id=UUID(row["id"]),
+            group_id=UUID(row["group_id"]),
+            sender_type=row["sender_type"],
+            sender_bot_id=UUID(row["sender_bot_id"]) if row["sender_bot_id"] else None,
+            content=row["content"],
+            citations=_json_list(row, "citations"),
+            created_at=load_time(row["created_at"]),
+        )
 
     def _bot(self, row: Any) -> Bot:
         return Bot(id=UUID(row["id"]), name=row["name"], description=row["description"], instructions=row["instructions"], model=row["model"], status=BotStatus(row["status"]), created_at=load_time(row["created_at"]), updated_at=load_time(row["updated_at"]))

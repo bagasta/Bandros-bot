@@ -1260,6 +1260,18 @@ def add_group_member(group_id: UUID, payload: GroupMemberInput) -> WorkGroup:
         raise not_found(error) from error
 
 
+def _group_activity_rows(group_id: UUID) -> list[GroupActivity]:
+    tool_by_bot: dict[UUID, str] = {}
+    for run in repository.live_runs_for_group(group_id):
+        tool = repository.running_tool_name(run.id)
+        if tool:
+            tool_by_bot.setdefault(run.bot_id, tool)
+    return [
+        GroupActivity(bot_id=bot_id, name=name, status=status, tool=tool_by_bot.get(bot_id))
+        for bot_id, name, status in load_group_activity(repository, group_id, runtime.composing_bot_id(group_id))
+    ]
+
+
 @app.get("/api/v1/groups/{group_id}/activity", response_model=list[GroupActivity])
 def group_activity(group_id: UUID) -> list[GroupActivity]:
     try:
@@ -1267,10 +1279,7 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
     except KeyError as error:
         raise not_found(error) from error
     runtime.reconcile_runs()
-    return [
-        GroupActivity(bot_id=bot_id, name=name, status=status)
-        for bot_id, name, status in load_group_activity(repository, group_id, runtime.composing_bot_id(group_id))
-    ]
+    return _group_activity_rows(group_id)
 
 
 @app.get("/api/v1/bots/{bot_id}/activity", response_model=BotActivity)
@@ -1289,7 +1298,12 @@ def bot_activity(bot_id: UUID) -> BotActivity:
         if latest is not None and approval.run_id == latest.id and latest.status is RunStatus.WAITING_APPROVAL
     ]
     if active:
-        return BotActivity(working=True, approvals=pending)
+        tool = None
+        for run in active:
+            tool = repository.running_tool_name(run.id)
+            if tool:
+                break
+        return BotActivity(working=True, approvals=pending, tool=tool)
     if latest is not None and latest.status is RunStatus.FAILED and latest.error == ORPHAN_NOTICE:
         return BotActivity(working=False, error=latest.error, approvals=pending)
     if pending:
@@ -1342,10 +1356,7 @@ async def advance_group_message(group_id: UUID) -> GroupStep:
         raise not_found(error) from error
     runtime.reconcile_runs()
     speaker = await runtime.advance_group(group_id)
-    activity = [
-        GroupActivity(bot_id=bot_id, name=name, status=status)
-        for bot_id, name, status in load_group_activity(repository, group_id, runtime.composing_bot_id(group_id))
-    ]
+    activity = _group_activity_rows(group_id)
     return GroupStep(speaker=speaker, pending=repository.group_queue_size(group_id), activity=activity)
 
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, turnSignalNames, typingActivityAfterTurn, typingBubbleNames } from "../apps/web/app/chat-presentation.ts";
+import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "../apps/web/app/chat-presentation.ts";
 
 const roster = [
   { name: "Bandros" },
@@ -136,6 +136,19 @@ test("approval wait is still typing for that bot alone", () => {
     { name: "Bandros", status: "queued" },
   ];
   assert.deepEqual(typingBubbleNames(activity), ["Tester Dua"]);
+});
+
+test("web search shows a tool label on the composer only", () => {
+  const activity = [
+    { name: "Tester Tiga", status: "running", tool: "web_search" },
+    { name: "Bandros", status: "queued", tool: "web_search" },
+  ];
+  assert.equal(toolUseLabel("web_search"), "Mencari web");
+  assert.equal(toolUseLabel("fetch_url"), "Menggunakan fetch_url");
+  assert.equal(toolUseLabel(""), "");
+  assert.equal(typingToolLabel(activity, "Tester Tiga"), "Mencari web");
+  assert.equal(typingToolLabel(activity, "Bandros"), "");
+  assert.deepEqual(typingBubbleNames(activity), ["Tester Tiga"]);
 });
 
 test("blank message content is not a bubble", () => {

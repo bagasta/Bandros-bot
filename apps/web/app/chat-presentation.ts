@@ -1,4 +1,4 @@
-export type TypingActivity = { name: string; status: string };
+export type TypingActivity = { name: string; status: string; tool?: string | null };
 
 export type RosterMember = { id?: string; name?: string | null };
 
@@ -140,4 +140,20 @@ function releaseFinishedTyper<T extends TypingActivity>(activity: readonly T[], 
 
 export function hasVisibleBubble(content: string): boolean {
   return content.trim().length > 0;
+}
+
+/** Short label for the tool the composing bot is running. */
+export function toolUseLabel(tool: string | null | undefined): string {
+  const name = (tool ?? "").trim();
+  if (!name) return "";
+  if (name === "web_search") return "Mencari web";
+  return `Menggunakan ${name}`;
+}
+
+/** Tool label for the bot who owns the typing bubble. */
+export function typingToolLabel(activity: readonly TypingActivity[], name: string): string {
+  const match = activity.find(
+    (item) => item.name.trim() === name.trim() && liveTypingStatuses.has(item.status) && Boolean(item.tool?.trim()),
+  );
+  return toolUseLabel(match?.tool);
 }
