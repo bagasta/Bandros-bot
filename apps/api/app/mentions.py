@@ -67,9 +67,22 @@ def addresses_everyone(text: str) -> bool:
 
 
 def asks_roll_call(text: str) -> bool:
-    """The user wants every other member to answer, as in a Grok group check-in."""
+    """The user wants a status check from the other members, not a shared task such as introductions."""
     lowered = text.lower()
-    return any(
+    status = any(
+        token in lowered
+        for token in (
+            "kesiapan",
+            "cek siap",
+            "cek status",
+            "status kamu",
+            "status kalian",
+            "siap kerja",
+            "roll call",
+            "absen",
+        )
+    )
+    broadcast = any(
         token in lowered
         for token in (
             "masing",
@@ -82,8 +95,12 @@ def asks_roll_call(text: str) -> bool:
             "mention semua",
             "sebut mereka",
             "sebut semua",
+            "@everyone",
+            "@all",
+            "@semua",
         )
     )
+    return status and broadcast
 
 
 def is_status_report(text: str) -> bool:
@@ -137,10 +154,27 @@ def route_next_owner(answer: str, members: list[Bot], sender: Bot, finished_ids:
         if member.id in finished_ids:
             answer = re.sub(rf"@{re.escape(member.name)}(?!\w)", member.name, answer, flags=re.IGNORECASE)
     if not allow_many:
-        mentioned = [member for member in mentioned_bots(answer, members) if member.id != sender.id]
-        for extra in mentioned[1:]:
-            answer = re.sub(rf"@{re.escape(extra.name)}(?!\w)", extra.name, answer, flags=re.IGNORECASE)
+        answer = _keep_one_handoff_mention(answer, members, sender)
     return re.sub(r"[ \t]{2,}", " ", answer).strip()
+
+
+def _keep_one_handoff_mention(answer: str, members: list[Bot], sender: Bot) -> str:
+    """A handoff wakes one teammate. Later @Name tokens lose only the @, so the name stays readable."""
+    spans: list[tuple[int, int]] = []
+    occupied: list[tuple[int, int]] = []
+    for member in sorted(members, key=lambda item: len(item.name), reverse=True):
+        if member.id == sender.id:
+            continue
+        for match in re.finditer(rf"@{re.escape(member.name)}(?!\w)", answer, flags=re.IGNORECASE):
+            start, end = match.span()
+            if any(start < right and end > left for left, right in occupied):
+                continue
+            spans.append((start, end))
+            occupied.append((start, end))
+    ordered = sorted(spans)
+    for start, _end in reversed(ordered[1:]):
+        answer = f"{answer[:start]}{answer[start + 1:]}"
+    return answer
 
 
 def without_self_mention(answer: str, sender: Bot) -> str:
@@ -190,7 +224,8 @@ def group_prompt(group: WorkGroup, content: str, transcript: str = "", already_r
     lines = [
         f"Grup {group.name}. Anggota: {roster}.",
         "Ini grup WhatsApp. Bos memberi arahan. Kamu ahli di bidangmu dan membalas seperti manusia: 2-6 kalimat, hasilnya dulu, tanpa judul atau laporan.",
-        "Satu tahap, satu pemilik. Orkestrator menyebut tepat satu @Nama yang mengerjakan sekarang, plus data yang ada di pesan bos ini.",
+        "Satu tahap, satu pemilik. Handoff memakai tepat satu @Nama yang mengerjakan sekarang, plus data yang ada di pesan bos ini. Nama tanpa @ tidak membangunkan siapa pun.",
+        "Kalau bos menyebutmu bersama rekan untuk permintaan yang sama, jawablah permintaan itu sendiri. Jangan menggantinya dengan cek status.",
         "Pesan baru biasanya tugas baru. Kalau pengguna menyambung pekerjaan yang sama, lanjutkan tahap itu. Kalau ia menyuruh berhenti, dengan kalimat apa pun, berhenti sekarang.",
         "Tugas baru tidak mewarisi usaha, menu, harga, atau asumsi dari job yang sudah selesai. Kalau pesan itu tidak menjelaskan bisnisnya, tanyakan satu kalimat dan jangan menugaskan rekan.",
         "Riwayat di bawah sudah kamu baca, termasuk pesan yang tidak menyebutmu. Jangan mengulang pekerjaan yang selesai.",
