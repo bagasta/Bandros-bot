@@ -25,6 +25,11 @@ from .weather import WeatherError, forecast
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
+WEB_SEARCH_REPLY_GUIDANCE = (
+    "The UI already shows these sources in a Sumber list. "
+    "Do not restate or re-list them in the reply body, and do not add a Sumber, Sources, or citation section."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
@@ -128,7 +133,9 @@ class WorkspaceToolset:
             ),
             ToolDefinition(
                 "web_search",
-                "Search the public web with OpenRouter before a research answer. Returns titles, https sources, and snippets. payload: {query}",
+                "Search the public web with OpenRouter before a research answer. Returns titles, https sources, and snippets. "
+                + WEB_SEARCH_REPLY_GUIDANCE
+                + " payload: {query}",
                 self.web_search,
                 RiskClass.READ_ONLY,
                 timeout_seconds=45,
@@ -598,6 +605,7 @@ class WorkspaceToolset:
             )
         if result.get("ok"):
             self._remember_sources(result.get("results") or [])
+            result["instruction"] = WEB_SEARCH_REPLY_GUIDANCE
         return result
 
     def _remember_sources(self, results: list[Any]) -> None:
