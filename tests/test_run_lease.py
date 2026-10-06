@@ -180,6 +180,119 @@ def test_tool_longer_than_the_lease_stays_alive(tmp_path: Path, monkeypatch) -> 
     assert all(message.content != ORPHAN_NOTICE for message in repository.list_messages(conversation_id))
 
 
+def test_unstarted_queued_run_expires_after_ten_minutes(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "expired-queue.db")
+    bot = repository.create_bot("Bandros", "", "", None)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    group = repository.create_group("QA", "", [bot.id])
+    run = repository.create_run(bot.id, conversation_id, "menunggu giliran", "test-model")
+    repository.link_run_to_group(run.id, group.id)
+    assert repository.enqueue_group_speaker(group.id, bot.id, "menunggu giliran", None, 0) is True
+    stale = (datetime.now(UTC) - timedelta(minutes=10, seconds=5)).isoformat()
+    with repository.database.connection() as db:
+        db.execute("UPDATE runs SET created_at = ? WHERE id = ?", (stale, str(run.id)))
+        db.execute("UPDATE group_queue SET created_at = ?", (stale,))
+
+    stranger = RunRuntime(repository, None, "test-model", 1)  # type: ignore[arg-type]
+    assert stranger.reconcile_runs() == 1
+
+    closed = repository.get_run(run.id)
+    assert closed.status is RunStatus.FAILED
+    assert closed.error == ORPHAN_NOTICE
+    assert repository.active_runs_for_bot(bot.id) == []
+    assert repository.queued_bot_ids(group.id) == []
+    assert repository.live_runs_for_group(group.id) == []
+
+
+def test_recent_queued_run_is_not_expired(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "fresh-queue.db")
+    bot = repository.create_bot("Bandros", "", "", None)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    group = repository.create_group("QA", "", [bot.id])
+    run = repository.create_run(bot.id, conversation_id, "sebentar", "test-model")
+    repository.link_run_to_group(run.id, group.id)
+    assert repository.enqueue_group_speaker(group.id, bot.id, "sebentar", None, 0) is True
+    waiting = (datetime.now(UTC) - timedelta(minutes=9)).isoformat()
+    with repository.database.connection() as db:
+        db.execute("UPDATE runs SET created_at = ? WHERE id = ?", (waiting, str(run.id)))
+        db.execute("UPDATE group_queue SET created_at = ?", (waiting,))
+
+    stranger = RunRuntime(repository, None, "test-model", 1)  # type: ignore[arg-type]
+    assert stranger.reconcile_runs() == 0
+    assert repository.get_run(run.id).status is RunStatus.QUEUED
+    assert repository.queued_bot_ids(group.id) == [bot.id]
+    assert repository.active_runs_for_bot(bot.id)
+
+
+def test_local_task_keeps_an_old_queued_run(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "owned-queue.db")
+    bot = repository.create_bot("Bandros", "", "", None)
+    conversation_id = repository.conversation_for_bot(bot.id)
+    run = repository.create_run(bot.id, conversation_id, "masih di proses ini", "test-model")
+    stale = (datetime.now(UTC) - timedelta(minutes=11)).isoformat()
+    with repository.database.connection() as db:
+        db.execute("UPDATE runs SET created_at = ? WHERE id = ?", (stale, str(run.id)))
+    owner = RunRuntime(repository, None, "test-model", 1)  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        async def still_here() -> None:
+            await asyncio.Event().wait()
+
+        owner._tasks[run.id] = asyncio.create_task(still_here())
+        assert owner.reconcile_runs() == 0
+        owner._tasks[run.id].cancel()
+
+    asyncio.run(scenario())
+    assert repository.get_run(run.id).status is RunStatus.QUEUED
+
+
+def test_two_writers_cannot_both_finish_one_run(tmp_path: Path) -> None:
+    import threading
+
+    repository = make_repository(tmp_path / "writers.db")
+    bot = repository.create_bot("Bandros", "", "", None)
+    run = repository.create_run(bot.id, repository.conversation_for_bot(bot.id), "satu", "test-model")
+    assert repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED) is True
+    barrier = threading.Barrier(2)
+    results: list[bool] = []
+
+    def finish() -> None:
+        barrier.wait()
+        results.append(repository.update_run(run.id, RunStatus.COMPLETED, expect=RunStatus.RUNNING))
+
+    threads = [threading.Thread(target=finish) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(results) == [False, True]
+    assert repository.get_run(run.id).status is RunStatus.COMPLETED
+
+
+def test_two_writers_queue_one_bot_once(tmp_path: Path) -> None:
+    import threading
+
+    repository = make_repository(tmp_path / "queue-writers.db")
+    bot = repository.create_bot("Bandros", "", "", None)
+    group = repository.create_group("QA", "", [bot.id])
+    barrier = threading.Barrier(2)
+    results: list[bool] = []
+
+    def enqueue() -> None:
+        barrier.wait()
+        results.append(repository.enqueue_group_speaker(group.id, bot.id, "giliran", None, 0))
+
+    threads = [threading.Thread(target=enqueue) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(results) == [False, True]
+    assert repository.queued_bot_ids(group.id) == [bot.id]
+
+
 def test_queued_run_survives_a_long_wait(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "queued.db")
     bot = repository.create_bot("Bandros", "", "", None)

@@ -32,9 +32,20 @@ def _json_list(row: Any, key: str) -> list[dict[str, Any]]:
     return loaded if isinstance(loaded, list) else []
 
 
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
 # A run is still owned by whichever instance last wrote its heartbeat.
 # Missing in-memory tasks are not enough to call the reply interrupted.
 RUN_LEASE = timedelta(seconds=20)
+# A queued run that never starts is not a live lease. Drop it so a dead
+# holder cannot leave the bot looking busy.
+QUEUE_EXPIRY = timedelta(minutes=10)
 ORPHAN_NOTICE = "Balasan terputus. Kirim ulang pesan."
 
 
@@ -257,7 +268,11 @@ class Repository:
         message_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT conversation_id, stop_requested, status FROM runs WHERE id = ?", (str(run_id),)).fetchone()
+            lock = " FOR UPDATE" if self.database.postgres else ""
+            row = db.execute(
+                f"SELECT conversation_id, stop_requested, status FROM runs WHERE id = ?{lock}",
+                (str(run_id),),
+            ).fetchone()
             if row is None or row["stop_requested"] or row["status"] != RunStatus.RUNNING:
                 return False
             db.execute(
@@ -311,10 +326,11 @@ class Repository:
         return [UUID(row["id"]) for row in rows]
 
     def fail_orphaned_runs(self, *, skip: set[UUID] | None = None) -> int:
-        """Close running work whose shared lease has expired.
+        """Close running work whose shared lease expired, and queued work that never started.
 
-        Queued work can sit until another instance starts it. A fresh heartbeat
-        means some instance is still inside a running turn, including tool calls.
+        A fresh heartbeat means some instance is still inside a running turn,
+        including tool calls. A queued run with no start time is only waiting
+        for a holder; after QUEUE_EXPIRY that holder is treated as dead.
         """
         protected = skip or set()
         cutoff = now() - RUN_LEASE
@@ -332,7 +348,43 @@ class Repository:
                 continue
             if self.close_orphaned_run(run_id):
                 closed += 1
+        closed += self._expire_unstarted_runs(protected)
+        self._drop_expired_group_queue()
         return closed
+
+    def _expire_unstarted_runs(self, protected: set[UUID]) -> int:
+        cutoff = now() - QUEUE_EXPIRY
+        with self.database.connection() as db:
+            rows = db.execute(
+                "SELECT id, created_at, started_at FROM runs WHERE status = ?",
+                (RunStatus.QUEUED,),
+            ).fetchall()
+        closed = 0
+        for row in rows:
+            if row["started_at"]:
+                continue
+            run_id = UUID(row["id"])
+            if run_id in protected:
+                continue
+            created = _aware(load_time(row["created_at"]))
+            if created is not None and created >= cutoff:
+                continue
+            if self.close_orphaned_run(run_id):
+                closed += 1
+        return closed
+
+    def _drop_expired_group_queue(self) -> None:
+        """Drop waiters that never became a run, so the typing label can clear."""
+        cutoff = now() - QUEUE_EXPIRY
+        with self.database.connection() as db:
+            rows = db.execute("SELECT id, created_at FROM group_queue").fetchall()
+            stale = [
+                row["id"]
+                for row in rows
+                if (created := _aware(load_time(row["created_at"]))) is None or created < cutoff
+            ]
+            for item_id in stale:
+                db.execute("DELETE FROM group_queue WHERE id = ?", (item_id,))
 
     def close_orphaned_run(self, run_id: UUID) -> bool:
         """Mark one dead run failed and leave a single visible reply.
@@ -644,7 +696,10 @@ class Repository:
             self.get_bot(bot_id)
         with self.database.connection() as db:
             db.execute("INSERT INTO work_groups VALUES (?, ?, ?, ?)", (str(group_id), name, description, dump_time(timestamp)))
-            db.executemany("INSERT INTO group_members VALUES (?, ?)", [(str(group_id), str(bot_id)) for bot_id in dict.fromkeys(member_bot_ids)])
+            db.executemany(
+                "INSERT INTO group_members (group_id, bot_id) VALUES (?, ?)",
+                [(str(group_id), str(bot_id)) for bot_id in dict.fromkeys(member_bot_ids)],
+            )
         return self.get_group(group_id)
 
     def list_groups(self) -> list[WorkGroup]:
@@ -663,7 +718,10 @@ class Repository:
         self.get_group(group_id)
         self.get_bot(bot_id)
         with self.database.connection() as db:
-            db.execute("INSERT OR IGNORE INTO group_members VALUES (?, ?)", (str(group_id), str(bot_id)))
+            db.execute(
+                "INSERT OR IGNORE INTO group_members (group_id, bot_id) VALUES (?, ?)",
+                (str(group_id), str(bot_id)),
+            )
 
     def remove_group_member(self, group_id: UUID, bot_id: UUID) -> None:
         self.get_group(group_id)
@@ -725,20 +783,18 @@ class Repository:
     ) -> bool:
         """Queue one bot to speak. The same bot is not queued twice for this group."""
         with self.database.connection() as db:
-            existing = db.execute(
-                "SELECT 1 FROM group_queue WHERE group_id = ? AND bot_id = ?",
-                (str(group_id), str(bot_id)),
-            ).fetchone()
-            if existing is not None:
-                return False
             count = db.execute("SELECT COUNT(*) AS n FROM group_queue WHERE group_id = ?", (str(group_id),)).fetchone()
             if count is not None and int(count["n"]) >= 12:
                 return False
-            db.execute(
-                "INSERT INTO group_queue (group_id, bot_id, content, sender_bot_id, depth, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            result = db.execute(
+                """
+                INSERT INTO group_queue (group_id, bot_id, content, sender_bot_id, depth, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (group_id, bot_id) DO NOTHING
+                """,
                 (str(group_id), str(bot_id), content, str(sender_bot_id) if sender_bot_id else None, depth, dump_time(now())),
             )
-        return True
+        return result.rowcount == 1
 
     def peek_group_speaker(self, group_id: UUID) -> tuple[int, UUID, str, UUID | None, int] | None:
         with self.database.connection() as db:

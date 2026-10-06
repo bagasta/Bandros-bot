@@ -9,7 +9,9 @@ import os
 import sqlite3
 import tempfile
 import threading
-from typing import Iterator
+from typing import Any, Iterator
+
+from .postgres_store import migrate_postgres, postgres_connection, schema_for_path
 
 _LOADED_DATABASE: ContextVar[str | None] = ContextVar("bandros_loaded_database", default=None)
 _SNAPSHOT_READY: ContextVar[str | None] = ContextVar("bandros_snapshot_ready", default=None)
@@ -207,13 +209,46 @@ CREATE TABLE IF NOT EXISTS workspace_meta (
 );
 """
 
+# Columns added after the first shipped schema. Both backends apply these.
+ADDITIVE_COLUMNS = {
+    "messages": {
+        "model": "TEXT",
+        "usage": "TEXT NOT NULL DEFAULT '{}'",
+        "attachments": "TEXT NOT NULL DEFAULT '[]'",
+        "citations": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "runs": {
+        "continuation": "TEXT",
+        "usage": "TEXT NOT NULL DEFAULT '{}'",
+        "stop_requested": "INTEGER NOT NULL DEFAULT 0",
+        "heartbeat_at": "TEXT",
+    },
+    "group_messages": {
+        "citations": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "chatgpt_oauth": {
+        "client_id": "TEXT",
+        "host_id": "TEXT",
+        "id_token": "TEXT",
+        "preferred_model": "TEXT",
+    },
+}
+
 
 class Database:
-    def __init__(self, path: Path, blob_path: str | None = None) -> None:
+    def __init__(self, path: Path, blob_path: str | None = None, database_url: str | None = None) -> None:
         self.path = path
         self.blob_path = blob_path or _DATABASE_BLOB_PATH
+        # None keeps SQLite. A DSN is passed only by the app when DATABASE_URL is set,
+        # so unit tests that construct Database(path) never pick up a developer .env.
+        self.database_url = database_url
+        self.postgres = bool(database_url)
+        self.schema = schema_for_path(path) if database_url else None
 
     def initialize(self) -> None:
+        if self.database_url:
+            migrate_postgres(self.database_url, schema_for_path(self.path), SCHEMA, ADDITIVE_COLUMNS)
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         migrated = False
         with self.connection() as connection:
@@ -229,7 +264,7 @@ class Database:
         return bool(os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN"))
 
     def pull(self) -> None:
-        if _SNAPSHOT_READY.get() == str(self.path) or not self._durable():
+        if self.postgres or _SNAPSHOT_READY.get() == str(self.path) or not self._durable():
             return
         from vercel.blob import BlobClient
         from vercel.blob.errors import BlobNotFoundError
@@ -245,7 +280,7 @@ class Database:
         self.path.write_bytes(result.content)
 
     def push(self) -> None:
-        if not self._durable() or not self.path.exists():
+        if self.postgres or not self._durable() or not self.path.exists():
             return
         from vercel.blob import BlobClient
 
@@ -264,31 +299,8 @@ class Database:
     @staticmethod
     def _migrate(connection: sqlite3.Connection) -> bool:
         """Apply additive migrations for databases created by earlier versions."""
-        migrations = {
-            "messages": {
-                "model": "TEXT",
-                "usage": "TEXT NOT NULL DEFAULT '{}'",
-                "attachments": "TEXT NOT NULL DEFAULT '[]'",
-                "citations": "TEXT NOT NULL DEFAULT '[]'",
-            },
-            "runs": {
-                "continuation": "TEXT",
-                "usage": "TEXT NOT NULL DEFAULT '{}'",
-                "stop_requested": "INTEGER NOT NULL DEFAULT 0",
-                "heartbeat_at": "TEXT",
-            },
-            "group_messages": {
-                "citations": "TEXT NOT NULL DEFAULT '[]'",
-            },
-            "chatgpt_oauth": {
-                "client_id": "TEXT",
-                "host_id": "TEXT",
-                "id_token": "TEXT",
-                "preferred_model": "TEXT",
-            },
-        }
         migrated = False
-        for table, columns in migrations.items():
+        for table, columns in ADDITIVE_COLUMNS.items():
             existing = {
                 row["name"]
                 for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -297,10 +309,16 @@ class Database:
                 if name not in existing:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
                     migrated = True
+        if _ensure_sqlite_group_queue_uniqueness(connection):
+            migrated = True
         return migrated
 
     @contextmanager
-    def connection(self) -> Iterator[sqlite3.Connection]:
+    def connection(self) -> Iterator[Any]:
+        if self.database_url:
+            with postgres_connection(self.database_url, schema_for_path(self.path)) as connection:
+                yield connection
+            return
         if _LOADED_DATABASE.get() != str(self.path):
             self.pull()
             _LOADED_DATABASE.set(str(self.path))
@@ -308,6 +326,7 @@ class Database:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
             # A client snapshot from before this table existed must still accept a group turn.
             connection.execute(
                 """
@@ -347,6 +366,31 @@ class Database:
             raise
         finally:
             connection.close()
+
+
+def _ensure_sqlite_group_queue_uniqueness(connection: sqlite3.Connection) -> bool:
+    """One queued bot per group, so two instances cannot insert the same waiter."""
+    tables = {
+        row["name"]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "group_queue" not in tables:
+        return False
+    indexes = {row["name"] for row in connection.execute("PRAGMA index_list(group_queue)").fetchall()}
+    if "group_queue_group_bot" in indexes:
+        return False
+    connection.execute(
+        """
+        DELETE FROM group_queue
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM group_queue GROUP BY group_id, bot_id
+        )
+        """
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS group_queue_group_bot ON group_queue(group_id, bot_id)"
+    )
+    return True
 
 
 def encode_snapshot(data: bytes) -> str:

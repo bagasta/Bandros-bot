@@ -26,6 +26,19 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(value) if value else default
 
 
+def resolve_database_url() -> str | None:
+    """Postgres DSN for shared multi-instance state. SQLite is used when this is unset."""
+    for name in ("DATABASE_URL", "POSTGRES_URL"):
+        value = _env_value(name)
+        if not value:
+            continue
+        if value.startswith("postgres://"):
+            value = "postgresql://" + value[len("postgres://") :]
+        if value.startswith("postgresql://"):
+            return value
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_path: Path
@@ -48,6 +61,9 @@ class Settings:
     daytona_api_key: str | None
     daytona_api_url: str
     daytona_target: str
+    # Neon/Vercel: set DATABASE_URL. POSTGRES_URL is accepted as the same DSN.
+    # Unset keeps the local SQLite file at database_path.
+    database_url: str | None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -87,4 +103,5 @@ class Settings:
             daytona_api_key=_env_value("DAYTONA_API_KEY"),
             daytona_api_url=(_env_value("DAYTONA_API_URL") or "https://app.daytona.io/api").rstrip("/"),
             daytona_target=_env_value("DAYTONA_TARGET") or "us",
+            database_url=resolve_database_url(),
         )

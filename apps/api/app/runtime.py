@@ -331,11 +331,12 @@ class RunRuntime:
         self._resolve_handoffs(run_id, note, success=False)
 
     def reconcile_runs(self) -> int:
-        """Drop runs this process already finished, then runs whose shared lease expired.
+        """Drop finished local tasks, expired leases, and queued runs that never started.
 
         A run that is still executing here is kept even if its heartbeat is late.
         A run that exists only in the database is kept while that lease is fresh,
         so a poll on another instance does not call a live reply interrupted.
+        A queued run with no start time expires after about ten minutes.
         """
         closed = self._close_finished_local_runs()
         protected = {run_id for run_id, task in self._tasks.items() if not task.done()}

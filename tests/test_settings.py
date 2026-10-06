@@ -46,6 +46,33 @@ def test_vercel_ignores_an_explicit_mock_gateway(monkeypatch) -> None:
     assert settings.model_gateway == "openrouter"
 
 
+def test_database_url_points_at_postgres(monkeypatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("VERCEL_ENV", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@ep-cool.aws.neon.tech/neondb")
+    monkeypatch.setenv("POSTGRES_URL", "postgresql://other@example/db")
+    settings = Settings.from_environment()
+    assert settings.database_url == "postgresql://user:pass@ep-cool.aws.neon.tech/neondb"
+
+
+def test_postgres_url_is_used_when_database_url_is_unset(monkeypatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("VERCEL_ENV", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("POSTGRES_URL", "postgresql://user:pass@ep-cool.aws.neon.tech/neondb")
+    settings = Settings.from_environment()
+    assert settings.database_url == "postgresql://user:pass@ep-cool.aws.neon.tech/neondb"
+
+
+def test_sqlite_when_no_postgres_dsn_is_configured(monkeypatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("VERCEL_ENV", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("POSTGRES_URL", "")
+    settings = Settings.from_environment()
+    assert settings.database_url is None
+
+
 def test_local_mock_gateway_stays_available(monkeypatch) -> None:
     monkeypatch.delenv("VERCEL", raising=False)
     monkeypatch.delenv("VERCEL_ENV", raising=False)
