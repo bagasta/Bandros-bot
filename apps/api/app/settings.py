@@ -26,17 +26,27 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(value) if value else default
 
 
-def resolve_database_url() -> str | None:
-    """Postgres DSN for shared multi-instance state. SQLite is used when this is unset."""
-    for name in ("DATABASE_URL", "POSTGRES_URL"):
-        value = _env_value(name)
-        if not value:
-            continue
-        if value.startswith("postgres://"):
-            value = "postgresql://" + value[len("postgres://") :]
-        if value.startswith("postgresql://"):
-            return value
+def _postgres_dsn(value: str | None) -> str | None:
+    if not value:
+        return None
+    if value.startswith("postgres://"):
+        value = "postgresql://" + value[len("postgres://") :]
+    if value.startswith("postgresql://"):
+        return value
     return None
+
+
+def resolve_database_url() -> str | None:
+    """Choose Postgres only from a real DSN. Otherwise the app keeps SQLite.
+
+    ``DATABASE_URL`` is the switch. A missing, blank, or non-Postgres value
+    keeps the current SQLite files and does not open a connection at startup.
+    ``POSTGRES_URL`` applies only when ``DATABASE_URL`` is not in the environment
+    at all, so an empty ``DATABASE_URL`` cannot select a second DSN.
+    """
+    if "DATABASE_URL" in os.environ:
+        return _postgres_dsn(_env_value("DATABASE_URL"))
+    return _postgres_dsn(_env_value("POSTGRES_URL"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +71,7 @@ class Settings:
     daytona_api_key: str | None
     daytona_api_url: str
     daytona_target: str
-    # Neon/Vercel: set DATABASE_URL. POSTGRES_URL is accepted as the same DSN.
-    # Unset keeps the local SQLite file at database_path.
+    # Neon DSN from DATABASE_URL. None keeps the SQLite file at database_path.
     database_url: str | None
 
     @classmethod

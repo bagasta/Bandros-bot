@@ -239,10 +239,10 @@ class Database:
     def __init__(self, path: Path, blob_path: str | None = None, database_url: str | None = None) -> None:
         self.path = path
         self.blob_path = blob_path or _DATABASE_BLOB_PATH
-        # None keeps SQLite. A DSN is passed only by the app when DATABASE_URL is set,
-        # so unit tests that construct Database(path) never pick up a developer .env.
-        self.database_url = database_url
-        self.postgres = bool(database_url)
+        # None or blank keeps SQLite. A DSN is passed only by the app when DATABASE_URL
+        # is set, so unit tests that construct Database(path) never pick up a developer .env.
+        self.database_url = database_url.strip() if isinstance(database_url, str) and database_url.strip() else None
+        self.postgres = self.database_url is not None
         self.schema = schema_for_path(path) if database_url else None
 
     def initialize(self) -> None:

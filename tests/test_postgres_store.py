@@ -1,4 +1,13 @@
-"""Postgres is selected only when a DSN is passed. Local tests stay on SQLite."""
+"""Postgres is selected only when a DSN is passed. Local tests stay on SQLite.
+
+Run the SQLite suite (no Neon required):
+
+    pytest
+
+Run this Postgres suite against a reachable server:
+
+    BANDROS_TEST_POSTGRES=postgresql://USER:PASS@127.0.0.1:5432/DB pytest tests/test_postgres_store.py
+"""
 
 from __future__ import annotations
 
