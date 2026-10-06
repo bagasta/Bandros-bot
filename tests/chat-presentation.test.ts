@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupMemberSubtitle, hasVisibleBubble, presentGroupMembers, turnSignalNames, typingBubbleNames } from "../apps/web/app/chat-presentation.ts";
+import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, turnSignalNames, typingBubbleNames } from "../apps/web/app/chat-presentation.ts";
 
 const roster = [
   { name: "Bandros" },
@@ -30,6 +30,42 @@ test("a blank stored member name is filled from the live roster", () => {
   const roster = presentGroupMembers(members, directory);
   assert.equal(roster.length, members.length);
   assert.equal(groupMemberSubtitle(members, directory), "Bandros, Tester Tiga, Tester Dua, Tester Satu");
+});
+
+test("a stale group list still gains members for a closed group", () => {
+  const closed = {
+    id: "g1",
+    members: [
+      { id: "1", name: "Bandros" },
+      { id: "2", name: "Tester Tiga" },
+      { id: "3", name: "Tester Dua" },
+    ],
+  };
+  const incoming = {
+    id: "g1",
+    members: [...closed.members, { id: "4", name: "Tester Satu" }],
+  };
+  const merged = mergeGroupRosters([closed], [incoming], false);
+  assert.equal(merged[0].members.length, 4);
+  assert.equal(groupMemberSubtitle(merged[0].members), "Bandros, Tester Tiga, Tester Dua, Tester Satu");
+  assert.equal(groupMemberSubtitle(merged[0].members).split(", ").length, merged[0].members.length);
+});
+
+test("a stale shorter list does not shrink a closed group", () => {
+  const full = {
+    id: "g1",
+    members: [
+      { id: "1", name: "Bandros" },
+      { id: "2", name: "Tester Satu" },
+      { id: "3", name: "Tester Dua" },
+      { id: "4", name: "Tester Tiga" },
+    ],
+  };
+  const short = { id: "g1", members: full.members.slice(0, 3) };
+  const merged = mergeGroupRosters([full], [short], false);
+  assert.equal(merged[0].members.length, 4);
+  const fresh = mergeGroupRosters([short], [full], true);
+  assert.equal(fresh[0].members.length, 4);
 });
 
 test("a short sidebar list picks up the member the open group already has", () => {

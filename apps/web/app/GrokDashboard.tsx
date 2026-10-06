@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { groupMemberSubtitle, hasVisibleBubble, presentGroupMembers, turnSignalNames, typingBubbleNames } from "./chat-presentation";
+import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, turnSignalNames, typingBubbleNames } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 
@@ -465,7 +465,7 @@ export default function GrokDashboard() {
         request<Group[]>("/groups", undefined, groupMeta),
       ]);
       if (botMeta.fresh) setBots(nextBots);
-      if (groupMeta.fresh) setGroups(nextGroups);
+      setGroups((current) => mergeGroupRosters(current, nextGroups, groupMeta.fresh));
       const orchestrator = nextBots.find((bot) => bot.status === "active" && bot.name.toLowerCase() === "bandros");
       setSelectedBot((current) => {
         if (current) return nextBots.find((bot) => bot.id === current.id) ?? null;
@@ -475,7 +475,8 @@ export default function GrokDashboard() {
       setSelectedGroup((current) => {
         if (!current) return null;
         const next = nextGroups.find((group) => group.id === current.id);
-        if (!next) return null;
+        if (!next) return groupMeta.fresh ? null : current;
+        if (!groupMeta.fresh && next.members.length < current.members.length) return current;
         const sameMembers = next.members.length === current.members.length && next.members.every((member, index) => member.id === current.members[index]?.id && member.name === current.members[index]?.name);
         return next.name === current.name && sameMembers ? current : next;
       });
@@ -651,6 +652,8 @@ export default function GrokDashboard() {
             if (active) setTypingActivity(activity);
             const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
             groupPending.current = turn.pending > 0;
+            const nextGroups = await request<Group[]>("/groups");
+            if (active) setGroups(nextGroups);
             const messageMeta: RequestMeta = { fresh: true };
             const nextMessages = await request<GroupMessage[]>(`/groups/${groupId}/messages`, undefined, messageMeta);
             if (!active || !messageMeta.fresh) return;
@@ -725,8 +728,12 @@ export default function GrokDashboard() {
           groupPending.current = true;
         }
         setTypingActivity([]);
-        const refreshed = nextGroups.find((group) => group.id === groupId);
-        if (refreshed) setSelectedGroup(refreshed);
+        const latestGroups = await request<Group[]>("/groups");
+        if (selectedGroupId.current === groupId) {
+          setGroups(latestGroups);
+          const refreshed = latestGroups.find((group) => group.id === groupId);
+          if (refreshed) setSelectedGroup(refreshed);
+        }
         return;
       }
       const botId = selectedBot?.id;

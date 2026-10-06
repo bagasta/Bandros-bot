@@ -12,21 +12,25 @@ def describe_group_activity(
 ) -> list[tuple[UUID, str, str]]:
     """Activity rows for the group chat.
 
-    Only the bot that is composing (or, before that call starts, the bot at
-    the head of the queue) is ``running`` or ``waiting_approval``. Everyone
-    else still waiting stays ``queued`` so the client can keep Stop without
-    painting a typing bubble. A live task is not enough: queued runs used to
-    be promoted to ``running``, which made the whole bench look like it was
-    typing.
+    The bot who is typing is the one whose run is alive (``running`` or
+    ``waiting_approval``) and who has already left the queue. That row is in
+    the shared database, so another API instance can see it without the
+    in-memory composer id. The queue head is only a fallback when nothing is
+    actually running; otherwise the next waiter must not take the bubble.
     """
     live_status: dict[UUID, str] = {}
     names: dict[UUID, str] = {}
+    alive_ids: list[UUID] = []
     for bot_id, name, status in live:
         cleaned = name.strip()
         if not cleaned:
             continue
         names.setdefault(bot_id, cleaned)
-        live_status.setdefault(bot_id, status)
+        if status not in LIVE_TYPING_STATUSES:
+            continue
+        live_status[bot_id] = status
+        if bot_id not in alive_ids:
+            alive_ids.append(bot_id)
 
     queue_ids: list[UUID] = []
     for bot_id, name in queued:
@@ -37,10 +41,15 @@ def describe_group_activity(
         if bot_id not in queue_ids:
             queue_ids.append(bot_id)
 
-    if composer_id is not None and composer_id in names:
-        typing_id: UUID | None = composer_id
-    elif queue_ids:
+    waiting = set(queue_ids)
+    unqueued_alive = [bot_id for bot_id in alive_ids if bot_id not in waiting]
+    typing_id: UUID | None
+    if unqueued_alive:
+        typing_id = composer_id if composer_id in unqueued_alive else unqueued_alive[0]
+    elif not alive_ids and queue_ids:
         typing_id = queue_ids[0]
+    elif len(alive_ids) == 1:
+        typing_id = alive_ids[0]
     else:
         typing_id = None
 
@@ -50,7 +59,7 @@ def describe_group_activity(
     for bot_id in queue_ids:
         if bot_id not in order:
             order.append(bot_id)
-    for bot_id in live_status:
+    for bot_id in alive_ids:
         if bot_id not in order and bot_id in names:
             order.append(bot_id)
 

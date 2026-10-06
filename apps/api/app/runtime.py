@@ -126,6 +126,7 @@ class RunRuntime:
             return
 
         self.repository.update_run(run_id, RunStatus.RUNNING)
+        self._leave_group_queue(run_id, bot.id)
         self.repository.record_event(run_id, "model.request.started", {"model": run.model, "call": 1})
         toolset = WorkspaceToolset(
             self.repository,
@@ -461,6 +462,19 @@ class RunRuntime:
     def composing_bot_id(self, group_id: UUID) -> UUID | None:
         """The bot whose model call is in flight. Waiters are not included."""
         return self._composing.get(group_id)
+
+    def _leave_group_queue(self, run_id: UUID, bot_id: UUID) -> None:
+        """Drop the speaker once their run is actually running.
+
+        The queue row is shared state. After this, another instance can tell
+        the writer (live run, no longer queued) from the next waiter.
+        """
+        group_id = self.repository.group_for_run(run_id)
+        if group_id is None:
+            return
+        item = self.repository.peek_group_speaker(group_id)
+        if item is not None and item[1] == bot_id:
+            self.repository.drop_group_speaker(item[0])
 
     def schedule_group_reply(self, group_id: UUID, content: str, sender_bot_id: UUID | None, depth: int) -> list[str]:
         """Remember who should speak next. The model call happens in advance_group."""

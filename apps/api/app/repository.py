@@ -703,6 +703,15 @@ class Repository:
             ).fetchall()
         return [self._run(row) for row in rows]
 
+    def live_runs_for_group(self, group_id: UUID) -> list[Run]:
+        """Runs still in progress for this group. Stored in the database, so any instance can see them."""
+        with self.database.connection() as db:
+            rows = db.execute(
+                "SELECT runs.* FROM runs JOIN group_run_links ON group_run_links.run_id = runs.id WHERE group_run_links.group_id = ? AND runs.status IN (?, ?)",
+                (str(group_id), RunStatus.RUNNING, RunStatus.WAITING_APPROVAL),
+            ).fetchall()
+        return [self._run(row) for row in rows]
+
     def latest_interrupted_run_for_group(self, group_id: UUID, bot_id: UUID) -> Run | None:
         with self.database.connection() as db:
             row = db.execute(

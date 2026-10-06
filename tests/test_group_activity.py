@@ -35,7 +35,7 @@ def test_blank_activity_names_are_omitted() -> None:
 
 
 def test_live_runs_do_not_make_the_bench_look_like_it_is_typing() -> None:
-    """Queued bots can already have a live task. Only the composer is typing."""
+    """Several queued runs marked running are not composers. None of them has left the queue."""
     head = uuid4()
     satu = uuid4()
     dua = uuid4()
@@ -47,24 +47,37 @@ def test_live_runs_do_not_make_the_bench_look_like_it_is_typing() -> None:
         (bandros, "Bandros"),
     ]
     live = [(bot_id, name, "running") for bot_id, name in roster]
-    described = describe_group_activity(live, roster)
-    assert [status for _, _, status in described] == ["running", "queued", "queued", "queued"]
-    assert [name for _, name, status in described if status == "running"] == ["Tester Tiga"]
+    described = describe_group_activity(live, roster, None)
+    assert [status for _, _, status in described] == ["queued", "queued", "queued", "queued"]
 
 
-def test_explicit_composer_is_typing_even_when_not_at_the_queue_head() -> None:
-    head = uuid4()
+def test_cross_instance_types_the_bot_who_already_left_the_queue() -> None:
+    """No in-memory composer. The writer is the live run that is no longer queued."""
     composer = uuid4()
+    nxt = uuid4()
+    dua = uuid4()
+    bandros = uuid4()
     described = describe_group_activity(
         [
-            (head, "Bandros", "running"),
+            (nxt, "Tester Satu", "running"),
             (composer, "Tester Tiga", "running"),
         ],
-        [(head, "Bandros"), (composer, "Tester Tiga"), (uuid4(), "Tester Satu")],
-        composer,
+        [(nxt, "Tester Satu"), (dua, "Tester Dua"), (bandros, "Bandros")],
+        None,
     )
-    by_name = {name: status for _, name, status in described}
-    assert by_name == {"Tester Tiga": "running", "Bandros": "queued", "Tester Satu": "queued"}
+    assert [name for _, name, status in described if status == "running"] == ["Tester Tiga"]
+    assert [name for _, name, status in described if status == "queued"] == ["Tester Satu", "Tester Dua", "Bandros"]
+
+
+def test_queue_head_is_only_used_when_nobody_is_running() -> None:
+    nxt = uuid4()
+    described = describe_group_activity(
+        [],
+        [(nxt, "Tester Satu"), (uuid4(), "Tester Dua")],
+        None,
+    )
+    assert [status for _, _, status in described] == ["running", "queued"]
+    assert described[0][1] == "Tester Satu"
 
 
 def test_composer_waiting_for_approval_stays_the_only_typing_status() -> None:
@@ -72,8 +85,8 @@ def test_composer_waiting_for_approval_stays_the_only_typing_status() -> None:
     waiter = uuid4()
     described = describe_group_activity(
         [(composer, "Tester Tiga", "waiting_approval"), (waiter, "Bandros", "running")],
-        [(composer, "Tester Tiga"), (waiter, "Bandros")],
-        composer,
+        [(waiter, "Bandros")],
+        None,
     )
     assert described == [
         (composer, "Tester Tiga", "waiting_approval"),
@@ -117,6 +130,17 @@ def test_only_the_bot_inside_the_model_call_is_composing(tmp_path: Path) -> None
     class Gateway:
         async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
             seen.append(runtime.composing_bot_id(group.id))
+            queued_now = repository.queued_bot_ids(group.id)
+            assert bots[0].id not in queued_now
+            live = [
+                (run.bot_id, repository.get_bot(run.bot_id).name, str(run.status))
+                for run in repository.live_runs_for_group(group.id)
+            ]
+            waiting = [(bot_id, repository.get_bot(bot_id).name) for bot_id in queued_now]
+            # Another instance has the database rows and no in-memory composer.
+            described = describe_group_activity(live, waiting, None)
+            assert [name for _, name, status in described if status == "running"] == ["Tester Tiga"]
+            assert "Tester Satu" not in [name for _, name, status in described if status == "running"]
             return "Siap."
 
     runtime = RunRuntime(repository, Gateway(), "test-model", 3)

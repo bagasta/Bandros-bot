@@ -2,6 +2,8 @@ export type TypingActivity = { name: string; status: string };
 
 export type RosterMember = { id?: string; name?: string | null };
 
+export type RosterGroup<T extends RosterMember = RosterMember> = { id: string; members: readonly T[] };
+
 const liveTypingStatuses = new Set(["running", "waiting_approval"]);
 
 function uniqueNames(names: string[]): string[] {
@@ -49,6 +51,32 @@ export function presentGroupMembers(
   for (const member of members) add(member);
   for (const member of extras) add(member);
   return roster;
+}
+
+/**
+ * Apply a group-list response to the sidebar.
+ * A fresh response replaces the list. A stale one cannot shrink a roster,
+ * but it can add a group or members the sidebar has not shown yet.
+ */
+export function mergeGroupRosters<T extends RosterGroup>(
+  current: readonly T[],
+  incoming: readonly T[],
+  incomingFresh: boolean,
+): T[] {
+  if (incomingFresh) return [...incoming];
+  const incomingById = new Map(incoming.map((group) => [group.id, group]));
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const group of current) {
+    seen.add(group.id);
+    const next = incomingById.get(group.id);
+    if (next && next.members.length > group.members.length) merged.push(next);
+    else merged.push(group);
+  }
+  for (const group of incoming) {
+    if (!seen.has(group.id)) merged.push(group);
+  }
+  return merged;
 }
 
 /** Every member name, in roster order, so the subtitle matches the count badge. */
