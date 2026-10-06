@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { groupMemberSubtitle, hasVisibleBubble, turnSignalNames, typingBubbleNames } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 
@@ -401,7 +402,7 @@ export default function GrokDashboard() {
   const [deviceStatus, setDeviceStatus] = useState("");
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("list");
   const [authReady, setAuthReady] = useState(false);
-  const [typingNames, setTypingNames] = useState<string[]>([]);
+  const [typingActivity, setTypingActivity] = useState<GroupActivity[]>([]);
   const [botWorking, setBotWorking] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [membersOpen, setMembersOpen] = useState(true);
@@ -623,7 +624,7 @@ export default function GrokDashboard() {
   useEffect(() => {
     if (!selectedGroup || !chatGPT.connected) {
       if (!selectedGroup) setGroupMessages([]);
-      setTypingNames([]);
+      setTypingActivity([]);
       groupPending.current = false;
       return;
     }
@@ -647,14 +648,14 @@ export default function GrokDashboard() {
           advancing.current = true;
           try {
             const activity = await request<GroupActivity[]>(`/groups/${groupId}/activity`);
-            if (active) setTypingNames(activity.map((item) => item.name));
+            if (active) setTypingActivity(activity);
             const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
             groupPending.current = turn.pending > 0;
             const messageMeta: RequestMeta = { fresh: true };
             const nextMessages = await request<GroupMessage[]>(`/groups/${groupId}/messages`, undefined, messageMeta);
             if (!active || !messageMeta.fresh) return;
             applyMessages(nextMessages);
-            if (!turn.pending) setTypingNames([]);
+            if (!turn.pending) setTypingActivity([]);
           } finally {
             advancing.current = false;
           }
@@ -669,9 +670,9 @@ export default function GrokDashboard() {
         applyMessages(nextMessages);
         if (activity.length > 0) {
           groupPending.current = true;
-          setTypingNames(activity.map((item) => item.name));
+          setTypingActivity(activity);
         } else {
-          setTypingNames([]);
+          setTypingActivity([]);
         }
       } catch {
         /* Poll lagi pada interval berikutnya. */
@@ -689,9 +690,10 @@ export default function GrokDashboard() {
     const node = chatRef.current;
     if (!node || !stickToBottom.current) return;
     node.scrollTop = node.scrollHeight;
-  }, [messages, groupMessages, typingNames, working, botWorking]);
+  }, [messages, groupMessages, typingActivity, working, botWorking]);
 
-  const turnActive = working || botWorking || typingNames.length > 0;
+  const groupTurnNames = turnSignalNames(typingActivity);
+  const turnActive = working || botWorking || groupTurnNames.length > 0;
 
   const sendMessage = async (content: string, currentSubmission: number) => {
     stickToBottom.current = true;
@@ -711,7 +713,7 @@ export default function GrokDashboard() {
         for (let step = 0; step < 8; step += 1) {
           if (selectedGroupId.current !== groupId) return;
           const activity = await request<GroupActivity[]>(`/groups/${groupId}/activity`);
-          if (selectedGroupId.current === groupId) setTypingNames(activity.map((item) => item.name));
+          if (selectedGroupId.current === groupId) setTypingActivity(activity);
           const turn = await request<{ speaker: string | null; pending: number }>(`/groups/${groupId}/advance`, { method: "POST" });
           const spoken = await request<GroupMessage[]>(`/groups/${groupId}/messages`);
           if (selectedGroupId.current !== groupId) return;
@@ -722,7 +724,7 @@ export default function GrokDashboard() {
           }
           groupPending.current = true;
         }
-        setTypingNames([]);
+        setTypingActivity([]);
         const refreshed = nextGroups.find((group) => group.id === groupId);
         if (refreshed) setSelectedGroup(refreshed);
         return;
@@ -812,7 +814,7 @@ export default function GrokDashboard() {
     advancing.current = false;
     workingRef.current = false;
     setWorking(false);
-    setTypingNames([]);
+    setTypingActivity([]);
     try {
       if (groupId) {
         await request<Run[]>(`/groups/${groupId}/cancel`, { method: "POST" });
@@ -1010,7 +1012,7 @@ export default function GrokDashboard() {
   const displayName = selectedGroup?.name || selectedBot?.name || "New Bot";
   const availableMembers = selectedGroup ? activeBots.filter((bot) => !selectedGroup.members.some((member) => member.id === bot.id)) : [];
   const typingPeople = selectedGroup
-    ? typingNames
+    ? typingBubbleNames(typingActivity)
     : (working || botWorking) && selectedBot ? [selectedBot.name] : [];
   const currentModel = selectedBot ? (modelByBot[selectedBot.id] ?? selectedBot.model ?? "") : "";
   const selectableModels = withLatestCodexModel(chatGPTModels);
@@ -1040,7 +1042,7 @@ export default function GrokDashboard() {
         </div>
         <div className="bandros-group-list">
           <div className="bandros-groups-heading"><span>Groups</span></div>
-          {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-mark"><BandrosAvatar name={group.name} working={selectedGroup?.id === group.id && typingPeople.length > 0} /><em>{group.members.length}</em></span><span className="bandros-agent-copy"><strong>{group.name}</strong><small>{group.members.slice(0, 3).map((member) => member.name).join(", ") || "Grup kosong"}</small></span></button>)}
+          {groups.map((group) => <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-mark"><BandrosAvatar name={group.name} working={selectedGroup?.id === group.id && typingPeople.length > 0} /><em>{group.members.length}</em></span><span className="bandros-agent-copy"><strong>{group.name}</strong><small>{groupMemberSubtitle(group.members)}</small></span></button>)}
         </div>
         <button className="bandros-account" type="button" onClick={() => chatGPT.connected ? void disconnectChatGPT() : void connectChatGPT()}><BandrosAvatar name="Marketplace" /><span><strong>Marketplace</strong><small>{chatGPT.connected ? chatGPT.email || "ChatGPT terhubung" : "Sign in with ChatGPT"}</small></span></button>
       </aside>
@@ -1048,7 +1050,7 @@ export default function GrokDashboard() {
         <header className="bandros-topbar">
           <button className="bandros-back" type="button" onClick={() => { setMobilePane("list"); setSettingsOpen(false); }} aria-label="Kembali ke daftar Bot">‹</button>
           {chatGPT.connected && (selectedBot || selectedGroup) && <button className="bandros-title" type="button" onClick={openSettings} disabled={!selectedBot}>
-            <span className={`bandros-status-dot ${working || botWorking || typingNames.length > 0 ? "is-live" : ""}`} />
+            <span className={`bandros-status-dot ${turnActive ? "is-live" : ""}`} />
             <span><strong>{displayName}</strong><small>{typingPeople.length > 0 ? `${typingPeople.join(", ")} mengetik…` : selectedGroup ? selectedGroup.members.map((member) => member.name).join(", ") : selectedBot?.description || "Klik untuk mengatur peran Bot"}</small></span>
           </button>}
           {selectedBot && !selectedGroup && <button type="button" className="bandros-panel-toggle" aria-label="Pengaturan bot" title="Pengaturan bot" onClick={openSettings}>⋯</button>}
@@ -1061,8 +1063,8 @@ export default function GrokDashboard() {
           if (!node) return;
           stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
         }}>
-          {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>{selectedBot?.name.toLowerCase() === "bandros" ? "Bandros adalah orkestrator. Minta dia membuat Bot spesialis; dia yang menulis tugas, cara kerja, output, dan batasannya." : `Kirim satu tugas yang selesai jelas. ${displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.`}</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}>{(() => { const sender = message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"; const mine = message.sender_type === "user"; return <>{!mine && <BandrosAvatar name={sender} working={typingPeople.includes(sender)} />}<div className="bandros-message-body"><button type="button" style={{ color: mine ? undefined : nameColor(sender) }} onClick={() => { if (!mine) insertMention(sender); }}>{sender}</button>{mine ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content, selectedGroup.members.map((member) => member.name))}<time>{chatTime(message.created_at)}</time></div>}</div></>; })()}</article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}>{message.role !== "user" && <BandrosAvatar name={displayName} working={typingPeople.includes(displayName)} />}<div className="bandros-message-body"><span>{message.role === "user" ? "Kamu" : displayName}</span>{message.role === "user" ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content)}<time>{chatTime(message.created_at)}</time></div>}</div></article>)}
-          {typingPeople.map((name) => <article className="bandros-message from-bot bandros-typing" key={`typing-${name}`} aria-label={`${name} sedang mengetik`}><BandrosAvatar name={name} working /><div className="bandros-message-body"><button type="button" style={{ color: nameColor(name) }} onClick={() => insertMention(name)}>{name}</button><div className="bandros-bubble bandros-typing-bubble"><span className="bandros-dot" /><span className="bandros-dot" /><span className="bandros-dot" /></div></div></article>)}
+          {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>{selectedBot?.name.toLowerCase() === "bandros" ? "Bandros adalah orkestrator. Minta dia membuat Bot spesialis; dia yang menulis tugas, cara kerja, output, dan batasannya." : `Kirim satu tugas yang selesai jelas. ${displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.`}</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.filter((message) => hasVisibleBubble(message.content)).map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}>{(() => { const sender = message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"; const mine = message.sender_type === "user"; return <>{!mine && <BandrosAvatar name={sender} working={typingPeople.includes(sender)} />}<div className="bandros-message-body"><button type="button" style={{ color: mine ? undefined : nameColor(sender) }} onClick={() => { if (!mine) insertMention(sender); }}>{sender}</button>{mine ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content, selectedGroup.members.map((member) => member.name))}<time>{chatTime(message.created_at)}</time></div>}</div></>; })()}</article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}>{message.role !== "user" && <BandrosAvatar name={displayName} working={typingPeople.includes(displayName)} />}<div className="bandros-message-body"><span>{message.role === "user" ? "Kamu" : displayName}</span>{message.role === "user" ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content)}<time>{chatTime(message.created_at)}</time></div>}</div></article>)}
+          {typingPeople.map((name) => <article className="bandros-message from-bot bandros-typing" key={`typing-${name}`} aria-label={`${name} sedang mengetik`}><BandrosAvatar name={name} working /><div className="bandros-message-body"><button type="button" style={{ color: nameColor(name) }} onClick={() => insertMention(name)}>{name}</button><div className="bandros-bubble bandros-typing-bubble"><i className="bandros-dot" /><i className="bandros-dot" /><i className="bandros-dot" /></div></div></article>)}
         </div>
         <span className="bandros-sr-only" role="status" aria-live="polite" aria-atomic="true">{typingPeople.length > 0 ? `${typingPeople.join(", ")} sedang mengetik` : ""}</span>
         {mentionSuggestions.length > 0 && <div className="bandros-mentions" role="listbox" aria-label="Saran mention">{mentionSuggestions.map((member) => <button type="button" key={member.id} onMouseDown={(event) => event.preventDefault()} onClick={() => insertMention(member.name)}>@{member.name}</button>)}</div>}
