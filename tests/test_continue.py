@@ -51,7 +51,7 @@ def test_continue_request_keeps_the_interrupted_stage(tmp_path) -> None:
         if item.name == "continue_own_work"
     )
     asyncio.run(tool.handler({"note": "finish the report table"}))
-    repository.update_run(first.id, RunStatus.CANCELLED, "stopped")
+    repository.update_run(first.id, RunStatus.CANCELLED, "stopped", expect=RunStatus.QUEUED)
 
     interrupted = repository.latest_interrupted_run(bot.id)
 

@@ -41,6 +41,9 @@ def _user_facing_error(error: Exception) -> str:
     return text
 
 
+HEARTBEAT_INTERVAL = 5.0
+
+
 def _public_answer(answer: str) -> str:
     """Production must not save a mock gateway echo of the prompt."""
     if running_on_vercel() and "Mock response for:" in answer:
@@ -122,10 +125,20 @@ class RunRuntime:
             return
         bot = self.repository.get_bot(run.bot_id)
         if bot.status is not BotStatus.ACTIVE:
-            self.repository.update_run(run_id, RunStatus.FAILED, "cannot run an archived bot")
+            self.repository.update_run(
+                run_id,
+                RunStatus.FAILED,
+                "cannot run an archived bot",
+                expect={RunStatus.QUEUED, RunStatus.FAILED_RETRYABLE},
+            )
             return
 
-        self.repository.update_run(run_id, RunStatus.RUNNING)
+        if not self.repository.update_run(
+            run_id,
+            RunStatus.RUNNING,
+            expect={RunStatus.QUEUED, RunStatus.FAILED_RETRYABLE},
+        ):
+            return
         self._leave_group_queue(run_id, bot.id)
         self.repository.record_event(run_id, "model.request.started", {"model": run.model, "call": 1})
         toolset = WorkspaceToolset(
@@ -141,125 +154,174 @@ class RunRuntime:
             remote_workspace=False,
             on_computer_wake=lambda: setattr(self, "_computer_used", True),
         )
+        beat = asyncio.create_task(self._heartbeat(run_id), name=f"heartbeat-{run_id}")
         try:
-            history = self.repository.list_messages(run.conversation_id, limit=50)
-            previous_turns = history[:-1][-10:]
-            context = "\n".join(
-                f"{'Pengguna' if message.role == 'user' else 'Grup' if message.role == 'group' else 'Bot'}: {message.content[-3000:]}"
-                for message in previous_turns
-            )
-            prompt = (
-                f"Riwayat percakapan:\n{context}\n\nPesan terbaru pengguna:\n{run.prompt}"
-                if context else run.prompt
-            )
-            skills = self.repository.list_bot_skills(bot.id)
-            system = self._system_prompt(
-                bot.instructions,
-                bot.description,
-                self._environment_context(bot.id),
-                skills,
-                in_group=self.repository.group_for_run(run_id) is not None,
-            )
             try:
-                answer = await self._answer_until_stop(
-                    run_id,
-                    asyncio.wait_for(
-                        self.model_gateway.complete(
-                            system=system,
-                            prompt=prompt,
-                            model=run.model,
-                            tools=toolset.definitions(),
-                            request_limit=self.max_model_calls,
-                        ),
-                        timeout=150,
-                    ),
+                history = self.repository.list_messages(run.conversation_id, limit=50)
+                previous_turns = history[:-1][-10:]
+                context = "\n".join(
+                    f"{'Pengguna' if message.role == 'user' else 'Grup' if message.role == 'group' else 'Bot'}: {message.content[-3000:]}"
+                    for message in previous_turns
                 )
+                prompt = (
+                    f"Riwayat percakapan:\n{context}\n\nPesan terbaru pengguna:\n{run.prompt}"
+                    if context else run.prompt
+                )
+                skills = self.repository.list_bot_skills(bot.id)
+                system = self._system_prompt(
+                    bot.instructions,
+                    bot.description,
+                    self._environment_context(bot.id),
+                    skills,
+                    in_group=self.repository.group_for_run(run_id) is not None,
+                )
+                try:
+                    answer = await self._answer_until_stop(
+                        run_id,
+                        asyncio.wait_for(
+                            self.model_gateway.complete(
+                                system=system,
+                                prompt=prompt,
+                                model=run.model,
+                                tools=toolset.definitions(),
+                                request_limit=self.max_model_calls,
+                            ),
+                            timeout=150,
+                        ),
+                    )
+                except Exception as error:
+                    if "request_limit" not in str(error):
+                        raise
+                    if toolset.tool_uses > 0 and not toolset.continuation:
+                        toolset.continuation = "Lanjutkan tahap yang sama dari hasil yang sudah ada. Jangan mengulang pekerjaan yang selesai."
+                    answer = await self._answer_until_stop(
+                        run_id,
+                        asyncio.wait_for(
+                            self.model_gateway.complete(
+                                system=system,
+                                prompt=f"{prompt}\n\nBalas sekarang dari yang sudah kamu tahu. Jangan panggil alat lagi.",
+                                model=run.model,
+                                tools=(),
+                                request_limit=2,
+                            ),
+                            timeout=60,
+                        ),
+                    )
+                if answer is None or await self._turn_stopped(run_id):
+                    self._keep_stopped_stage(run_id, toolset.continuation)
+                    return
+                answer = _public_answer(answer)
             except Exception as error:
-                if "request_limit" not in str(error):
-                    raise
-                if toolset.tool_uses > 0 and not toolset.continuation:
-                    toolset.continuation = "Lanjutkan tahap yang sama dari hasil yang sudah ada. Jangan mengulang pekerjaan yang selesai."
-                answer = await self._answer_until_stop(
-                    run_id,
-                    asyncio.wait_for(
-                        self.model_gateway.complete(
-                            system=system,
-                            prompt=f"{prompt}\n\nBalas sekarang dari yang sudah kamu tahu. Jangan panggil alat lagi.",
-                            model=run.model,
-                            tools=(),
-                            request_limit=2,
-                        ),
-                        timeout=60,
-                    ),
-                )
-            if answer is None or await self._turn_stopped(run_id):
+                message = "Balasan terlalu lama. Kirim ulang." if isinstance(error, TimeoutError) else _user_facing_error(error)
+                self._finish_failed_run(run_id, run.conversation_id, message)
+                return
+
+            current = self.repository.get_run(run_id)
+            if current.status is RunStatus.WAITING_APPROVAL:
+                note = answer.strip() or "Butuh persetujuanmu sebelum langkah ini dijalankan."
+                self.repository.append_message(run.conversation_id, "assistant", note, model=run.model)
+                return
+            if current.stop_requested or current.status is RunStatus.CANCELLED:
                 self._keep_stopped_stage(run_id, toolset.continuation)
                 return
-            answer = _public_answer(answer)
-        except Exception as error:
-            message = "Balasan terlalu lama. Kirim ulang." if isinstance(error, TimeoutError) else _user_facing_error(error)
-            self._finish_failed_run(run_id, run.conversation_id, message)
-            return
-
-        current = self.repository.get_run(run_id)
-        if current.status is RunStatus.WAITING_APPROVAL:
-            note = answer.strip() or "Butuh persetujuanmu sebelum langkah ini dijalankan."
-            self.repository.append_message(run.conversation_id, "assistant", note, model=run.model)
-            return
-        if current.stop_requested or current.status is RunStatus.CANCELLED:
-            self._keep_stopped_stage(run_id, toolset.continuation)
-            return
-        group_id = self.repository.group_for_run(run_id)
-        self._queue_own_continuation(group_id, bot, run_id, toolset)
-        if group_id:
-            answer = visible_reply(answer)
-        if group_id and not is_silence(answer):
-            if self._lead_already_replied(group_id, bot.id) and not self._repeat_ok:
-                answer = "(diam)"
-            else:
+            group_id = self.repository.group_for_run(run_id)
+            self._queue_own_continuation(group_id, bot, run_id, toolset)
+            if group_id:
+                answer = visible_reply(answer)
+            if group_id and not is_silence(answer):
+                if self._lead_already_replied(group_id, bot.id) and not self._repeat_ok:
+                    answer = "(diam)"
+                else:
+                    depth = self._group_depth.get(run_id, 0)
+                    answer = self._mention_teammates_for_roll_call(group_id, bot, answer, depth)
+                    answer = self._route_next_owner(group_id, bot, answer)
+                    answer = self._drop_answered_peer_mentions(group_id, bot, answer)
+                    answer = without_self_mention(answer, bot)
+            if is_silence(answer):
+                if self.repository.update_run(run_id, RunStatus.COMPLETED, expect=RunStatus.RUNNING):
+                    self.repository.record_event(run_id, "assistant.skipped", {"reason": "empty"})
+                return
+            if not self.repository.commit_assistant_turn(run_id, answer, run.model):
+                self._keep_stopped_stage(run_id, toolset.continuation)
+                return
+            self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
+            if group_id and not is_silence(answer):
+                recent = self.repository.list_group_messages(group_id)
+                already_posted = bool(recent) and recent[-1].sender_bot_id == bot.id and recent[-1].content.strip() == answer.strip()
+                if not already_posted:
+                    self.repository.append_group_message(group_id, "bot", answer, bot.id)
                 depth = self._group_depth.get(run_id, 0)
-                answer = self._mention_teammates_for_roll_call(group_id, bot, answer, depth)
-                answer = self._route_next_owner(group_id, bot, answer)
-                answer = self._drop_answered_peer_mentions(group_id, bot, answer)
-                answer = without_self_mention(answer, bot)
-        if is_silence(answer):
-            self.repository.record_event(run_id, "assistant.skipped", {"reason": "empty"})
-            self.repository.update_run(run_id, RunStatus.COMPLETED)
-            return
-        if not self.repository.commit_assistant_turn(run_id, answer, run.model):
-            self._keep_stopped_stage(run_id, toolset.continuation)
-            return
-        self.repository.record_event(run_id, "assistant.delta", {"content": answer, "final": True})
-        if group_id and not is_silence(answer):
-            recent = self.repository.list_group_messages(group_id)
-            already_posted = bool(recent) and recent[-1].sender_bot_id == bot.id and recent[-1].content.strip() == answer.strip()
-            if not already_posted:
-                self.repository.append_group_message(group_id, "bot", answer, bot.id)
-            depth = self._group_depth.get(run_id, 0)
-            if depth < 5:
-                self.queue_group_wake(group_id, answer, bot.id, depth + 1)
-        self.repository.record_event(run_id, "assistant.message", {"characters": len(answer)})
-        self.repository.record_event(run_id, "model.request.completed", {"model": run.model, "call": 1})
-        self._resolve_handoffs(run_id, answer, success=True)
-        await self.drain_group_wakes()
+                if depth < 5:
+                    self.queue_group_wake(group_id, answer, bot.id, depth + 1)
+            self.repository.record_event(run_id, "assistant.message", {"characters": len(answer)})
+            self.repository.record_event(run_id, "model.request.completed", {"model": run.model, "call": 1})
+            self._resolve_handoffs(run_id, answer, success=True)
+            await self.drain_group_wakes()
+        finally:
+            beat.cancel()
+            with suppress(asyncio.CancelledError):
+                await beat
+
+    async def _heartbeat(self, run_id: UUID) -> None:
+        """Refresh the shared lease for the whole turn, including tool calls."""
+        try:
+            while True:
+                try:
+                    self.repository.touch_run(run_id)
+                except Exception:
+                    pass
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+        except asyncio.CancelledError:
+            raise
 
     def _finish_failed_run(self, run_id: UUID, conversation_id: UUID, message: str) -> None:
         note = message[:500] or "Balasan kosong."
+        if not self.repository.update_run(
+            run_id,
+            RunStatus.FAILED,
+            note,
+            expect={RunStatus.QUEUED, RunStatus.RUNNING},
+        ):
+            return
         try:
             self.repository.append_message(conversation_id, "assistant", note)
             group_id = self.repository.group_for_run(run_id)
             if group_id is not None:
                 bot_id = self.repository.get_run(run_id).bot_id
                 self.repository.append_group_message(group_id, "bot", note, bot_id)
-            self.repository.update_run(run_id, RunStatus.FAILED, note)
         except Exception:
             return
         self._resolve_handoffs(run_id, note, success=False)
 
+    def reconcile_runs(self) -> int:
+        """Drop runs this process already finished, then runs whose shared lease expired.
+
+        A run that is still executing here is kept even if its heartbeat is late.
+        A run that exists only in the database is kept while that lease is fresh,
+        so a poll on another instance does not call a live reply interrupted.
+        """
+        closed = self._close_finished_local_runs()
+        protected = {run_id for run_id, task in self._tasks.items() if not task.done()}
+        return closed + self.repository.fail_orphaned_runs(skip=protected)
+
+    def _close_finished_local_runs(self) -> int:
+        closed = 0
+        for run_id, task in list(self._tasks.items()):
+            if not task.done():
+                continue
+            run = self.repository.get_run(run_id)
+            if run.status in {RunStatus.QUEUED, RunStatus.RUNNING} and self.repository.close_orphaned_run(run_id):
+                closed += 1
+            if task.done() and not task.cancelled():
+                with suppress(asyncio.CancelledError, Exception):
+                    task.exception()
+            self._tasks.pop(run_id, None)
+        return closed
+
     def recover(self, *, resume: bool = True) -> int:
-        """Resume interrupted work locally. On a serverless copy, close it so the user can send again."""
+        """Resume interrupted work locally. On a serverless copy, close only leases that expired."""
         if not resume:
-            return self.repository.fail_orphaned_runs()
+            return self.reconcile_runs()
         run_ids = self.repository.recover_incomplete_runs()
         for run_id in run_ids:
             self.start(run_id)
@@ -332,7 +394,12 @@ class RunRuntime:
             self.repository.set_run_continuation(run_id, run.prompt)
             run = self.repository.get_run(run_id)
         if run.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL}:
-            self.repository.update_run(run_id, RunStatus.CANCELLED, "generation stopped by user")
+            self.repository.update_run(
+                run_id,
+                RunStatus.CANCELLED,
+                "generation stopped by user",
+                expect={RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL},
+            )
         task = self._tasks.get(run_id)
         if task and not task.done() and task is not asyncio.current_task():
             task.cancel()
@@ -341,15 +408,20 @@ class RunRuntime:
         approval = self.repository.get_approval(approval_id)
         run = self.repository.get_run(approval.run_id)
         if approval.status is ApprovalStatus.REJECTED:
-            self.repository.update_run(run.id, RunStatus.CANCELLED, "approval rejected")
+            self.repository.update_run(
+                run.id,
+                RunStatus.CANCELLED,
+                "approval rejected",
+                expect=RunStatus.WAITING_APPROVAL,
+            )
         elif (
             approval.status is ApprovalStatus.APPROVED
             and run.status is RunStatus.WAITING_APPROVAL
             and not run.stop_requested
         ):
             self._approved_tools.setdefault(run.id, {}).setdefault(approval.tool_name, []).append(approval.payload)
-            self.repository.update_run(run.id, RunStatus.QUEUED)
-            self.start(run.id)
+            if self.repository.update_run(run.id, RunStatus.QUEUED, expect=RunStatus.WAITING_APPROVAL):
+                self.start(run.id)
 
     def _resolve_handoffs(self, run_id: UUID, result: str, success: bool) -> None:
         for handoff in self.repository.complete_handoffs_for_run(run_id, result, success):
@@ -533,6 +605,7 @@ class RunRuntime:
 
     async def advance_group(self, group_id: UUID) -> str | None:
         """One selected bot replies, then the turn is saved before the next bot speaks."""
+        self.reconcile_runs()
         item = self.repository.peek_group_speaker(group_id)
         if item is None:
             self._anticipated.pop(group_id, None)
