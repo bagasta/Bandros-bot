@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from apps.api.app.database import Database
-from apps.api.app.group_activity import describe_group_activity
+from apps.api.app.group_activity import describe_group_activity, load_group_activity
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime
 
@@ -112,6 +112,29 @@ def test_old_group_lists_every_saved_member(tmp_path: Path) -> None:
     reloaded = repository.get_group(group.id)
     assert [member.name for member in reloaded.members] == [member.name for member in group.members]
     assert len(reloaded.members) == 4
+
+
+def test_finished_speaker_does_not_keep_the_typing_label(tmp_path: Path) -> None:
+    database = Database(tmp_path / "handoff.db")
+    database.initialize()
+    repository = Repository(database)
+    penulis = repository.create_bot("QA-Penulis", "", "TOKEN:penulis", None)
+    analis = repository.create_bot("QA-Analis", "", "TOKEN:analis", None)
+    group = repository.create_group("QA", "", [penulis.id, analis.id])
+    repository.append_group_message(group.id, "user", "tulis lalu periksa")
+    repository.enqueue_group_speaker(group.id, penulis.id, "tulis lalu periksa", None, 0)
+    repository.enqueue_group_speaker(group.id, analis.id, "tulis lalu periksa", None, 0)
+
+    class Gateway:
+        async def complete(self, *, system: str, prompt: str, model: str, tools=(), request_limit: int = 8) -> str:
+            return "Draf siap."
+
+    runtime = RunRuntime(repository, Gateway(), "test-model", 3)
+    speaker = asyncio.run(runtime.advance_group(group.id))
+    assert speaker == "QA-Penulis"
+    described = load_group_activity(repository, group.id, runtime.composing_bot_id(group.id))
+    assert [name for _, name, status in described if status == "running"] == ["QA-Analis"]
+    assert "QA-Penulis" not in [name for _, name, status in described if status == "running"]
 
 
 def test_only_the_bot_inside_the_model_call_is_composing(tmp_path: Path) -> None:
