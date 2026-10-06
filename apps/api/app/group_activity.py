@@ -1,8 +1,29 @@
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 LIVE_TYPING_STATUSES = frozenset({"running", "waiting_approval"})
+
+
+def load_group_activity(repository: Any, group_id: UUID, composer_id: UUID | None) -> list[tuple[UUID, str, str]]:
+    """Live runs plus the queue, as the chat should label them after this request."""
+    live: list[tuple[UUID, str, str]] = []
+    for run in repository.live_runs_for_group(group_id):
+        status = str(run.status)
+        if status not in LIVE_TYPING_STATUSES:
+            continue
+        bot = repository.get_bot(run.bot_id)
+        live.append((bot.id, bot.name, status))
+    group = repository.get_group(group_id)
+    members = {member.id: member.name for member in group.members}
+    queued: list[tuple[UUID, str]] = []
+    for bot_id in repository.queued_bot_ids(group_id):
+        name = members.get(bot_id)
+        if name is None:
+            continue
+        queued.append((bot_id, name))
+    return describe_group_activity(live, queued, composer_id)
 
 
 def describe_group_activity(
