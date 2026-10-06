@@ -93,6 +93,7 @@
 .bandros-agent-copy strong, .bandros-agent-copy small, .bandros-group strong, .bandros-group small, .bandros-title strong, .bandros-title small, .bandros-account small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bandros-agent-copy strong, .bandros-group strong { font-size: 13px; }
 .bandros-agent-copy small, .bandros-group small { margin-top: 2px; color: var(--muted); font-size: 12px; }
+.bandros-group .bandros-agent-copy small { white-space: normal; overflow: visible; text-overflow: clip; }
 .bandros-groups-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; padding: 0 8px 8px; color: var(--muted); font-size: 12px; }
 .bandros-muted { padding: 8px; color: var(--muted); font-size: 13px; }
 .bandros-account { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: auto; padding: 12px 8px 4px; color: var(--ink); text-align: left; }
@@ -138,7 +139,7 @@
 .bandros-message > button { cursor: pointer; }
 .bandros-message.bandros-typing { align-items: flex-end; }
 .bandros-typing-bubble { display: flex; align-items: center; gap: 6px; width: fit-content; min-height: 28px; margin: 0; padding: 10px 14px; }
-.bandros-message .bandros-dot { display: block; flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--ink); animation: bandros-typing 1.2s ease-in-out infinite; }
+.bandros-message .bandros-dot { display: block; flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--ink); font-style: normal; animation: bandros-typing 1.2s ease-in-out infinite; }
 .bandros-message .bandros-dot:nth-child(2) { animation-delay: .16s; }
 .bandros-message .bandros-dot:nth-child(3) { animation-delay: .32s; }
 @keyframes bandros-typing {

@@ -28,6 +28,7 @@ from .database import Database, database_revision, encode_snapshot, hold_snapsho
 from .computer import DaytonaComputer
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, ClawHubInstall, ClawHubListing, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
+from .group_activity import describe_group_activity
 from .model_gateway import (
     ChatGPTGateway,
     CompositeGateway,
@@ -1265,28 +1266,23 @@ def group_activity(group_id: UUID) -> list[GroupActivity]:
         repository.get_group(group_id)
     except KeyError as error:
         raise not_found(error) from error
-    activity: list[GroupActivity] = []
-    seen: set[str] = set()
+    live: list[tuple[UUID, str, str]] = []
     for run in repository.runs_for_group(group_id):
         if not _run_is_live(run.id):
             continue
         bot = repository.get_bot(run.bot_id)
-        seen.add(bot.name)
-        activity.append(GroupActivity(bot_id=bot.id, name=bot.name, status=str(run.status)))
+        live.append((bot.id, bot.name, str(run.status)))
     group = repository.get_group(group_id)
+    queued: list[tuple[UUID, str]] = []
     for bot_id in repository.queued_bot_ids(group_id):
         member = next((item for item in group.members if item.id == bot_id), None)
-        if member is None or member.name in seen:
+        if member is None:
             continue
-        seen.add(member.name)
-        activity.append(GroupActivity(bot_id=member.id, name=member.name, status="running"))
-    for name in runtime.typing_names(group_id):
-        if name in seen:
-            continue
-        member = next((item for item in group.members if item.name == name), None)
-        if member is not None:
-            activity.append(GroupActivity(bot_id=member.id, name=member.name, status="running"))
-    return activity
+        queued.append((member.id, member.name))
+    return [
+        GroupActivity(bot_id=bot_id, name=name, status=status)
+        for bot_id, name, status in describe_group_activity(live, queued)
+    ]
 
 
 def _run_is_live(run_id: UUID) -> bool:
