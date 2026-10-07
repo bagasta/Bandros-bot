@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "../apps/web/app/chat-presentation.ts";
+import { groupMemberSubtitle, hasVisibleBubble, mergeBotDirectory, mergeGroupRosters, presentGroupMembers, resolveSelectedBot, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "../apps/web/app/chat-presentation.ts";
 
 const roster = [
   { name: "Bandros" },
@@ -149,6 +149,51 @@ test("web search shows a tool label on the composer only", () => {
   assert.equal(typingToolLabel(activity, "Tester Tiga"), "Mencari web");
   assert.equal(typingToolLabel(activity, "Bandros"), "");
   assert.deepEqual(typingBubbleNames(activity), ["Tester Tiga"]);
+});
+
+const bandros = { id: "bot-1", name: "Bandros", description: "Orchestrator", model: "gpt-6", status: "active" };
+const worker = { id: "bot-2", name: "QA Worker", description: "Tester", model: null, status: "active" };
+
+test("an empty bots poll keeps the open 1:1 selection", () => {
+  const kept = resolveSelectedBot(bandros, [], {
+    incomingFresh: true,
+    quiet: true,
+    groupSelected: false,
+    fallback: null,
+  });
+  assert.equal(kept, bandros);
+  assert.equal(kept?.name, "Bandros");
+});
+
+test("a stale bots poll that omits the open bot does not fall back to New Bot", () => {
+  const kept = resolveSelectedBot(worker, [bandros], {
+    incomingFresh: false,
+    quiet: true,
+    groupSelected: false,
+    fallback: bandros,
+  });
+  assert.equal(kept?.id, worker.id);
+  assert.equal(kept?.name, "QA Worker");
+});
+
+test("a later successful list still refreshes the same selected bot", () => {
+  const renamed = { ...bandros, description: "Lead" };
+  const next = resolveSelectedBot(bandros, [renamed, worker], {
+    incomingFresh: true,
+    quiet: true,
+    groupSelected: false,
+    fallback: worker,
+  });
+  assert.equal(next?.id, "bot-1");
+  assert.equal(next?.description, "Lead");
+});
+
+test("an empty bots directory does not wipe bots already on screen", () => {
+  const merged = mergeBotDirectory([bandros, worker], [], true);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].id, "bot-1");
+  const stale = mergeBotDirectory([bandros], [], false);
+  assert.equal(stale.length, 1);
 });
 
 test("blank message content is not a bubble", () => {
