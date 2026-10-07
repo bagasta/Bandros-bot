@@ -15,6 +15,7 @@ def test_health_reports_vercel_git_commit_sha(monkeypatch) -> None:
     assert body["status"] == "ok"
     assert body["commit"] == "34f08aaa77408c4b3ccffd36e941f5f697892b73"
     assert "environment" in body
+    assert body["db"] == "sqlite"
 
 
 def test_health_commit_is_unknown_when_sha_missing(monkeypatch) -> None:

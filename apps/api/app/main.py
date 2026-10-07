@@ -226,7 +226,7 @@ def activate_account(account_id: str) -> tuple[object, object]:
             settings.database_path.parent,
             settings.workspace_root,
         )
-        database = Database(database_path, blob_path=blob_path)
+        database = Database(database_path, blob_path=blob_path, database_url=settings.database_url)
         database.initialize()
         repo = Repository(database)
         _seed_workspace(repo)
@@ -427,23 +427,33 @@ async def optional_auth(request: Request, call_next):
             if not isinstance(account_id, str) or not account_id.strip():
                 return JSONResponse({"detail": "Masuk dengan ChatGPT dulu."}, status_code=401)
             database_path = _account_database_path(account_id)
-            snapshot = request.headers.get("X-Bandros-Snapshot") or request.scope.get("state", {}).get("bandros_snapshot")
-            with _STAGE_LOCK:
-                staged = False
-                if snapshot and not snapshot_held(database_path) and not database_path.is_file():
-                    Database(database_path, blob_path=tenant_locations(account_id, settings.database_path.parent, settings.workspace_root)[2]).pull()
-                if snapshot:
-                    staged = stage_snapshot(database_path, snapshot)
-                    if staged:
-                        cached = _workspaces.get(tenant_digest(account_id))
-                        if cached is not None:
-                            cached[0].database.initialize()
-                hold_snapshot(database_path)
-                held_path = database_path
-            incoming_rev = database_revision(database_path) if database_path.is_file() else -1
+            # Postgres is the shared store. Client sqlite snapshots must not overwrite it.
+            if not settings.database_url:
+                snapshot = request.headers.get("X-Bandros-Snapshot") or request.scope.get("state", {}).get("bandros_snapshot")
+                with _STAGE_LOCK:
+                    staged = False
+                    if snapshot and not snapshot_held(database_path) and not database_path.is_file():
+                        Database(database_path, blob_path=tenant_locations(account_id, settings.database_path.parent, settings.workspace_root)[2]).pull()
+                    if snapshot:
+                        staged = stage_snapshot(database_path, snapshot)
+                        if staged:
+                            cached = _workspaces.get(tenant_digest(account_id))
+                            if cached is not None:
+                                cached[0].database.initialize()
+                    hold_snapshot(database_path)
+                    held_path = database_path
+                incoming_rev = database_revision(database_path) if database_path.is_file() else -1
+            else:
+                incoming_rev = -1
             repository_token, runtime_token = activate_account(account_id)
         response = await call_next(request)
-        if not public_path and request.method != "OPTIONS" and isinstance(account_id, str) and account_id.strip():
+        if (
+            not settings.database_url
+            and not public_path
+            and request.method != "OPTIONS"
+            and isinstance(account_id, str)
+            and account_id.strip()
+        ):
             database_path = _account_database_path(account_id)
             if database_path.is_file():
                 revision = database_revision(database_path)
@@ -739,6 +749,7 @@ def health() -> dict[str, str]:
         "status": "ok",
         "environment": settings.environment_name,
         "commit": _git_commit_sha(),
+        "db": "postgres" if settings.database_url else "sqlite",
     }
 
 
