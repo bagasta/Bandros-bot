@@ -611,12 +611,19 @@ async def computer_start() -> dict[str, str | None]:
 
 
 @app.post("/api/v1/computer/shown")
-async def computer_shown() -> dict[str, bool]:
+async def computer_shown() -> dict[str, str | bool | None]:
     computer = _account_computer()
-    mark = getattr(computer, "note_preview_shown", None)
-    if mark is not None:
-        mark()
-    return {"ok": True}
+    if computer is None:
+        return {"ok": True, "screen_url": None}
+    keep = getattr(computer, "keep_screen", None) or getattr(computer, "note_preview_shown", None)
+    if keep is not None:
+        await asyncio.to_thread(keep)
+    status = getattr(computer, "status", None)
+    if status is None:
+        return {"ok": True, "screen_url": None}
+    body = await asyncio.to_thread(status)
+    screen_url = body.get("screen_url") if isinstance(body, dict) else None
+    return {"ok": True, "screen_url": screen_url}
 
 
 @app.post("/api/v1/computer/stop")
