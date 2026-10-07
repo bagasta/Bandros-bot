@@ -35,6 +35,14 @@ class ComputerError(RuntimeError):
     pass
 
 
+def _vnc_viewer_url(url: str) -> str:
+    """Open the noVNC page. The signed preview link is the static-file root, which lists the folder."""
+    parts = urlsplit(url)
+    if parts.path not in {"", "/"}:
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, "/vnc.html", parts.query, parts.fragment))
+
+
 def _with_signed_token(url: str, token: str) -> str:
     """Keep the signed preview path and token. A separate token is part of the host."""
     if not token or token in url:
@@ -186,7 +194,7 @@ class DaytonaComputer:
         url = body.get("url")
         if not url:
             return None
-        signed = _with_signed_token(str(url), str(body.get("token") or ""))
+        signed = _vnc_viewer_url(_with_signed_token(str(url), str(body.get("token") or "")))
         self._signed_url = signed
         return signed
 

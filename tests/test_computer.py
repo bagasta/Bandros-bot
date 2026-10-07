@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -150,6 +151,28 @@ def test_wake_returns_preview_without_installing_chrome() -> None:
     assert status == {"state": "on", "screen_url": signed}
     assert commands == []
     assert computer.status()["screen_url"] == signed
+
+
+def test_screen_url_opens_vnc_page_when_signed_preview_is_directory_root() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/sandbox":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": "sb", "state": "started", "labels": {"app": "bandros", "account": "acct"}}]},
+            )
+        if path.endswith("/signed-preview-url"):
+            return httpx.Response(
+                200,
+                json={"url": "https://6080-sandbox.daytonaproxy01.net", "token": "signedtoken"},
+            )
+        return httpx.Response(404, text=path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    screen_url = computer.status()["screen_url"]
+
+    assert screen_url == "https://6080-signedtoken.daytonaproxy01.net/vnc.html"
+    assert urlsplit(screen_url or "").path == "/vnc.html"
 
 
 def test_separate_preview_token_stays_in_the_signed_url() -> None:
