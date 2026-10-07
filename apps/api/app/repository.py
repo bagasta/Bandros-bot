@@ -172,24 +172,19 @@ class Repository:
         )
 
     def list_messages(self, conversation_id: UUID, limit: int = 50) -> list[Message]:
-        """1:1 history. Group replies stay in the group room and are not returned."""
+        """1:1 history. Legacy group copies (role group, or a `[Grup ` prefix) are omitted.
+
+        A private reply that happens to use the same words as a group message stays.
+        New group turns are not written here at all.
+        """
         with self.database.connection() as db:
             rows = db.execute(
                 """
-                SELECT messages.* FROM messages
-                WHERE messages.conversation_id = ?
-                  AND messages.role != 'group'
-                  AND NOT (
-                    messages.role = 'assistant'
-                    AND EXISTS (
-                      SELECT 1
-                      FROM group_messages
-                      JOIN conversations ON conversations.bot_id = group_messages.sender_bot_id
-                      WHERE conversations.id = messages.conversation_id
-                        AND group_messages.content = messages.content
-                    )
-                  )
-                ORDER BY messages.created_at DESC
+                SELECT * FROM messages
+                WHERE conversation_id = ?
+                  AND role != 'group'
+                  AND content NOT LIKE '[Grup %'
+                ORDER BY created_at DESC
                 LIMIT ?
                 """,
                 (str(conversation_id), limit),
@@ -792,21 +787,13 @@ class Repository:
         )
 
     def drop_copied_group_context(self) -> None:
-        """Remove private copies of group lines. They made every later request carry a huge snapshot."""
+        """Remove legacy private copies of group lines.
+
+        Old builds stored those rows as role `group` and/or with a `[Grup ` prefix.
+        A 1:1 assistant reply is kept even when a group message has the same text.
+        """
         with self.database.connection() as db:
-            db.execute("DELETE FROM messages WHERE role = 'group' AND content LIKE '[Grup %'")
-            db.execute(
-                """
-                DELETE FROM messages
-                WHERE role = 'assistant'
-                AND EXISTS (
-                    SELECT 1 FROM group_messages
-                    JOIN conversations ON conversations.bot_id = group_messages.sender_bot_id
-                    WHERE conversations.id = messages.conversation_id
-                      AND group_messages.content = messages.content
-                )
-                """
-            )
+            db.execute("DELETE FROM messages WHERE role = 'group' OR content LIKE '[Grup %'")
 
     def enqueue_group_speaker(
         self,

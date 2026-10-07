@@ -1,4 +1,8 @@
-"""Early Stop and 1:1 history on the shared Postgres database."""
+"""Early Stop and 1:1 history on the shared Postgres database.
+
+CI sets BANDROS_TEST_POSTGRES and runs this file in the Postgres step.
+DATABASE_URL is accepted for a local run of the same cases.
+"""
 
 from __future__ import annotations
 
@@ -16,13 +20,18 @@ from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime
 from apps.api.app.tenancy import tenant_locations
 
-pytestmark = pytest.mark.skipif(not os.environ.get("DATABASE_URL"), reason="DATABASE_URL is not set")
+def _postgres_dsn() -> str | None:
+    return os.environ.get("BANDROS_TEST_POSTGRES") or os.environ.get("DATABASE_URL")
+
+
+pytestmark = pytest.mark.skipif(not _postgres_dsn(), reason="BANDROS_TEST_POSTGRES is not set")
 
 LATE = "LATE-REPLY-SHOULD-NOT-PERSIST"
 
 
 def _pair(tmp_path: Path) -> tuple[Path, str, Repository, Repository]:
-    url = os.environ["DATABASE_URL"]
+    url = _postgres_dsn()
+    assert url is not None
     path = tenant_locations(f"early-{uuid4()}", tmp_path, tmp_path / "files")[0]
     database = Database(path, database_url=url)
     database.initialize()
@@ -174,18 +183,25 @@ def test_direct_history_on_postgres_skips_group_replies(tmp_path: Path) -> None:
 
     runtime = RunRuntime(repository, Gate(), "test-model", 2)
     asyncio.run(runtime.speak_in_group(group.id, "Cek tim", None, 0))
-    repository.append_message(conversation_id, "assistant", "Dari grup.")
-    repository.append_message(conversation_id, "user", "halo pribadi")
-    assert _texts(other, conversation_id) == ["halo pribadi"]
+    assert _texts(other, conversation_id) == []
+    repository.append_group_message(group.id, "bot", "Siap.", worker.id)
+    repository.append_message(conversation_id, "assistant", "Siap.")
+    repository.append_message(conversation_id, "group", "[Grup Tim] baris lama")
+    assert _texts(other, conversation_id) == ["Siap."]
 
+    repository.append_message(conversation_id, "user", "halo pribadi")
     follow = repository.create_run(worker.id, conversation_id, "halo pribadi", "test-model")
     asyncio.run(runtime.start_and_wait(follow.id))
     assert "Dari grup." not in prompts[-1]
     repository.drop_copied_group_context()
 
     fresh = _reread(path, url)
-    assert _texts(fresh, conversation_id) == ["halo pribadi", "Jawaban pribadi."]
+    assert "Siap." in _texts(fresh, conversation_id)
+    assert "halo pribadi" in _texts(fresh, conversation_id)
+    assert "Jawaban pribadi." in _texts(fresh, conversation_id)
     with fresh.database.connection() as db:
         stored = [row["content"] for row in db.execute("SELECT content FROM messages").fetchall()]
+    assert "Siap." in stored
+    assert "[Grup Tim] baris lama" not in stored
     assert "Dari grup." not in stored
-    assert [message.content for message in fresh.list_group_messages(group.id) if message.sender_type == "bot"] == ["Dari grup."]
+    assert "Dari grup." in [message.content for message in fresh.list_group_messages(group.id) if message.sender_type == "bot"]
