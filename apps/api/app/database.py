@@ -1,9 +1,24 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+import base64
+import gzip
+import os
 import sqlite3
-from typing import Iterator
+import tempfile
+import threading
+from typing import Any, Iterator
+
+from .postgres_store import migrate_postgres, postgres_connection, schema_for_path
+
+_LOADED_DATABASE: ContextVar[str | None] = ContextVar("bandros_loaded_database", default=None)
+_SNAPSHOT_READY: ContextVar[str | None] = ContextVar("bandros_snapshot_ready", default=None)
+_SNAPSHOT_LIMIT = 2_000_000
+_DATABASE_BLOB_PATH = "state/workspace.db"
+_HOLD_LOCK = threading.Lock()
+_SNAPSHOT_HOLDS: dict[str, int] = {}
 
 
 SCHEMA = """
@@ -42,11 +57,13 @@ CREATE TABLE IF NOT EXISTS runs (
     prompt TEXT NOT NULL,
     model TEXT NOT NULL,
     error TEXT,
+    continuation TEXT,
     usage TEXT NOT NULL DEFAULT '{}',
     stop_requested INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     started_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    heartbeat_at TEXT
 );
 CREATE TABLE IF NOT EXISTS run_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,11 +133,30 @@ CREATE TABLE IF NOT EXISTS group_messages (
     sender_type TEXT NOT NULL,
     sender_bot_id TEXT REFERENCES bots(id),
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    citations TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS group_run_links (
     run_id TEXT PRIMARY KEY REFERENCES runs(id),
     group_id TEXT NOT NULL REFERENCES work_groups(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS plugins (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    token TEXT,
+    tools_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS group_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL REFERENCES work_groups(id) ON DELETE CASCADE,
+    bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    sender_bot_id TEXT,
+    depth INTEGER NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS handoffs (
     id TEXT PRIMARY KEY,
@@ -148,6 +184,7 @@ CREATE TABLE IF NOT EXISTS chatgpt_oauth (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     client_id TEXT,
     host_id TEXT,
+    preferred_model TEXT,
     subject TEXT,
     email TEXT,
     access_token TEXT NOT NULL,
@@ -158,40 +195,112 @@ CREATE TABLE IF NOT EXISTS chatgpt_oauth (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS oauth_transactions (
+    state TEXT PRIMARY KEY,
+    code_verifier TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+# Columns added after the first shipped schema. Both backends apply these.
+ADDITIVE_COLUMNS = {
+    "messages": {
+        "model": "TEXT",
+        "usage": "TEXT NOT NULL DEFAULT '{}'",
+        "attachments": "TEXT NOT NULL DEFAULT '[]'",
+        "citations": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "runs": {
+        "continuation": "TEXT",
+        "usage": "TEXT NOT NULL DEFAULT '{}'",
+        "stop_requested": "INTEGER NOT NULL DEFAULT 0",
+        "heartbeat_at": "TEXT",
+    },
+    "group_messages": {
+        "citations": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "chatgpt_oauth": {
+        "client_id": "TEXT",
+        "host_id": "TEXT",
+        "id_token": "TEXT",
+        "preferred_model": "TEXT",
+    },
+}
 
 
 class Database:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, blob_path: str | None = None, database_url: str | None = None) -> None:
         self.path = path
+        self.blob_path = blob_path or _DATABASE_BLOB_PATH
+        # None or blank keeps SQLite. A DSN is passed only by the app when DATABASE_URL
+        # is set, so unit tests that construct Database(path) never pick up a developer .env.
+        self.database_url = database_url.strip() if isinstance(database_url, str) and database_url.strip() else None
+        self.postgres = self.database_url is not None
+        self.schema = schema_for_path(path) if database_url else None
 
     def initialize(self) -> None:
+        if self.database_url:
+            migrate_postgres(self.database_url, schema_for_path(self.path), SCHEMA, ADDITIVE_COLUMNS)
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        migrated = False
         with self.connection() as connection:
             connection.executescript(SCHEMA)
-            self._migrate(connection)
+            migrated = self._migrate(connection)
+        # SQLite DDL does not increment total_changes, so connection() cannot
+        # notice an ALTER TABLE and persist the migrated database to Blob.
+        if migrated:
+            self.push()
 
     @staticmethod
-    def _migrate(connection: sqlite3.Connection) -> None:
+    def _durable() -> bool:
+        return bool(os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN"))
+
+    def pull(self) -> None:
+        if self.postgres or _SNAPSHOT_READY.get() == str(self.path) or not self._durable():
+            return
+        from vercel.blob import BlobClient
+        from vercel.blob.errors import BlobNotFoundError
+
+        try:
+            with BlobClient() as client:
+                result = client.get(self.blob_path, access="private", use_cache=False)
+        except BlobNotFoundError:
+            return
+        except Exception:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_bytes(result.content)
+
+    def push(self) -> None:
+        if self.postgres or not self._durable() or not self.path.exists():
+            return
+        from vercel.blob import BlobClient
+
+        try:
+            with BlobClient() as client:
+                client.put(
+                    self.blob_path,
+                    self.path.read_bytes(),
+                    access="private",
+                    content_type="application/vnd.sqlite3",
+                    overwrite=True,
+                )
+        except Exception:
+            return
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> bool:
         """Apply additive migrations for databases created by earlier versions."""
-        migrations = {
-            "messages": {
-                "model": "TEXT",
-                "usage": "TEXT NOT NULL DEFAULT '{}'",
-                "attachments": "TEXT NOT NULL DEFAULT '[]'",
-                "citations": "TEXT NOT NULL DEFAULT '[]'",
-            },
-            "runs": {
-                "usage": "TEXT NOT NULL DEFAULT '{}'",
-                "stop_requested": "INTEGER NOT NULL DEFAULT 0",
-            },
-            "chatgpt_oauth": {
-                "client_id": "TEXT",
-                "host_id": "TEXT",
-                "id_token": "TEXT",
-            },
-        }
-        for table, columns in migrations.items():
+        migrated = False
+        for table, columns in ADDITIVE_COLUMNS.items():
             existing = {
                 row["name"]
                 for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -199,17 +308,191 @@ class Database:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                    migrated = True
+        if _ensure_sqlite_group_queue_uniqueness(connection):
+            migrated = True
+        return migrated
 
     @contextmanager
-    def connection(self) -> Iterator[sqlite3.Connection]:
+    def connection(self) -> Iterator[Any]:
+        if self.database_url:
+            with postgres_connection(self.database_url, schema_for_path(self.path)) as connection:
+                yield connection
+            return
+        if _LOADED_DATABASE.get() != str(self.path):
+            self.pull()
+            _LOADED_DATABASE.set(str(self.path))
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            # A client snapshot from before this table existed must still accept a group turn.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS plugins (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    url TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    token TEXT,
+                    tools_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS group_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT NOT NULL,
+                    bot_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    sender_bot_id TEXT,
+                    depth INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            changes = connection.total_changes
             yield connection
+            if connection.total_changes != changes:
+                _bump_revision(connection)
             connection.commit()
+            if connection.total_changes != changes:
+                self.push()
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
+
+
+def _ensure_sqlite_group_queue_uniqueness(connection: sqlite3.Connection) -> bool:
+    """One queued bot per group, so two instances cannot insert the same waiter."""
+    tables = {
+        row["name"]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "group_queue" not in tables:
+        return False
+    indexes = {row["name"] for row in connection.execute("PRAGMA index_list(group_queue)").fetchall()}
+    if "group_queue_group_bot" in indexes:
+        return False
+    connection.execute(
+        """
+        DELETE FROM group_queue
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM group_queue GROUP BY group_id, bot_id
+        )
+        """
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS group_queue_group_bot ON group_queue(group_id, bot_id)"
+    )
+    return True
+
+
+def encode_snapshot(data: bytes) -> str:
+    return base64.urlsafe_b64encode(gzip.compress(data, mtime=0)).decode().rstrip("=")
+
+
+def decode_snapshot(value: str) -> bytes | None:
+    if not value or len(value) > 400_000:
+        return None
+    try:
+        raw = gzip.decompress(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)))
+    except (ValueError, OSError, EOFError):
+        return None
+    if len(raw) > _SNAPSHOT_LIMIT or not raw.startswith(b"SQLite format 3\x00"):
+        return None
+    return raw
+
+
+def _mark_snapshot_ready(path: Path) -> None:
+    _SNAPSHOT_READY.set(str(path))
+    _LOADED_DATABASE.set(None)
+
+
+def database_revision(path: Path) -> int:
+    if not path.is_file():
+        return -1
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return 0
+    try:
+        row = connection.execute("SELECT value FROM workspace_meta WHERE key = 'revision'").fetchone()
+    except sqlite3.Error:
+        return 0
+    finally:
+        connection.close()
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def snapshot_revision(raw: bytes) -> int:
+    handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    handle.close()
+    temp = Path(handle.name)
+    try:
+        temp.write_bytes(raw)
+        return database_revision(temp)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def snapshot_held(path: Path) -> bool:
+    with _HOLD_LOCK:
+        return _SNAPSHOT_HOLDS.get(str(path), 0) > 0
+
+
+def hold_snapshot(path: Path) -> None:
+    with _HOLD_LOCK:
+        key = str(path)
+        _SNAPSHOT_HOLDS[key] = _SNAPSHOT_HOLDS.get(key, 0) + 1
+
+
+def release_snapshot(path: Path) -> None:
+    with _HOLD_LOCK:
+        key = str(path)
+        remaining = _SNAPSHOT_HOLDS.get(key, 0) - 1
+        if remaining <= 0:
+            _SNAPSHOT_HOLDS.pop(key, None)
+        else:
+            _SNAPSHOT_HOLDS[key] = remaining
+
+
+def _bump_revision(connection: sqlite3.Connection) -> None:
+    connection.execute("CREATE TABLE IF NOT EXISTS workspace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    connection.execute(
+        """
+        INSERT INTO workspace_meta (key, value) VALUES ('revision', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST((CAST(value AS INTEGER) + 1) AS TEXT)
+        """
+    )
+
+
+def stage_snapshot(path: Path, encoded: str) -> bool:
+    raw = decode_snapshot(encoded)
+    if raw is None:
+        return False
+    if snapshot_held(path):
+        _mark_snapshot_ready(path)
+        return False
+    if path.is_file():
+        disk_rev = database_revision(path)
+        snap_rev = snapshot_revision(raw)
+        # A legacy snapshot has no revision. Accept it when nothing is in flight.
+        # A numbered snapshot must never roll the file backwards.
+        if snap_rev > 0 and disk_rev > snap_rev:
+            _mark_snapshot_ready(path)
+            return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    _mark_snapshot_ready(path)
+    return True

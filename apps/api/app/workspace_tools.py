@@ -1,17 +1,34 @@
 from __future__ import annotations
 
+import asyncio
+import ipaddress
+import re
+import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
+import httpx
+
+from .openrouter_search import openrouter_web_search, search_model
 from .repository import Repository
-from .domain import RiskClass, RunStatus
+from .domain import BotStatus, RiskClass, RunStatus
+from .orchestrator import missing_instruction_details
 from .policy import PolicyEngine
+from .settings import Settings
+from .weather import WeatherError, forecast
 
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+WEB_SEARCH_REPLY_GUIDANCE = (
+    "The UI already shows these sources in a Sumber list. "
+    "Do not restate or re-list them in the reply body, and do not add a Sumber, Sources, or citation section."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +53,10 @@ class WorkspaceToolset:
         default_model: str = "openrouter/free",
         approved_tools: dict[str, list[dict[str, Any]]] | None = None,
         workspace_root: Path | None = None,
+        on_group_post: Callable[[UUID, str, UUID], None] | None = None,
+        computer: Any | None = None,
+        remote_workspace: bool = True,
+        on_computer_wake: Callable[[], None] | None = None,
     ) -> None:
         self.repository = repository
         self.run_id = run_id
@@ -45,29 +66,130 @@ class WorkspaceToolset:
         self.policy = PolicyEngine()
         self.approved_tools = approved_tools or {}
         self.workspace_root = (workspace_root or Path("/workspace")).resolve()
+        self.on_group_post = on_group_post
+        self.computer = computer
+        self.remote_workspace = remote_workspace
+        self.on_computer_wake = on_computer_wake
         self.skill_names = {skill.name for skill in repository.list_bot_skills(bot_id)}
+        self.continuation: str | None = None
+        self.tool_uses = 0
+        self.sources: list[dict[str, str]] = []
 
     def definitions(self) -> list[ToolDefinition]:
         # Every persistent Agent is an orchestrator. Description, instructions,
         # and active jobs shape behavior; capabilities are not manager-only.
         definitions = [
-            ToolDefinition("create_bot", "Create a specialist Bot. payload: {name, description, instructions?}", self.create_bot, RiskClass.LOCAL_WRITE),
+            ToolDefinition("list_bots", "List bots you can create, update, or mention. No payload.", self.list_bots, RiskClass.READ_ONLY),
+            ToolDefinition(
+                "create_bot",
+                "Create a specialist Bot. payload: {name, description, instructions}. instructions must include Tugas, Cara kerja, Output, and Batasan, each concrete enough for the Bot to work alone.",
+                self.create_bot,
+                RiskClass.LOCAL_WRITE,
+            ),
             ToolDefinition("update_bot", "Update a Bot. payload: {bot_id, name?, description?, instructions?, model?}", self.update_bot, RiskClass.LOCAL_WRITE),
             ToolDefinition("archive_bot", "Archive a Bot after explaining why. payload: {bot_id}", self.archive_bot, RiskClass.DESTRUCTIVE),
+            ToolDefinition("restore_bot", "Restore an archived Bot. payload: {bot_id}", self.restore_bot, RiskClass.LOCAL_WRITE),
+            ToolDefinition("list_groups", "List work groups and their members. No payload.", self.list_groups, RiskClass.READ_ONLY),
+            ToolDefinition("create_group", "Create a WhatsApp-style group and join it. payload: {name, description?, member_names?: [bot name], member_bot_ids?}", self.create_group, RiskClass.LOCAL_WRITE),
+            ToolDefinition("add_group_member", "Add a bot to a group. payload: {group_id, bot_id? , member_name?}", self.add_group_member, RiskClass.LOCAL_WRITE),
+            ToolDefinition("remove_group_member", "Remove a bot from a group. payload: {group_id, bot_id?, member_name?}", self.remove_group_member, RiskClass.LOCAL_WRITE),
+            ToolDefinition("list_group_messages", "Read the latest messages in a group. payload: {group_id}", self.list_group_messages, RiskClass.READ_ONLY),
             ToolDefinition("create_job", "Create a job for a Bot. payload: {title, description?, priority?, assignee_bot_id?}", self.create_job, RiskClass.LOCAL_WRITE),
             ToolDefinition("update_job", "Update a job. payload: {job_id, status?, title?, description?, priority?, assignee_bot_id?}", self.update_job, RiskClass.LOCAL_WRITE),
             ToolDefinition("handoff_to_bot", "Delegate a bounded task to another active Bot. payload: {target_bot_id, task}", self.handoff_to_bot, RiskClass.LOCAL_WRITE),
-            ToolDefinition("post_to_group", "Post a work update to a group. payload: {group_id, content}", self.post_to_group, RiskClass.LOCAL_WRITE),
+            ToolDefinition("post_to_group", "Post into a group. @Name wakes that bot. payload: {group_id, content}", self.post_to_group, RiskClass.LOCAL_WRITE),
             ToolDefinition("list_workspace_files", "List files under the persistent Bot workspace. payload: {path?}", self.list_workspace_files, RiskClass.READ_ONLY),
             ToolDefinition("read_workspace_file", "Read a text file from the persistent Bot workspace. payload: {path}", self.read_workspace_file, RiskClass.READ_ONLY),
             ToolDefinition("write_workspace_file", "Write a text file into the persistent Bot workspace. payload: {path, content}", self.write_workspace_file, RiskClass.LOCAL_WRITE),
             ToolDefinition("list_memory", "Recall durable facts saved for this Bot. payload: {query?}", self.list_memory, RiskClass.READ_ONLY),
             ToolDefinition("save_memory", "Save a durable preference or fact for future runs. payload: {kind, content}", self.save_memory, RiskClass.LOCAL_WRITE),
+            ToolDefinition(
+                "continue_own_work",
+                "Keep working on your own stage after this reply. payload: {note}. Use it only when this stage still needs another tool pass. Do not mention a teammate in the same turn.",
+                self.continue_own_work,
+                RiskClass.READ_ONLY,
+            ),
+            ToolDefinition(
+                "connect_plugin",
+                "Install an external MCP server when the user asks. payload: {name, url, token?}. "
+                "The free AI Sense server is name AI Sense and url https://aisenseapi.com/mcp with no token. "
+                "Do not invent any other server URL.",
+                self.connect_plugin,
+                RiskClass.LOCAL_WRITE,
+            ),
+            ToolDefinition(
+                "use_plugin",
+                "Call a tool on a connected external MCP plugin. payload: {plugin, tool, arguments}. "
+                + self._plugin_catalog(),
+                self.use_plugin,
+                RiskClass.READ_ONLY,
+            ),
+            ToolDefinition(
+                "use_skill",
+                "Load an installed skill's instructions before using it. payload: {skill}. "
+                + self._skill_catalog(),
+                self.use_skill,
+                RiskClass.READ_ONLY,
+            ),
+            ToolDefinition(
+                "web_search",
+                "Search the public web with OpenRouter before a research answer. Returns titles, https sources, and snippets. "
+                + WEB_SEARCH_REPLY_GUIDANCE
+                + " payload: {query}",
+                self.web_search,
+                RiskClass.READ_ONLY,
+                timeout_seconds=45,
+            ),
+            ToolDefinition("fetch_url", "Read a public https page. payload: {url}", self.fetch_url, RiskClass.READ_ONLY, timeout_seconds=25),
         ]
+        if any(name.lower() == "weather" for name in self.skill_names):
+            definitions.append(
+                ToolDefinition(
+                    "weather_forecast",
+                    "Get today's live forecast for a named location without an API key. payload: {location}",
+                    self.weather_forecast,
+                    RiskClass.READ_ONLY,
+                    timeout_seconds=25,
+                )
+            )
+        if self.computer is not None:
+            definitions.extend([
+                ToolDefinition(
+                    "run_command",
+                    "Run one short shell command on the shared desktop. Every Bot uses this same computer. payload: {command}",
+                    self.run_command,
+                    RiskClass.LOCAL_WRITE,
+                    timeout_seconds=20,
+                ),
+                ToolDefinition(
+                    "computer_screenshot",
+                    "See the shared desktop. No payload. Use this before clicking.",
+                    self.computer_screenshot,
+                    RiskClass.READ_ONLY,
+                    timeout_seconds=20,
+                ),
+                ToolDefinition(
+                    "computer_click",
+                    "Click the shared desktop. payload: {x, y}",
+                    self.computer_click,
+                    RiskClass.LOCAL_WRITE,
+                ),
+                ToolDefinition(
+                    "computer_type",
+                    "Type into the shared desktop. payload: {text}",
+                    self.computer_type,
+                    RiskClass.LOCAL_WRITE,
+                ),
+            ])
+        if self.repository.group_for_run(self.run_id):
+            definitions = [item for item in definitions if item.name not in {"handoff_to_bot", "post_to_group"}]
         return [self._audited(definition) for definition in definitions]
 
     def _audited(self, definition: ToolDefinition) -> ToolDefinition:
         async def handler(payload: dict[str, Any]) -> dict[str, Any]:
+            run = self.repository.get_run(self.run_id)
+            if run.stop_requested or run.status is RunStatus.CANCELLED:
+                return {"ok": False, "stopped": True, "error": "Dihentikan."}
             approved_payloads = self.approved_tools.get(definition.name, [])
             approved_index = next(
                 (index for index, candidate in enumerate(approved_payloads) if candidate == payload),
@@ -85,13 +207,14 @@ class WorkspaceToolset:
                     decision.reason or "explicit approval required",
                     payload,
                 )
-                self.repository.update_run(self.run_id, RunStatus.WAITING_APPROVAL)
+                self.repository.update_run(self.run_id, RunStatus.WAITING_APPROVAL, expect=RunStatus.RUNNING)
                 self.repository.record_event(
                     self.run_id,
                     "tool.approval_required",
                     {"tool": definition.name, "approval_id": str(approval.id)},
                 )
                 return {"ok": False, "requires_approval": True, "approval_id": str(approval.id)}
+            self.tool_uses += 1
             call_id = self.repository.create_tool_call(self.run_id, definition.name, payload)
             self.repository.record_event(
                 self.run_id,
@@ -126,6 +249,9 @@ class WorkspaceToolset:
         name = self._text(payload, "name")
         description = str(payload.get("description", ""))[:2_000]
         instructions = str(payload.get("instructions", ""))[:10_000]
+        missing = missing_instruction_details(description, instructions)
+        if missing:
+            raise ValueError("Instruksi belum cukup untuk bot bawahan. " + " ".join(missing))
         bot = self.repository.create_bot(name, description, instructions, None)
         if "manager" in bot.name.lower():
             for skill in self.repository.list_skills():
@@ -140,8 +266,74 @@ class WorkspaceToolset:
         return {"ok": True, "bot_id": str(bot.id), "name": bot.name}
 
     async def archive_bot(self, payload: dict[str, Any]) -> dict[str, Any]:
-        bot = self.repository.set_bot_status(UUID(self._text(payload, "bot_id")), "archived")
+        bot = self.repository.set_bot_status(UUID(self._text(payload, "bot_id")), BotStatus.ARCHIVED)
         return {"ok": True, "bot_id": str(bot.id), "status": bot.status}
+
+    async def restore_bot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        bot = self.repository.set_bot_status(UUID(self._text(payload, "bot_id")), BotStatus.ACTIVE)
+        return {"ok": True, "bot_id": str(bot.id), "status": bot.status}
+
+    async def list_bots(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "bots": [
+                {"id": str(bot.id), "name": bot.name, "description": bot.description, "status": bot.status}
+                for bot in self.repository.list_bots()
+            ],
+        }
+
+    async def list_groups(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "groups": [
+                {
+                    "id": str(group.id),
+                    "name": group.name,
+                    "members": [member.name for member in group.members],
+                }
+                for group in self.repository.list_groups()
+            ],
+        }
+
+    async def create_group(self, payload: dict[str, Any]) -> dict[str, Any]:
+        member_ids = [self.bot_id]
+        for raw in payload.get("member_bot_ids") or []:
+            member_ids.append(UUID(str(raw)))
+        for name in payload.get("member_names") or []:
+            match = self._bot_named(str(name))
+            if match is None:
+                raise ValueError(f"bot named {name} was not found")
+            member_ids.append(match.id)
+        group = self.repository.create_group(self._text(payload, "name"), str(payload.get("description", ""))[:2_000], member_ids)
+        return {"ok": True, "group_id": str(group.id), "name": group.name, "members": [member.name for member in group.members]}
+
+    async def add_group_member(self, payload: dict[str, Any]) -> dict[str, Any]:
+        group_id = UUID(self._text(payload, "group_id"))
+        bot = self._member_from_payload(payload)
+        self.repository.add_group_member(group_id, bot.id)
+        return {"ok": True, "group_id": str(group_id), "bot": bot.name}
+
+    async def remove_group_member(self, payload: dict[str, Any]) -> dict[str, Any]:
+        group_id = UUID(self._text(payload, "group_id"))
+        bot = self._member_from_payload(payload)
+        self.repository.remove_group_member(group_id, bot.id)
+        return {"ok": True, "group_id": str(group_id), "bot": bot.name}
+
+    async def list_group_messages(self, payload: dict[str, Any]) -> dict[str, Any]:
+        group_id = UUID(self._text(payload, "group_id"))
+        messages = self.repository.list_group_messages(group_id)[-30:]
+        group = self.repository.get_group(group_id)
+        names = {member.id: member.name for member in group.members}
+        return {
+            "ok": True,
+            "messages": [
+                {
+                    "sender": "Kamu" if message.sender_type == "user" else names.get(message.sender_bot_id, "Bot"),
+                    "content": message.content,
+                }
+                for message in messages
+            ],
+        }
 
     async def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         assignee = UUID(payload["assignee_bot_id"]) if payload.get("assignee_bot_id") else None
@@ -163,6 +355,8 @@ class WorkspaceToolset:
         return {"ok": True, "job_id": str(job.id), "status": job.status}
 
     async def handoff_to_bot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.repository.group_for_run(self.run_id):
+            return {"ok": False, "error": "Kamu sedang di grup. Minta rekan dengan @Nama di balasan grup, jangan handoff."}
         target_bot_id = UUID(self._text(payload, "target_bot_id"))
         task = self._text(payload, "task")
         target = self.repository.get_bot(target_bot_id)
@@ -178,8 +372,33 @@ class WorkspaceToolset:
         return {"ok": True, "handoff_id": str(handoff.id), "run_id": str(child.id), "target_bot": target.name}
 
     async def post_to_group(self, payload: dict[str, Any]) -> dict[str, Any]:
-        message = self.repository.append_group_message(UUID(self._text(payload, "group_id")), "bot", self._text(payload, "content"), self.bot_id)
+        group_id = UUID(self._text(payload, "group_id"))
+        if self.repository.group_for_run(self.run_id) == group_id:
+            return {"ok": False, "error": "Balasanmu otomatis masuk grup ini. Tulis @Nama di balasan, jangan posting ulang."}
+        content = self._text(payload, "content")
+        message = self.repository.append_group_message(group_id, "bot", content, self.bot_id)
+        if self.on_group_post:
+            self.on_group_post(group_id, content, self.bot_id)
         return {"ok": True, "message_id": str(message.id)}
+
+    def _bot_named(self, name: str):
+        needle = name.strip().lower()
+        return next((bot for bot in self.repository.list_bots() if bot.name.lower() == needle), None)
+
+    def _member_from_payload(self, payload: dict[str, Any]):
+        if payload.get("bot_id"):
+            return self.repository.get_bot(UUID(str(payload["bot_id"])))
+        match = self._bot_named(self._text(payload, "member_name"))
+        if match is None:
+            raise ValueError("bot was not found")
+        return match
+
+    def _remote_relative(self, value: str) -> str:
+        raw = value.strip() or "."
+        path = Path(raw)
+        if path.is_absolute() or any(part == ".." for part in path.parts):
+            raise ValueError("path must stay inside the Bot workspace")
+        return "." if path == Path(".") else path.as_posix()
 
     def _workspace_path(self, value: str) -> Path:
         candidate = (self.workspace_root / value).resolve()
@@ -188,6 +407,13 @@ class WorkspaceToolset:
         return candidate
 
     async def list_workspace_files(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.computer is not None and self.remote_workspace:
+            relative = self._remote_relative(str(payload.get("path", ".")))
+            try:
+                entries = await asyncio.to_thread(self.computer.list_dir, relative)
+            except Exception as error:
+                return {"ok": False, "error": str(error)}
+            return {"ok": True, "entries": entries}
         directory = self._workspace_path(str(payload.get("path", ".")))
         if not directory.exists():
             return {"ok": False, "error": "directory not found"}
@@ -200,16 +426,58 @@ class WorkspaceToolset:
         return {"ok": True, "entries": entries}
 
     async def read_workspace_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.computer is not None and self.remote_workspace:
+            relative = self._remote_relative(self._text(payload, "path"))
+            try:
+                content = await asyncio.to_thread(self.computer.read_text, relative)
+            except Exception as error:
+                return {"ok": False, "error": str(error)}
+            return {"ok": True, "path": relative, "content": content}
         path = self._workspace_path(self._text(payload, "path"))
         if not path.is_file():
             return {"ok": False, "error": "file not found"}
         return {"ok": True, "path": str(path.relative_to(self.workspace_root)), "content": path.read_text(encoding="utf-8")[:100_000]}
 
+    async def computer_screenshot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        screen_url = await self._wake_computer()
+        image = await asyncio.to_thread(self.computer.screenshot)
+        return {"ok": True, "image": image, "screen_url": screen_url}
+
+    async def computer_click(self, payload: dict[str, Any]) -> dict[str, Any]:
+        screen_url = await self._wake_computer()
+        await asyncio.to_thread(self.computer.click, int(payload.get("x", 0)), int(payload.get("y", 0)))
+        return {"ok": True, "screen_url": screen_url}
+
+    async def computer_type(self, payload: dict[str, Any]) -> dict[str, Any]:
+        screen_url = await self._wake_computer()
+        text = self._text(payload, "text")
+        if len(text) > 2_000:
+            raise ValueError("text exceeds 2000 characters")
+        await asyncio.to_thread(self.computer.type_text, text)
+        return {"ok": True, "screen_url": screen_url}
+
+    async def run_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        screen_url = await self._wake_computer()
+        command = self._text(payload, "command")
+        if len(command) > 2_000:
+            raise ValueError("command exceeds 2000 characters")
+        result = await asyncio.to_thread(self.computer.run, command)
+        return {
+            "ok": result["exit_code"] == 0,
+            "exit_code": result["exit_code"],
+            "output": result["output"],
+            "screen_url": screen_url,
+        }
+
     async def write_workspace_file(self, payload: dict[str, Any]) -> dict[str, Any]:
-        path = self._workspace_path(self._text(payload, "path"))
         content = str(payload.get("content", ""))
         if len(content) > 100_000:
             raise ValueError("file content exceeds 100000 characters")
+        if self.computer is not None and self.remote_workspace:
+            relative = self._remote_relative(self._text(payload, "path"))
+            await asyncio.to_thread(self.computer.write_text, relative, content)
+            return {"ok": True, "path": relative, "characters": len(content)}
+        path = self._workspace_path(self._text(payload, "path"))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return {"ok": True, "path": str(path.relative_to(self.workspace_root)), "characters": len(content)}
@@ -227,9 +495,283 @@ class WorkspaceToolset:
         memory = self.repository.add_memory(self.bot_id, kind, content)
         return {"ok": True, "memory_id": str(memory.id), "kind": memory.kind}
 
+    def _plugin_catalog(self) -> str:
+        plugins = self.repository.list_plugins()
+        if not plugins:
+            return "No plugins are connected yet."
+        return "Connected plugins: " + "; ".join(f"{plugin.name} ({', '.join(plugin.tools) or 'no tools'})" for plugin in plugins)
+
+    def _skill_catalog(self) -> str:
+        skills = self.repository.list_bot_skills(self.bot_id)
+        if not skills:
+            return "No installed skills are assigned to this Bot."
+        return "Installed skills: " + "; ".join(f"{skill.name}: {skill.description}" for skill in skills)
+
+    async def use_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        requested = self._text(payload, "skill").lower()
+        skill = next(
+            (item for item in self.repository.list_bot_skills(self.bot_id) if item.name.lower() == requested),
+            None,
+        )
+        if skill is None:
+            return {"ok": False, "error": "Skill tidak terpasang untuk Bot ini."}
+        return {"ok": True, "name": skill.name, "description": skill.description, "instructions": skill.content}
+
+    async def connect_plugin(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .mcp_client import McpError, discover_tools
+
+        name = self._text(payload, "name")[:80]
+        url = self._text(payload, "url")
+        token = str(payload.get("token") or "").strip() or None
+        try:
+            tools = await discover_tools(url, token)
+        except McpError as error:
+            return {"ok": False, "error": str(error)}
+        try:
+            plugin = self.repository.create_plugin(name, url, token, tools)
+        except Exception:
+            return {"ok": False, "error": "Nama plugin sudah dipakai."}
+        return {"ok": True, "name": plugin.name, "tools": plugin.tools}
+
+    async def use_plugin(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .mcp_client import McpError, call_tool
+
+        plugin, token = self.repository.get_plugin_by_name(self._text(payload, "plugin"))
+        tool_name = self._text(payload, "tool")
+        arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+        if not tool_name.lower().startswith(("list", "get", "search", "read", "fetch", "find")):
+            approved = self.approved_tools.get("use_plugin", [])
+            already = any(
+                item.get("plugin") == plugin.name and item.get("tool") == tool_name and item.get("arguments") == arguments
+                for item in approved
+            )
+            if not already:
+                approval = self.repository.create_approval(
+                    self.run_id,
+                    "use_plugin",
+                    RiskClass.EXTERNAL_WRITE,
+                    f"{plugin.name}.{tool_name} changes an external app",
+                    {"plugin": plugin.name, "tool": tool_name, "arguments": arguments},
+                )
+                self.repository.update_run(self.run_id, RunStatus.WAITING_APPROVAL, expect=RunStatus.RUNNING)
+                return {"ok": False, "requires_approval": True, "approval_id": str(approval.id)}
+        try:
+            result = await call_tool(plugin.url, token, tool_name, arguments)
+        except McpError as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "result": result}
+
+    async def continue_own_work(self, payload: dict[str, Any]) -> dict[str, Any]:
+        note = self._text(payload, "note")[:2_000]
+        self.continuation = note
+        self.repository.set_run_continuation(self.run_id, note)
+        return {"ok": True, "continue": True}
+
+    async def _wake_computer(self) -> str | None:
+        if self.computer is None:
+            raise RuntimeError("Komputer belum dikonfigurasi.")
+        wake = getattr(self.computer, "wake", None)
+        status: dict[str, Any] | None = None
+        if wake is not None:
+            status = await asyncio.to_thread(wake)
+        if self.on_computer_wake:
+            self.on_computer_wake()
+        return status.get("screen_url") if status else None
+
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:
         value = str(payload.get(key, "")).strip()
         if not value:
             raise ValueError(f"{key} is required")
         return value
+
+    async def web_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        query = self._text(payload, "query")[:300]
+        settings = Settings.from_environment()
+        if not settings.openrouter_api_key:
+            return {
+                "ok": False,
+                "error": "OPENROUTER_API_KEY belum diatur. Lanjut dengan pengetahuan yang ada dan tulis asumsinya.",
+            }
+        run = self.repository.get_run(self.run_id)
+        model = search_model(run.model, self.default_model or settings.default_model)
+        async with httpx.AsyncClient(timeout=40) as client:
+            result = await openrouter_web_search(
+                query,
+                api_key=settings.openrouter_api_key,
+                base_url=settings.openrouter_base_url,
+                model=model,
+                client=client,
+            )
+        if result.get("ok"):
+            self._remember_sources(result.get("results") or [])
+            result["instruction"] = WEB_SEARCH_REPLY_GUIDANCE
+        return result
+
+    def _remember_sources(self, results: list[Any]) -> None:
+        seen = {item["url"] for item in self.sources}
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "")
+            if not url.startswith("https://") or url in seen or len(self.sources) == 5:
+                continue
+            seen.add(url)
+            self.sources.append(
+                {
+                    "title": str(item.get("title") or "")[:180],
+                    "url": url[:500],
+                    "snippet": str(item.get("snippet") or "")[:700],
+                }
+            )
+
+    async def fetch_url(self, payload: dict[str, Any]) -> dict[str, Any]:
+        url = self._text(payload, "url")
+        if not await public_https_url(url):
+            return {"ok": False, "error": "hanya halaman https publik yang bisa dibaca"}
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False, headers={"User-Agent": "BandrosBot/1.0"}) as client:
+            response = await client.get(url)
+        if response.status_code >= 400:
+            return {"ok": False, "error": f"halaman gagal ({response.status_code})"}
+        text = visible_page_text(response.text)
+        return {"ok": True, "url": url, "text": text[:4000]}
+
+    async def weather_forecast(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await forecast(self._text(payload, "location"))
+        except WeatherError as error:
+            return {"ok": False, "error": str(error)}
+
+_SKIP_TAGS = {"script", "style", "noscript", "template", "svg", "nav", "header", "footer", "aside", "form", "iframe"}
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+_CHROME_IDS = {
+    "mw-navigation",
+    "mw-panel",
+    "mw-head",
+    "mw-page-base",
+    "mw-head-base",
+    "footer",
+    "p-navigation",
+    "p-personal",
+    "p-lang",
+    "p-tb",
+    "p-search",
+    "p-logo",
+    "vector-toc",
+    "mw-panel-toc",
+    "toc",
+    "sitesub",
+    "contentsub",
+    "jump-to-nav",
+    "catlinks",
+    "mw-data-after-content",
+    "vector-page-toolbar",
+    "right-navigation",
+    "left-navigation",
+}
+_CHROME_CLASSES = {"vector-toc", "toc", "mw-jump-link", "navbox", "vertical-navbox", "navbar", "sidebar-toc"}
+_CHROME_ROLES = {"navigation", "banner", "contentinfo", "search"}
+_MAIN_IDS = {"mw-content-text", "bodycontent"}
+
+
+class _ArticleTextParser(HTMLParser):
+    """Keep the article body and drop navigation, scripts, and tables of contents."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._stack: list[tuple[str, str]] = []
+        self.main_parts: list[str] = []
+        self.other_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        name = tag.lower()
+        if name in _VOID_TAGS:
+            return
+        self._stack.append((name, self._kind(name, attrs)))
+
+    def handle_endtag(self, tag: str) -> None:
+        name = tag.lower()
+        if name in _VOID_TAGS:
+            return
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == name:
+                del self._stack[index:]
+                return
+
+    def handle_data(self, data: str) -> None:
+        if not data or not data.strip() or self._skipping():
+            return
+        if self._in_main():
+            self.main_parts.append(data)
+        else:
+            self.other_parts.append(data)
+
+    def _kind(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
+        if self._stack and self._stack[-1][1] == "skip":
+            return "skip"
+        ident, classes, role = _attr_bits(attrs)
+        if tag in _SKIP_TAGS or _is_chrome(ident, classes, role):
+            return "skip"
+        if _is_main(tag, ident, classes, role) or (self._stack and self._stack[-1][1] == "main"):
+            return "main"
+        return "text"
+
+    def _skipping(self) -> bool:
+        return bool(self._stack) and self._stack[-1][1] == "skip"
+
+    def _in_main(self) -> bool:
+        return any(kind == "main" for _, kind in self._stack)
+
+
+def visible_page_text(html: str) -> str:
+    parser = _ArticleTextParser()
+    parser.feed(html)
+    parser.close()
+    main_text = _collapse_text(parser.main_parts)
+    if len(main_text) >= 40:
+        return main_text
+    return _collapse_text([*parser.main_parts, *parser.other_parts])
+
+
+def _attr_bits(attrs: list[tuple[str, str | None]]) -> tuple[str, set[str], str]:
+    values = {key.lower(): (value or "") for key, value in attrs}
+    classes = {item for item in values.get("class", "").lower().split() if item}
+    return values.get("id", "").lower(), classes, values.get("role", "").lower()
+
+
+def _is_chrome(ident: str, classes: set[str], role: str) -> bool:
+    if role in _CHROME_ROLES or ident in _CHROME_IDS or classes & _CHROME_CLASSES:
+        return True
+    return any(item.startswith(("vector-menu", "vector-header", "mw-editsection")) for item in classes)
+
+
+def _is_main(tag: str, ident: str, classes: set[str], role: str) -> bool:
+    return tag in {"main", "article"} or role == "main" or ident in _MAIN_IDS or "mw-parser-output" in classes
+
+
+def _collapse_text(parts: list[str]) -> str:
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+async def public_https_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    if host in {"localhost", "metadata.google.internal"} or host.endswith(".local"):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    addresses = {info[4][0] for info in infos}
+    if not addresses:
+        return False
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            return False
+        if not ip.is_global:
+            return False
+    return True
