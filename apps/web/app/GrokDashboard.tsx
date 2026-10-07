@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { groupMemberSubtitle, hasVisibleBubble, mergeGroupRosters, presentGroupMembers, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "./chat-presentation";
+import { groupMemberSubtitle, hasVisibleBubble, mergeBotDirectory, mergeGroupRosters, presentGroupMembers, resolveSelectedBot, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 import { entityId, isAbortError, isTerminalRunStatus, planStop, recordsWithId, replyHasFinished } from "./stop-turn";
@@ -463,12 +463,14 @@ export default function GrokDashboard() {
   const workingRef = useRef(false);
   const shownRunError = useRef<string | null>(null);
   const selectedGroupId = useRef<string | null>(null);
+  const selectedBotId = useRef<string | null>(null);
   const groupPending = useRef(false);
   const advancing = useRef(false);
   const submissionId = useRef(0);
   const replyFinished = useRef(false);
   workingRef.current = working;
   selectedGroupId.current = selectedGroup?.id ?? null;
+  selectedBotId.current = selectedBot?.id ?? null;
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
 
@@ -482,14 +484,15 @@ export default function GrokDashboard() {
       ]);
       const nextBots = recordsWithId<Bot>(loadedBots);
       const nextGroups = recordsWithId<Group>(loadedGroups);
-      if (botMeta.fresh) setBots(nextBots);
+      setBots((current) => mergeBotDirectory(current, nextBots, botMeta.fresh));
       setGroups((current) => mergeGroupRosters(current, nextGroups, groupMeta.fresh));
       const orchestrator = nextBots.find((bot) => bot.status === "active" && bot.name.toLowerCase() === "bandros");
-      setSelectedBot((current) => {
-        if (current) return nextBots.find((bot) => bot.id === current.id) ?? null;
-        if (quiet || selectedGroupId.current) return null;
-        return orchestrator ?? nextBots.find((bot) => bot.status === "active") ?? nextBots[0] ?? null;
-      });
+      setSelectedBot((current) => resolveSelectedBot(current, nextBots, {
+        incomingFresh: botMeta.fresh,
+        quiet,
+        groupSelected: Boolean(selectedGroupId.current),
+        fallback: orchestrator ?? nextBots.find((bot) => bot.status === "active") ?? nextBots[0] ?? null,
+      }));
       setSelectedGroup((current) => {
         if (!current) return null;
         const next = nextGroups.find((group) => group.id === current.id);
@@ -601,14 +604,14 @@ export default function GrokDashboard() {
   }, [deviceFlow]);
 
   useEffect(() => {
-    if (!selectedBot || !chatGPT.connected) {
-      if (!selectedBot) setMessages([]);
+    const botId = selectedBot?.id ?? null;
+    if (!botId || !chatGPT.connected) {
+      if (!botId) setMessages([]);
       setBotWorking(false);
       setActiveTool(null);
       return;
     }
     let active = true;
-    const botId = selectedBot.id;
     setApprovals([]);
     const tick = async () => {
       try {
@@ -641,7 +644,7 @@ export default function GrokDashboard() {
     void tick();
     const timer = window.setInterval(() => void tick(), 1200);
     return () => { active = false; window.clearInterval(timer); };
-  }, [selectedBot, chatGPT.connected]);
+  }, [selectedBot?.id, chatGPT.connected]);
 
   useEffect(() => {
     if (!selectedGroup || !chatGPT.connected) {
@@ -762,7 +765,7 @@ export default function GrokDashboard() {
         }
         return;
       }
-      const botId = selectedBot?.id;
+      const botId = selectedBotId.current ?? selectedBot?.id;
       if (!botId) return;
       const model = modelByBot[botId] ?? selectedBot?.model ?? null;
       setMessages((current) => [...current, { id: `local-${Date.now()}`, role: "user", content }]);
@@ -776,7 +779,7 @@ export default function GrokDashboard() {
       setActiveRunId(runId);
       if (isTerminalRunStatus(run.status)) {
         replyFinished.current = true;
-        if (selectedBot?.id !== botId) return;
+        if (selectedBotId.current != null && selectedBotId.current !== botId) return;
         const nextMessages = recordsWithId<Message>(await request<Message[] | null>(`/bots/${botId}/messages`));
         setMessages(nextMessages.filter((message) => message.role !== "group"));
         if (run.error) setError(run.error);
@@ -829,7 +832,7 @@ export default function GrokDashboard() {
       if (!completed) throw new Error("Streaming berakhir sebelum Run selesai.");
       if (completed.error) throw new Error(completed.error);
       if (currentSubmission !== submissionId.current) return;
-      if (selectedBot?.id !== botId) return;
+      if (selectedBotId.current != null && selectedBotId.current !== botId) return;
       replyFinished.current = true;
       setMessages(recordsWithId<Message>(await request<Message[] | null>(`/bots/${botId}/messages`)).filter((message) => message.role !== "group"));
       void loadBots();

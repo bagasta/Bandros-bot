@@ -4,6 +4,54 @@ export type RosterMember = { id?: string; name?: string | null };
 
 export type RosterGroup<T extends RosterMember = RosterMember> = { id: string; members: readonly T[] };
 
+export type SelectedBotLike = { id: string; name?: string | null; description?: string | null; model?: string | null; status?: string | null };
+
+/**
+ * Keep the open 1:1 bot across poll/refresh.
+ * An empty or partial /bots payload (replica lag) must not clear selection to null.
+ */
+export function resolveSelectedBot<T extends SelectedBotLike>(
+  current: T | null,
+  incoming: readonly T[],
+  options: {
+    incomingFresh: boolean;
+    quiet: boolean;
+    groupSelected: boolean;
+    fallback: T | null;
+  },
+): T | null {
+  if (current) {
+    const match = incoming.find((bot) => bot.id === current.id) ?? null;
+    if (!match) return current;
+    if (
+      match.name === current.name
+      && match.description === current.description
+      && match.model === current.model
+      && match.status === current.status
+    ) {
+      return current;
+    }
+    return match;
+  }
+  if (options.quiet || options.groupSelected) return null;
+  if (!options.incomingFresh && incoming.length === 0) return null;
+  return options.fallback;
+}
+
+/**
+ * Apply a bot-list response to the sidebar.
+ * A stale or empty payload must not wipe bots the UI already has.
+ */
+export function mergeBotDirectory<T extends { id: string }>(
+  current: readonly T[],
+  incoming: readonly T[],
+  incomingFresh: boolean,
+): T[] {
+  if (!incomingFresh) return current.length > 0 ? [...current] : [...incoming];
+  if (incoming.length === 0 && current.length > 0) return [...current];
+  return [...incoming];
+}
+
 const liveTypingStatuses = new Set(["running", "waiting_approval"]);
 
 function uniqueNames(names: string[]): string[] {
