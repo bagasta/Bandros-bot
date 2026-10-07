@@ -39,6 +39,19 @@ export function resolveSelectedBot<T extends SelectedBotLike>(
 }
 
 /**
+ * A sqlite snapshot can be older than the one already cached.
+ * Postgres replies carry no snapshot. Those rows are the live 1:1 thread.
+ */
+export function historyPayloadIsFresh(
+  snapshot: string | null | undefined,
+  revision: number,
+  cachedRevision: number,
+): boolean {
+  if (!snapshot) return true;
+  return revision >= cachedRevision;
+}
+
+/**
  * Apply a bot-list response to the sidebar.
  * A stale or empty payload must not wipe bots the UI already has.
  */

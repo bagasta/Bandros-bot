@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupMemberSubtitle, hasVisibleBubble, mergeBotDirectory, mergeGroupRosters, presentGroupMembers, resolveSelectedBot, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "../apps/web/app/chat-presentation.ts";
+import { groupMemberSubtitle, hasVisibleBubble, historyPayloadIsFresh, mergeBotDirectory, mergeGroupRosters, presentGroupMembers, resolveSelectedBot, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "../apps/web/app/chat-presentation.ts";
 
 const roster = [
   { name: "Bandros" },
@@ -8,6 +8,13 @@ const roster = [
   { name: "Tester Dua" },
   { name: "Tester Tiga" },
 ];
+
+test("a postgres reply with no snapshot stays fresh after an old sqlite revision", () => {
+  assert.equal(historyPayloadIsFresh("", 0, 4), true);
+  assert.equal(historyPayloadIsFresh(null, 0, 4), true);
+  assert.equal(historyPayloadIsFresh("sqlite-snapshot", 1, 4), false);
+  assert.equal(historyPayloadIsFresh("sqlite-snapshot", 4, 4), true);
+});
 
 test("group subtitle lists every member", () => {
   assert.equal(groupMemberSubtitle(roster), "Bandros, Tester Satu, Tester Dua, Tester Tiga");
