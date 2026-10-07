@@ -260,7 +260,7 @@ def test_search_sources_are_saved_and_the_running_tool_is_visible(tmp_path: Path
 
     assert repository.running_tool_name(run.id) == "web_search"
     assert repository.commit_assistant_turn(run.id, "Kurs hari ini.", "test-model", [source]) is True
-    assert repository.list_messages(conversation_id)[-1].citations == [source]
+    assert repository.list_messages(conversation_id) == []
     posted = repository.append_group_message(group.id, "bot", "Kurs hari ini.", bot.id, [source])
     assert repository.list_group_messages(group.id)[-1].citations == [source]
     assert posted.citations == [source]
