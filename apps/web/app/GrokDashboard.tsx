@@ -1124,7 +1124,7 @@ export default function GrokDashboard() {
   );
 
   return (
-    <main className={`bandros-app ${mobilePane === "chat" ? "is-chat" : "is-list"} ${selectedGroup && !membersOpen ? "is-members-closed" : ""}`} data-theme={theme} data-motion={motionEnabled ? "on" : "off"}>
+    <main className={`bandros-app ${mobilePane === "chat" ? "is-chat" : "is-list"} ${selectedGroup && !membersOpen ? "is-members-closed" : ""} ${screenOpen ? "is-screen-open" : ""}`} data-theme={theme} data-motion={motionEnabled ? "on" : "off"}>
       <aside className="bandros-sidebar">
         <div className="bandros-brand">
           <button className="bandros-toolbar-button" type="button" aria-label="Cari" title="Cari" onClick={() => composerRef.current?.focus()}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg></button>
@@ -1183,13 +1183,13 @@ export default function GrokDashboard() {
         </form>}
         {chatGPT.connected && selectedBot && !selectedGroup && <div className="bandros-composer-footer"><span>Model</span>{modelSelect}</div>}
       </section>
-      <aside className="bandros-computer" aria-label={selectedGroup ? "Members" : "Computer"}>
+      <aside className="bandros-computer" aria-label={selectedGroup ? "Members" : "Computer"} inert={screenOpen || undefined}>
         {selectedGroup ? <>
           <div className="bandros-computer-head"><strong>Members</strong><button type="button" aria-label="Tutup panel anggota" onClick={() => setMembersOpen(false)}>×</button></div>
           {selectedGroup.members.map((member) => <button className="bandros-member" type="button" key={member.id} onClick={() => insertMention(member.name)}><BandrosAvatar name={member.name} working={typingPeople.includes(member.name)} />{member.name}</button>)}
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </> : <>
-          <div className={`bandros-screen${screenUrl ? " has-view" : ""}`}>{screenUrl ? <DesktopScreen url={screenUrl} title="Layar komputer kecil" frameName="bandros-screen" onVisible={markDesktopVisible} /> : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
+          <div className={`bandros-screen${screenUrl ? " has-view" : ""}`}>{screenUrl && !screenOpen ? <DesktopScreen url={screenUrl} title="Layar komputer kecil" frameName="bandros-screen" onVisible={markDesktopVisible} /> : screenUrl && screenOpen ? "Layar terbuka" : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
           <p>{displayName}&apos;s screen</p>
           {screenUrl && <button className="bandros-computer-toggle" type="button" onClick={openScreen}>Buka layar</button>}
           <p>{computerState === "on" ? "Desktop aktif selama Bot menggunakannya dan akan diparkir setelah gilirannya selesai." : "Desktop hanya aktif saat Bot meminta bantuan komputer."}</p>
@@ -1218,13 +1218,16 @@ export default function GrokDashboard() {
         </form>
         <button className="bandros-danger-button" type="button" onClick={() => void deleteBot(selectedBot)}>Hapus bot</button>
       </aside>}
-      {screenOpen && screenUrl && <div className="bandros-screen-backdrop" onClick={() => setScreenOpen(false)}>
-        <div className="bandros-screen-float" role="dialog" aria-label="Layar komputer" onClick={(event) => event.stopPropagation()}>
+      {screenOpen && screenUrl && <div className="bandros-screen-backdrop">
+        <div className="bandros-screen-scrim" onClick={() => setScreenOpen(false)} />
+        <div className="bandros-screen-float" role="dialog" aria-modal="true" aria-label="Layar komputer">
           <div className="bandros-screen-float-bar">
             <strong>Bandros&apos;s screen</strong>
             <button type="button" aria-label="Tutup layar" onClick={() => setScreenOpen(false)}>×</button>
           </div>
-          <DesktopScreen url={screenUrl} title="Layar komputer" frameName="bandros-screen-float" onVisible={markDesktopVisible} />
+          <div className="bandros-screen-float-view">
+            <DesktopScreen url={screenUrl} title="Layar komputer" frameName="bandros-screen-float" onVisible={markDesktopVisible} />
+          </div>
         </div>
       </div>}
       {deviceFlow && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Sign in with ChatGPT">
