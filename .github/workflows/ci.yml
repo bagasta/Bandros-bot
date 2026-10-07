@@ -29,11 +29,11 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
       - name: SQLite fallback
-        run: pytest -q --ignore=tests/test_postgres_store.py
+        run: pytest -q --ignore=tests/test_postgres_store.py --ignore=tests/test_early_cancel_postgres.py
       - name: Postgres
         env:
           BANDROS_TEST_POSTGRES: postgresql://bandros@127.0.0.1:5432/bandros
-        run: pytest -q tests/test_postgres_store.py
+        run: pytest -q tests/test_postgres_store.py tests/test_early_cancel_postgres.py
 
   frontend:
     runs-on: ubuntu-latest

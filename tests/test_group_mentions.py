@@ -93,6 +93,45 @@ class ScriptedGateway:
         return "(diam)"
 
 
+def test_direct_history_omits_group_replies(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path / "private-history.db")
+    worker = repository.create_bot("Worker", "", "TOKEN:worker", None)
+    group = repository.create_group("Tim", "", [worker.id])
+    repository.append_group_message(group.id, "user", "Cek tim")
+
+    def reply(prompt: str) -> str:
+        if "halo pribadi" in prompt:
+            return "Jawaban pribadi."
+        return "Dari grup."
+
+    runtime = RunRuntime(repository, ScriptedGateway({"TOKEN:worker": reply}), "test-model", 2)
+    asyncio.run(runtime.speak_in_group(group.id, "Cek tim", None, 0))
+    conversation_id = repository.conversation_for_bot(worker.id)
+    assert [message.content for message in repository.list_messages(conversation_id)] == []
+
+    repository.append_group_message(group.id, "bot", "Siap.", worker.id)
+    repository.append_message(conversation_id, "assistant", "Siap.")
+    repository.append_message(conversation_id, "group", "[Grup Tim] baris lama")
+    repository.append_message(conversation_id, "assistant", "[Grup Tim] salinan lama")
+    visible = [message.content for message in repository.list_messages(conversation_id)]
+    assert visible == ["Siap."]
+
+    repository.append_message(conversation_id, "user", "halo pribadi")
+    follow = repository.create_run(worker.id, conversation_id, "halo pribadi", "test-model")
+    asyncio.run(runtime.start_and_wait(follow.id))
+    assert "Dari grup." not in runtime.model_gateway.prompts[-1]
+    assert "halo pribadi" in runtime.model_gateway.prompts[-1]
+    repository.drop_copied_group_context()
+    with repository.database.connection() as db:
+        stored = [row["content"] for row in db.execute("SELECT content FROM messages").fetchall()]
+    assert "Siap." in stored
+    assert "halo pribadi" in stored
+    assert "Jawaban pribadi." in stored
+    assert "[Grup Tim] baris lama" not in stored
+    assert "[Grup Tim] salinan lama" not in stored
+    assert "Dari grup." not in stored
+
+
 def test_unmentioned_message_wakes_the_lead_then_the_mention(tmp_path: Path) -> None:
     repository = make_repository(tmp_path / "group.db")
     manager = repository.create_bot("Manager", "", "TOKEN:manager", None)
@@ -121,7 +160,10 @@ def test_unmentioned_message_wakes_the_lead_then_the_mention(tmp_path: Path) -> 
     assert messages[2].sender_bot_id == worker.id
     assert "Riwayat:" in runtime.model_gateway.prompts[1]
     private = repository.list_messages(repository.conversation_for_bot(worker.id))
-    assert all(not (message.role == "group" and message.content.startswith("[Grup ")) for message in private)
+    private_text = "\n".join(message.content for message in private)
+    assert "Siap. Mekari tetap on hold." not in private_text
+    assert "Cek tim, siap kerja gak besok?" not in private_text
+    assert all(message.role != "group" for message in private)
     assert "Cek tim" in runtime.model_gateway.prompts[1]
     assert all("Anggota:" not in message.content for message in private)
 
