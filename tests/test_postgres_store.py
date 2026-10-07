@@ -196,3 +196,96 @@ def test_two_postgres_connections_share_one_schema(tmp_path: Path) -> None:
     assert other.update_run(run.id, RunStatus.COMPLETED, expect=RunStatus.RUNNING) is True
     assert repository.update_run(run.id, RunStatus.FAILED, "late", expect=RunStatus.RUNNING) is False
     assert other.get_run(run.id).status is RunStatus.COMPLETED
+
+
+@pytest.mark.skipif(not os.environ.get("BANDROS_TEST_POSTGRES"), reason="BANDROS_TEST_POSTGRES is not set")
+def test_private_bandros_thread_survives_a_new_connection(tmp_path: Path) -> None:
+    """Reload reads the same Postgres schema the bot row was written to."""
+    from apps.api.app.domain import RunStatus
+    from apps.api.app.repository import Repository
+
+    url = os.environ["BANDROS_TEST_POSTGRES"]
+    path = tenant_locations(f"acct-{uuid4()}", tmp_path, tmp_path / "files")[0]
+    database = Database(path, database_url=url)
+    database.initialize()
+    repository = Repository(database)
+    bandros = repository.create_bot("Bandros", "orkestrator", "Kelola tim.", None)
+    conversation_id = repository.conversation_for_bot(bandros.id)
+    repository.append_message(conversation_id, "user", "Buat bot riset")
+    run = repository.create_run(bandros.id, conversation_id, "Buat bot riset", "test-model")
+    assert repository.update_run(run.id, RunStatus.RUNNING, expect=RunStatus.QUEUED) is True
+    assert repository.commit_assistant_turn(run.id, "Bot riset sudah dibuat.", "test-model") is True
+
+    reloaded = Repository(Database(path, database_url=url))
+    assert reloaded.get_bot(bandros.id).name == "Bandros"
+    assert [message.content for message in reloaded.list_messages(reloaded.conversation_for_bot(bandros.id))] == [
+        "Buat bot riset",
+        "Bot riset sudah dibuat.",
+    ]
+
+
+@pytest.mark.skipif(not os.environ.get("BANDROS_TEST_POSTGRES"), reason="BANDROS_TEST_POSTGRES is not set")
+def test_postgres_message_reload_is_not_a_stale_snapshot(tmp_path: Path, monkeypatch) -> None:
+    """The 1:1 payload after a new process must be the message list, not revision 0."""
+    import asyncio
+    from dataclasses import replace
+
+    from fastapi.testclient import TestClient
+
+    from apps.api.app import main
+    from apps.api.app.model_gateway import MockGateway
+
+    url = os.environ["BANDROS_TEST_POSTGRES"]
+    monkeypatch.setattr(main, "_gateway", MockGateway())
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(
+            main.settings,
+            database_path=tmp_path / "workspace.db",
+            workspace_root=tmp_path / "workspace",
+            database_url=url,
+            await_runs=True,
+        ),
+    )
+    main._workspaces.clear()
+    account = f"acct-reload-{uuid4()}"
+    asyncio.run(
+        main.credential_store.put(
+            "sessions",
+            "token-reload",
+            {"auth_mode": "codex", "account_id": account, "access_token": "a"},
+        )
+    )
+    headers = {"X-Bandros-Session": "token-reload", "X-Bandros-Envelope": "1"}
+    try:
+        with TestClient(main.app) as client:
+            listed = client.post("/api/v1/bots", headers=headers, json={"method": "GET", "snapshot": None, "payload": None})
+            assert listed.status_code == 200
+            bots = listed.json()
+            assert isinstance(bots, list)
+            bot_id = next(bot["id"] for bot in bots if bot["name"] == "Bandros")
+            sent = client.post(
+                f"/api/v1/bots/{bot_id}/messages",
+                headers=headers,
+                json={"method": "POST", "snapshot": None, "payload": {"content": "Buat bot riset"}},
+            )
+            assert sent.status_code == 202
+            run = sent.json()
+            assert isinstance(run, dict)
+            assert run.get("status") == "completed"
+            main._workspaces.clear()
+            reloaded = client.post(
+                f"/api/v1/bots/{bot_id}/messages",
+                headers=headers,
+                json={"method": "GET", "snapshot": "cached-sqlite-snapshot", "payload": None},
+            )
+        assert reloaded.status_code == 200
+        body = reloaded.json()
+        assert isinstance(body, list)
+        assert [message["content"] for message in body] == [
+            "Buat bot riset",
+            "Mock response for: Buat bot riset",
+        ]
+    finally:
+        main._workspaces.clear()

@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { groupMemberSubtitle, hasVisibleBubble, mergeBotDirectory, mergeGroupRosters, presentGroupMembers, resolveSelectedBot, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "./chat-presentation";
+import { groupMemberSubtitle, hasVisibleBubble, historyPayloadIsFresh, mergeBotDirectory, mergeGroupRosters, presentGroupMembers, resolveSelectedBot, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 import { entityId, isAbortError, isTerminalRunStatus, planStop, recordsWithId, replyHasFinished } from "./stop-turn";
@@ -281,9 +281,10 @@ async function request<T>(path: string, init?: RequestInit, meta?: RequestMeta):
   const body = await response.json().catch(() => null) as { data?: T; snapshot?: string; revision?: number; detail?: unknown } | null;
   if (body && typeof body === "object" && "data" in body && "revision" in body) {
     const revision = Number(body.revision || 0);
-    storeSnapshot(session, body.snapshot ?? null, revision);
+    const snapshot = typeof body.snapshot === "string" ? body.snapshot : "";
+    if (snapshot) storeSnapshot(session, snapshot, revision);
     const currentRevision = Number(window.localStorage.getItem(revisionKey(session)) || "0");
-    if (meta) meta.fresh = revision >= currentRevision;
+    if (meta) meta.fresh = historyPayloadIsFresh(snapshot, revision, currentRevision);
     if (!response.ok) {
       const detail = body.data && typeof body.data === "object" && "detail" in body.data ? (body.data as { detail?: unknown }).detail : body.detail;
       throw new Error(typeof detail === "string" ? detail : `Request gagal (${response.status}).`);

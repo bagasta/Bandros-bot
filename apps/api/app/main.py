@@ -325,7 +325,7 @@ class SnapshotEnvelope:
     async def _send_wrapped(self, send, started: dict[str, Any], body: bytes) -> None:
         headers = list(started.get("headers") or [])
         snapshot = ""
-        revision = "0"
+        revision: str | None = None
         kept: list[tuple[bytes, bytes]] = []
         for key, value in headers:
             lowered = key.lower()
@@ -343,7 +343,9 @@ class SnapshotEnvelope:
         for key, value in kept:
             if key.lower() == b"content-type":
                 content_type = value.decode()
-        if status_code < 300 and "application/json" in content_type and body:
+        # Postgres does not emit a sqlite snapshot. Wrapping those replies as
+        # revision 0 makes the client treat the live 1:1 thread as stale.
+        if status_code < 300 and "application/json" in content_type and body and (snapshot or revision is not None):
             try:
                 data = json.loads(body)
             except json.JSONDecodeError:
@@ -357,7 +359,7 @@ class SnapshotEnvelope:
         kept.append((b"content-length", str(len(body)).encode()))
         if snapshot:
             kept.append((b"x-bandros-snapshot", snapshot.encode()))
-            kept.append((b"x-bandros-snapshot-rev", revision.encode()))
+            kept.append((b"x-bandros-snapshot-rev", (revision or "0").encode()))
         await send({**started, "headers": kept})
         await send({"type": "http.response.body", "body": body, "more_body": False})
 
