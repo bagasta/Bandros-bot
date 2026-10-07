@@ -431,6 +431,26 @@ export default function GrokDashboard() {
     shownDesktop.current = screenUrl;
     void request("/computer/shown", { method: "POST" }).catch(() => undefined);
   };
+  const openScreen = () => {
+    void request<{ ok: boolean; screen_url?: string | null }>("/computer/shown", { method: "POST" })
+      .then((body) => {
+        if (body.screen_url) setScreenUrl(body.screen_url);
+      })
+      .catch(() => undefined)
+      .finally(() => setScreenOpen(true));
+  };
+  useEffect(() => {
+    if (!screenOpen) return;
+    const ping = () => {
+      void request<{ ok: boolean; screen_url?: string | null }>("/computer/shown", { method: "POST" })
+        .then((body) => {
+          if (body.screen_url) setScreenUrl(body.screen_url);
+        })
+        .catch(() => undefined);
+    };
+    const timer = window.setInterval(ping, 10_000);
+    return () => window.clearInterval(timer);
+  }, [screenOpen]);
   const [approvals, setApprovals] = useState<Array<{ id: string; tool_name: string; reason: string }>>([]);
   useEffect(() => {
     setMotionEnabled(window.localStorage.getItem("bandros_motion") !== "off");
@@ -1171,7 +1191,7 @@ export default function GrokDashboard() {
         </> : <>
           <div className={`bandros-screen${screenUrl ? " has-view" : ""}`}>{screenUrl ? <DesktopScreen url={screenUrl} title="Layar komputer kecil" frameName="bandros-screen" onVisible={markDesktopVisible} /> : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
           <p>{displayName}&apos;s screen</p>
-          {screenUrl && <button className="bandros-computer-toggle" type="button" onClick={() => setScreenOpen(true)}>Buka layar</button>}
+          {screenUrl && <button className="bandros-computer-toggle" type="button" onClick={openScreen}>Buka layar</button>}
           <p>{computerState === "on" ? "Desktop aktif selama Bot menggunakannya dan akan diparkir setelah gilirannya selesai." : "Desktop hanya aktif saat Bot meminta bantuan komputer."}</p>
           <div className="bandros-computer-head"><strong>Routines</strong></div>
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>

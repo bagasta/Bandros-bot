@@ -6,7 +6,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from apps.api.app.computer import SNAPSHOT, ComputerError, DaytonaComputer
+from apps.api.app.computer import (
+    PREVIEW_GRACE_SECONDS,
+    PREVIEW_HOLD_SECONDS,
+    SNAPSHOT,
+    ComputerError,
+    DaytonaComputer,
+)
 from apps.api.app.database import Database
 from apps.api.app.repository import Repository
 from apps.api.app.runtime import RunRuntime
@@ -20,6 +26,12 @@ class FakeGateway:
 
 def _client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _novnc_page(request: httpx.Request) -> httpx.Response | None:
+    if request.method == "GET" and request.url.path == "/vnc.html":
+        return httpx.Response(200, text="<!doctype html><title>noVNC</title>")
+    return None
 
 
 def test_reuses_small_sandbox_and_archives_without_desktop() -> None:
@@ -139,6 +151,8 @@ def test_wake_returns_preview_without_installing_chrome() -> None:
             return httpx.Response(200, json={"state": "started"})
         if path.endswith("/signed-preview-url"):
             return httpx.Response(200, json={"url": "https://6080-example.daytonaproxy01.net/vnc.html?token=secret"})
+        if page := _novnc_page(request):
+            return page
         if path == "/sb/process/execute":
             commands.append(json.loads(request.content)["command"])
             return httpx.Response(200, json={"exitCode": 0, "result": ""})
@@ -166,6 +180,8 @@ def test_screen_url_opens_vnc_page_when_signed_preview_is_directory_root() -> No
                 200,
                 json={"url": "https://6080-sandbox.daytonaproxy01.net", "token": "signedtoken"},
             )
+        if page := _novnc_page(request):
+            return page
         return httpx.Response(404, text=path)
 
     computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
@@ -221,6 +237,8 @@ def _started_desktop(state: dict[str, str], stops: list[str]):
             return httpx.Response(200, json={"state": "started"})
         if path.endswith("/signed-preview-url"):
             return httpx.Response(200, json={"url": "https://6080-example.daytonaproxy01.net/vnc.html?token=secret"})
+        if page := _novnc_page(request):
+            return page
         if request.method == "GET" and path == "/sandbox/sb":
             return httpx.Response(200, json={"id": "sb", "state": state["value"], "toolboxProxyUrl": "https://proxy.test"})
         if path == "/sandbox/sb/stop":
@@ -324,6 +342,187 @@ def test_unseen_preview_still_parks_before_credits_keep_burning() -> None:
     assert clock["t"] >= 8
     assert state["value"] == "archived"
     assert computer.status()["screen_url"] is None
+
+
+def test_screen_url_stays_hidden_while_the_preview_is_not_ready() -> None:
+    signed = "https://6080-example.daytonaproxy01.net/vnc.html?token=secret"
+    probes: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/sandbox":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": "sb", "state": "started", "labels": {"app": "bandros", "account": "acct"}, "toolboxProxyUrl": "https://proxy.test"}]},
+            )
+        if path == "/sb/files/folder":
+            return httpx.Response(201, text="")
+        if path == "/sb/computeruse/start":
+            return httpx.Response(200, json={"state": "started"})
+        if path.endswith("/signed-preview-url"):
+            return httpx.Response(200, json={"url": signed})
+        if path == "/vnc.html":
+            attempt = len(probes) + 1
+            if attempt == 1:
+                probes.append(502)
+                return httpx.Response(502, json={"error": "proxy upstream error", "code": "DAYTONA_DAEMON"})
+            if attempt == 2:
+                probes.append(200)
+                return httpx.Response(200, json={"error": "proxy upstream error", "code": "DAYTONA_DAEMON"})
+            probes.append(200)
+            return httpx.Response(200, text="<!doctype html><title>noVNC</title>")
+        return httpx.Response(404, text=path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    assert computer.status() == {"state": "on", "screen_url": None}
+    assert computer.status() == {"state": "on", "screen_url": None}
+    assert computer.wake() == {"state": "on", "screen_url": signed}
+    assert probes == [502, 200, 200]
+    assert computer.status()["screen_url"] == signed
+    assert len(probes) == 3
+
+
+def test_default_hold_waits_long_enough_to_open_the_screen() -> None:
+    assert PREVIEW_HOLD_SECONDS >= 45
+    assert PREVIEW_GRACE_SECONDS >= 30
+    state = {"value": "started"}
+    stops: list[str] = []
+    clock = {"t": 0.0}
+
+    computer = DaytonaComputer(
+        "test-key",
+        "https://api.test",
+        "acct",
+        client=_client(_started_desktop(state, stops)),
+        sleep=lambda seconds: clock.__setitem__("t", clock["t"] + seconds),
+        now=lambda: clock["t"],
+    )
+    computer.wake()
+    computer.park_after_preview()
+
+    assert clock["t"] >= PREVIEW_HOLD_SECONDS
+    assert state["value"] == "archived"
+    assert stops == ["stop", "archive"]
+
+
+def test_open_screen_extends_the_park_hold() -> None:
+    state = {"value": "started"}
+    stops: list[str] = []
+    clock = {"t": 0.0}
+    extended = False
+
+    def sleep(seconds: float) -> None:
+        nonlocal extended
+        clock["t"] += seconds
+        if not extended and clock["t"] >= 3:
+            computer.keep_screen()
+            extended = True
+
+    computer = DaytonaComputer(
+        "test-key",
+        "https://api.test",
+        "acct",
+        client=_client(_started_desktop(state, stops)),
+        sleep=sleep,
+        now=lambda: clock["t"],
+        preview_hold_seconds=8,
+        preview_grace_seconds=4,
+        preview_max_hold_seconds=30,
+    )
+    computer.wake()
+    computer.keep_screen()
+    computer.park_after_preview()
+
+    assert extended
+    assert clock["t"] >= 7
+    assert clock["t"] < 8
+    assert stops == ["stop", "archive"]
+
+
+def test_keep_screen_restarts_a_parked_desktop_after_the_daemon_responds() -> None:
+    state = {"value": "archived"}
+    probes: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/sandbox":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": "sb", "state": state["value"], "labels": {"app": "bandros", "account": "acct"}, "toolboxProxyUrl": "https://proxy.test"}]},
+            )
+        if path == "/sandbox/sb/start":
+            state["value"] = "started"
+            return httpx.Response(200, json={"id": "sb", "state": "started"})
+        if request.method == "GET" and path == "/sandbox/sb":
+            return httpx.Response(200, json={"id": "sb", "state": state["value"], "toolboxProxyUrl": "https://proxy.test"})
+        if path == "/sb/files/folder" or path == "/sb/computeruse/start":
+            return httpx.Response(200, json={"state": "started"})
+        if path.endswith("/signed-preview-url"):
+            return httpx.Response(200, json={"url": "https://6080-example.daytonaproxy01.net/vnc.html?token=secret"})
+        if path == "/vnc.html":
+            probes.append(1)
+            if len(probes) == 1:
+                return httpx.Response(502, json={"error": "proxy upstream error", "code": "DAYTONA_DAEMON"})
+            return httpx.Response(200, text="<!doctype html><title>noVNC</title>")
+        return httpx.Response(404, text=path)
+
+    computer = DaytonaComputer("test-key", "https://api.test", "acct", client=_client(handler), sleep=lambda _: None)
+    computer.keep_screen()
+
+    assert state["value"] == "started"
+    assert len(probes) >= 2
+    assert computer.status()["screen_url"] == "https://6080-example.daytonaproxy01.net/vnc.html?token=secret"
+
+
+def test_turn_end_restarts_the_grace_if_the_preview_opened_earlier() -> None:
+    state = {"value": "started"}
+    stops: list[str] = []
+    clock = {"t": 0.0}
+
+    computer = DaytonaComputer(
+        "test-key",
+        "https://api.test",
+        "acct",
+        client=_client(_started_desktop(state, stops)),
+        sleep=lambda seconds: clock.__setitem__("t", clock["t"] + seconds),
+        now=lambda: clock["t"],
+        preview_hold_seconds=8,
+        preview_grace_seconds=4,
+        preview_max_hold_seconds=30,
+    )
+    computer.wake()
+    computer.note_preview_shown()
+    clock["t"] = 100
+    computer.park_after_preview()
+
+    assert clock["t"] >= 104
+    assert clock["t"] < 108
+    assert stops == ["stop", "archive"]
+
+
+def test_open_screen_blocks_the_automatic_park() -> None:
+    state = {"value": "started"}
+    stops: list[str] = []
+    clock = {"t": 0.0}
+
+    computer = DaytonaComputer(
+        "test-key",
+        "https://api.test",
+        "acct",
+        client=_client(_started_desktop(state, stops)),
+        sleep=lambda seconds: clock.__setitem__("t", clock["t"] + seconds),
+        now=lambda: clock["t"],
+        preview_hold_seconds=8,
+        preview_grace_seconds=4,
+    )
+    computer.wake()
+    computer.keep_screen()
+    computer.park(respect_screen=True)
+    assert stops == []
+    assert state["value"] == "started"
+    clock["t"] = 4
+    computer.park(respect_screen=True)
+    assert stops == ["stop", "archive"]
 
 
 def test_runtime_parks_after_the_turn(tmp_path) -> None:

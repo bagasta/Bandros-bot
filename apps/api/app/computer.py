@@ -15,11 +15,14 @@ import httpx
 SNAPSHOT = "daytona-small"
 AUTO_STOP_MINUTES = 5
 AUTO_ARCHIVE_MINUTES = 60
-PREVIEW_HOLD_SECONDS = 8
-PREVIEW_GRACE_SECONDS = 4
+PREVIEW_HOLD_SECONDS = 60
+PREVIEW_GRACE_SECONDS = 45
+PREVIEW_MAX_HOLD_SECONDS = 180
+PREVIEW_READY_TIMEOUT = 30
 WORKSPACE = "/home/daytona/workspace"
 _SKIP_STATES = {"destroyed", "destroying", "deleted", "error", "unknown"}
 _LIVE_STATES = {"started", "starting", "creating"}
+_PREVIEW_ERROR_MARKERS = ("daytona_daemon", "proxy upstream error")
 
 
 def _account_lock(account_id: str) -> threading.RLock:
@@ -73,12 +76,16 @@ class DaytonaComputer:
         now: Callable[[], float] | None = None,
         preview_hold_seconds: float = PREVIEW_HOLD_SECONDS,
         preview_grace_seconds: float = PREVIEW_GRACE_SECONDS,
+        preview_max_hold_seconds: float = PREVIEW_MAX_HOLD_SECONDS,
+        preview_ready_timeout: float = PREVIEW_READY_TIMEOUT,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.account_id = account_id
         self.target = target
         self.preview_hold_seconds = preview_hold_seconds
         self.preview_grace_seconds = preview_grace_seconds
+        self.preview_max_hold_seconds = preview_max_hold_seconds
+        self.preview_ready_timeout = preview_ready_timeout
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._client = client or httpx.Client(timeout=30)
         self._sleep = sleep
@@ -86,7 +93,9 @@ class DaytonaComputer:
         self._sandbox_id: str | None = None
         self._account_lock = _account_lock(account_id)
         self._preview_seen = threading.Event()
+        self._preview_seen_at = 0.0
         self._signed_url: str | None = None
+        self._preview_ready = False
 
     def list_dir(self, relative: str) -> list[dict[str, str]]:
         remote = self._remote(relative)
@@ -153,16 +162,31 @@ class DaytonaComputer:
         sandbox = self._find()
         if sandbox is None or sandbox.get("state") != "started":
             return {"state": "off", "screen_url": None}
-        return {"state": "on", "screen_url": self._signed_preview(str(sandbox["id"]))}
+        return {"state": "on", "screen_url": self._ready_screen_url(str(sandbox["id"]))}
 
     def note_preview_shown(self) -> None:
         """The panel loaded the desktop itself, not merely a preview URL."""
         self._preview_seen.set()
+        self._preview_seen_at = self._now()
+
+    def keep_screen(self) -> None:
+        """The screen is open. Refresh the hold, and start the desktop again if it was parked."""
+        with self._account_lock:
+            self.note_preview_shown()
+            sandbox = self._find()
+            if sandbox is not None and str(sandbox.get("state") or "") == "started":
+                return
+            sandbox = self._ensure_unlocked()
+            started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
+            self._raise_for_status(started)
+            self._wait_for_preview(str(sandbox["id"]))
 
     def wake(self) -> dict[str, str | None]:
         """Start the small sandbox and its desktop. Caller must park it again."""
         self._preview_seen.clear()
+        self._preview_seen_at = 0.0
         self._signed_url = None
+        self._preview_ready = False
         with self._account_lock:
             sandbox = self._ensure()
             started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
@@ -209,32 +233,48 @@ class DaytonaComputer:
         """Leave the desktop URL readable until the panel can show it, then park."""
         sandbox = self._find()
         if sandbox is not None and sandbox.get("state") == "started":
+            # Grace counts from the end of the turn, even if the preview opened earlier.
+            if self._preview_seen.is_set():
+                self._preview_seen_at = self._now()
             self._wait_for_preview_view()
-        self.park()
+        self.park(respect_screen=True)
+
+    def _screen_in_use(self) -> bool:
+        if not self._preview_seen.is_set():
+            return False
+        return self._now() < self._preview_seen_at + self.preview_grace_seconds
 
     def _wait_for_preview_view(self) -> None:
-        deadline = self._now() + self.preview_hold_seconds
-        visible_until: float | None = None
+        started = self._now()
+        cap = started + self.preview_max_hold_seconds
         while True:
             now = self._now()
-            if self._preview_seen.is_set() and visible_until is None:
-                visible_until = now + self.preview_grace_seconds
-            if visible_until is not None and now >= visible_until:
+            if now >= cap:
                 return
-            # A minted URL is not the desktop. Park at the deadline when it never opened.
-            if visible_until is None and now >= deadline:
-                return
-            remaining = (visible_until - now) if visible_until is not None else (deadline - now)
+            if self._preview_seen.is_set():
+                idle_at = self._preview_seen_at + self.preview_grace_seconds
+                if now >= idle_at:
+                    return
+                remaining = idle_at - now
+            else:
+                # A minted URL is not the desktop. Park at the deadline when it never opened.
+                hold_at = started + self.preview_hold_seconds
+                if now >= hold_at:
+                    return
+                remaining = hold_at - now
             self._sleep(min(0.2, max(remaining, 0)))
 
-    def park(self) -> None:
+    def park(self, *, respect_screen: bool = False) -> None:
         """Stop compute billing, then archive so disk is not billed either."""
         with self._account_lock:
+            if respect_screen and self._screen_in_use():
+                return
             sandbox = self._find()
             if sandbox is None:
                 return
             self._park_sandbox(sandbox)
             self._signed_url = None
+            self._preview_ready = False
 
     def _park_sandbox(self, sandbox: dict[str, Any]) -> None:
         sandbox_id = str(sandbox["id"])
@@ -326,14 +366,45 @@ class DaytonaComputer:
             self._sleep(0.4)
         raise ComputerError(f"sandbox stayed {last.get('state')}")
 
+    def _ready_screen_url(self, sandbox_id: str) -> str | None:
+        """Signed noVNC URL only after the preview host serves the page."""
+        if self._preview_ready and self._signed_url:
+            return self._signed_url
+        signed = self._signed_preview(sandbox_id)
+        if not signed or not self._preview_page_ready(signed):
+            return None
+        self._preview_ready = True
+        return signed
+
+    def _preview_page_ready(self, url: str) -> bool:
+        try:
+            response = self._client.get(
+                url,
+                headers={"X-Daytona-Skip-Preview-Warning": "true"},
+                follow_redirects=True,
+                timeout=5.0,
+            )
+        except httpx.HTTPError:
+            return False
+        if response.status_code < 200 or response.status_code >= 400:
+            return False
+        sample = response.text[:4000].lower()
+        if not sample.strip():
+            return False
+        if any(marker in sample for marker in _PREVIEW_ERROR_MARKERS):
+            return False
+        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        return content_type != "application/json"
+
     def _wait_for_preview(self, sandbox_id: str) -> str:
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            signed = self._signed_preview(sandbox_id)
+        deadline = time.monotonic() + self.preview_ready_timeout
+        while True:
+            signed = self._ready_screen_url(sandbox_id)
             if signed:
                 return signed
+            if time.monotonic() >= deadline:
+                raise ComputerError("desktop preview did not become ready")
             self._sleep(0.4)
-        raise ComputerError("desktop preview did not become ready")
 
     def _remote(self, relative: str) -> str:
         raw = (relative or ".").strip() or "."
