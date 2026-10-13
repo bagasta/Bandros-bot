@@ -212,6 +212,30 @@ export function toolUseLabel(tool: string | null | undefined): string {
 }
 
 /** Tool label for the bot who owns the typing bubble. */
+export function byCreatedAt<T extends { created_at?: string | null }>(items: readonly T[]): T[] {
+  return [...items].sort((left, right) => {
+    const a = Date.parse(left.created_at || "") || 0;
+    const b = Date.parse(right.created_at || "") || 0;
+    return a - b;
+  });
+}
+
+export function dayHeading(value?: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(date);
+}
+
+export function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 export function typingToolLabel(activity: readonly TypingActivity[], name: string): string {
   const match = activity.find(
     (item) => item.name.trim() === name.trim() && liveTypingStatuses.has(item.status) && Boolean(item.tool?.trim()),

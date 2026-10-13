@@ -1,17 +1,18 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { groupMemberSubtitle, hasVisibleBubble, historyPayloadIsFresh, mergeBotDirectory, mergeGroupRosters, presentGroupMembers, resolveSelectedBot, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "./chat-presentation";
+import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { byCreatedAt, dayHeading, groupMemberSubtitle, hasVisibleBubble, historyPayloadIsFresh, isHttpUrl, mergeBotDirectory, mergeGroupRosters, presentGroupMembers, resolveSelectedBot, toolUseLabel, turnSignalNames, typingActivityAfterTurn, typingBubbleNames, typingToolLabel } from "./chat-presentation";
 import { messageDraft, sendControlDisabled } from "./composer-send";
 import { renderMarkdown } from "./markdown";
 import { entityId, isAbortError, isTerminalRunStatus, planStop, recordsWithId, replyHasFinished } from "./stop-turn";
 
 type Bot = { id: string; name: string; description: string; instructions?: string; model?: string | null; status: "active" | "archived" };
 type Citation = { title?: string; url?: string };
-type Message = { id: string; role: string; content: string; created_at?: string; citations?: Citation[] };
+type Attachment = { id: string; name: string; type: string; size: number; warning?: string | null };
+type Message = { id: string; role: string; content: string; created_at?: string; citations?: Citation[]; attachments?: Attachment[] };
 type Run = { id: string; status: string; error: string | null };
 type Group = { id: string; name: string; description: string; members: Bot[] };
-type GroupMessage = { id: string; sender_type: string; sender_bot_id: string | null; content: string; created_at?: string; citations?: Citation[] };
+type GroupMessage = { id: string; sender_type: string; sender_bot_id: string | null; content: string; created_at?: string; citations?: Citation[]; attachments?: Attachment[] };
 type GroupActivity = { bot_id: string; name: string; status: string; tool?: string | null };
 type ChatGPTStatus = {
   connected: boolean;
@@ -37,6 +38,43 @@ type DeviceFlow = {
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
 
+const attachmentAccept = ".txt,.md,.csv,.tsv,.json,.log,.yaml,.yml,.py,.js,.ts,.html,.css,.xml,.pdf,.docx,.xlsx,.png,.jpg,.jpeg,.webp";
+
+function fileData(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1]);
+    reader.onerror = () => reject(new Error(`Tidak dapat membaca ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function AttachmentList({ files }: { files?: Attachment[] }) {
+  const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
+  if (!files?.length) return null;
+  const download = async (file: Attachment) => {
+    setError(null); setDownloading(file.id);
+    try {
+      const saved = await request<Attachment & { data: string }>(`/attachments/${file.id}`);
+      const bytes = Uint8Array.from(atob(saved.data), (char) => char.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: saved.type }));
+      const link = document.createElement("a");
+      link.href = url; link.download = saved.name; link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "File tidak dapat diunduh.");
+    } finally { setDownloading(null); }
+  };
+  return <span className="bandros-attachments">
+    {files.map((file) => <span className="bandros-attachment" key={file.id}>
+      <button type="button" onClick={() => void download(file)} disabled={downloading !== null} aria-label={`Unduh ${file.name}`}>{downloading === file.id ? "Mengunduh…" : file.name} <small>{Math.ceil(file.size / 1024)} KB</small></button>
+      {file.warning && <small>{file.warning}</small>}
+    </span>)}
+    {error && <span role="alert">{error}</span>}
+  </span>;
+}
+
 const nameColors = ["var(--sender-green)", "var(--sender-amber)", "var(--sender-purple)", "var(--sender-blue)", "var(--sender-pink)", "var(--sender-teal)"];
 
 function nameColor(name: string) {
@@ -49,6 +87,9 @@ function DesktopScreen({ url, title, frameName, onVisible }: { url: string; titl
   const loads = useRef(0);
   const acceptAction = useMemo(() => {
     try {
+      const parsed = new URL(url);
+      const localViewer = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+      if (localViewer) return "";
       const accept = new URL("/accept-daytona-preview-warning", url);
       accept.searchParams.set("redirect", url);
       return accept.toString();
@@ -65,7 +106,7 @@ function DesktopScreen({ url, title, frameName, onVisible }: { url: string; titl
       <form ref={formRef} method="POST" action={acceptAction} target={frameName} className="bandros-sr-only" />
       <iframe name={frameName} title={title} src={url} onLoad={() => {
         loads.current += 1;
-        if (loads.current >= 2) onVisible();
+        if (!acceptAction || loads.current >= 2) onVisible();
       }} />
     </>
   );
@@ -319,7 +360,12 @@ function PluginPanel({ botId }: { botId: string | null }) {
   const addPlugin = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
-    setNote(null);
+      setNote(null);
+    if (!isHttpUrl(url.trim())) {
+      setNote("URL plugin harus http atau https yang lengkap, misalnya https://contoh.dev/mcp.");
+      setBusy(false);
+      return;
+    }
     try {
       const created = await request<PluginRecord>("/plugins", { method: "POST", body: JSON.stringify({ name: name.trim(), url: url.trim(), token: token.trim() || null }) });
       setPlugins((current) => [...current, created]);
@@ -424,6 +470,17 @@ export default function GrokDashboard() {
   const [membersOpen, setMembersOpen] = useState(true);
   const [motionEnabled, setMotionEnabled] = useState(true);
   const [computerState, setComputerState] = useState<"off" | "on" | "unavailable">("off");
+  const [computerPhase, setComputerPhase] = useState<"off" | "starting" | "on" | "error">("off");
+  const [computerNote, setComputerNote] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [listQuery, setListQuery] = useState("");
+  const [botDraftOpen, setBotDraftOpen] = useState(false);
+  const [botDraftName, setBotDraftName] = useState("");
+  const [botDraftJob, setBotDraftJob] = useState("");
+  const [botDraftInstructions, setBotDraftInstructions] = useState("");
+  const [groupDraftOpen, setGroupDraftOpen] = useState(false);
+  const [groupDraftName, setGroupDraftName] = useState("");
+  const [groupDraftMembers, setGroupDraftMembers] = useState<string[]>([]);
   const [screenUrl, setScreenUrl] = useState<string | null>(null);
   const [screenOpen, setScreenOpen] = useState(false);
   const shownDesktop = useRef<string | null>(null);
@@ -479,12 +536,49 @@ export default function GrokDashboard() {
   }, [chatGPT.connected, working, botWorking, computerState]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const uploadGeneration = useRef(0);
+  const uploadBusy = useRef(false);
+  useEffect(() => {
+    uploadGeneration.current += 1;
+    uploadBusy.current = false;
+    setAttachments([]); setUploading(false);
+  }, [selectedBot?.id, selectedGroup?.id, chatGPT.connected]);
+
+  const uploadFiles = async (files: File[]) => {
+    if (uploadBusy.current) return;
+    if (files.length + attachments.length > 5) { setError("Maksimal 5 attachment per pesan."); return; }
+    if (files.some((file) => file.size > 2 * 1024 * 1024 || file.size === 0)) {
+      setError("Setiap file harus berisi data dan maksimal 2 MB."); return;
+    }
+    const generation = uploadGeneration.current;
+    uploadBusy.current = true;
+    setUploading(true); setError(null);
+    try {
+      for (const file of files) {
+        const data = await fileData(file);
+        if (generation !== uploadGeneration.current) return;
+        const saved = await request<Attachment>("/attachments", { method: "POST", body: JSON.stringify({ name: file.name, data }) });
+        if (generation !== uploadGeneration.current) return;
+        setAttachments((current) => [...current, saved]);
+      }
+    } catch (cause) {
+      if (generation === uploadGeneration.current) setError(cause instanceof Error ? cause.message : "Upload gagal. Coba lagi.");
+    } finally {
+      if (generation === uploadGeneration.current) { uploadBusy.current = false; setUploading(false); }
+    }
+  };
   const chatRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const workingRef = useRef(false);
   const shownRunError = useRef<string | null>(null);
   const selectedGroupId = useRef<string | null>(null);
   const selectedBotId = useRef<string | null>(null);
+  const settingsBotId = useRef<string | null>(null);
+  const streamLive = useRef(false);
+  const approvalRunId = useRef<string | null>(null);
   const groupPending = useRef(false);
   const advancing = useRef(false);
   const submissionId = useRef(0);
@@ -494,6 +588,35 @@ export default function GrokDashboard() {
   selectedBotId.current = selectedBot?.id ?? null;
 
   const activeBots = useMemo(() => bots.filter((bot) => bot.status === "active"), [bots]);
+  const needle = listQuery.trim().toLowerCase();
+  const visibleBots = needle ? activeBots.filter((bot) => `${bot.name} ${bot.description}`.toLowerCase().includes(needle)) : activeBots;
+  const visibleGroups = needle ? groups.filter((group) => group.name.toLowerCase().includes(needle)) : groups;
+  const hashApplied = useRef(false);
+  useEffect(() => {
+    if (hashApplied.current) return;
+    const hash = window.location.hash.replace(/^#\/?/, "");
+    const botId = hash.match(/^bot\/([^/]+)/)?.[1];
+    const groupId = hash.match(/^group\/([^/]+)/)?.[1];
+    if (botId) {
+      const bot = bots.find((item) => item.id === botId);
+      if (!bot) return;
+      hashApplied.current = true;
+      setSelectedGroup(null);
+      setSelectedBot(bot);
+      setMobilePane("chat");
+      return;
+    }
+    if (groupId) {
+      const group = groups.find((item) => item.id === groupId);
+      if (!group) return;
+      hashApplied.current = true;
+      setSelectedBot(null);
+      setSelectedGroup(group);
+      setMobilePane("chat");
+      return;
+    }
+    if (bots.length || groups.length || !hash) hashApplied.current = true;
+  }, [bots, groups]);
 
   const loadBots = async (quiet = false) => {
     try {
@@ -745,15 +868,18 @@ export default function GrokDashboard() {
   const groupTurnNames = turnSignalNames(typingActivity);
   const turnActive = working || botWorking || groupTurnNames.length > 0;
 
-  const sendMessage = async (content: string, currentSubmission: number) => {
+  const sendMessage = async (content: string, currentSubmission: number, files: Attachment[]) => {
+    const generation = uploadGeneration.current;
+    let accepted = false;
     stickToBottom.current = true;
     replyFinished.current = false;
-    setPrompt(""); setWorking(true); workingRef.current = true; advancing.current = true; setError(null);
+    setPrompt(""); setAttachments([]); setWorking(true); workingRef.current = true; advancing.current = true; setError(null);
     try {
       if (selectedGroup) {
         const groupId = selectedGroup.id;
-        setGroupMessages((current) => [...current, { id: `local-${Date.now()}`, sender_type: "user", sender_bot_id: null, content, created_at: new Date().toISOString() }]);
-        await request<GroupMessage>(`/groups/${groupId}/messages`, { method: "POST", body: JSON.stringify({ content }) });
+        setGroupMessages((current) => [...current, { id: `local-${currentSubmission}`, sender_type: "user", sender_bot_id: null, content, attachments: files, created_at: new Date().toISOString() }]);
+        await request<GroupMessage>(`/groups/${groupId}/messages`, { method: "POST", body: JSON.stringify({ content, attachments: files.map(({ id }) => ({ id })) }) });
+        accepted = true;
         const [nextMessages, nextGroups] = await Promise.all([
           request<GroupMessage[]>(`/groups/${groupId}/messages`),
           request<Group[]>("/groups"),
@@ -789,8 +915,9 @@ export default function GrokDashboard() {
       const botId = selectedBotId.current ?? selectedBot?.id;
       if (!botId) return;
       const model = modelByBot[botId] ?? selectedBot?.model ?? null;
-      setMessages((current) => [...current, { id: `local-${Date.now()}`, role: "user", content }]);
-      const run = await request<Run | null>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content, model }) });
+      setMessages((current) => [...current, { id: `local-${currentSubmission}`, role: "user", content, attachments: files }]);
+      const run = await request<Run | null>(`/bots/${botId}/messages`, { method: "POST", body: JSON.stringify({ content, model, attachments: files.map(({ id }) => ({ id })) }) });
+      accepted = true;
       const runId = entityId(run);
       if (currentSubmission !== submissionId.current) return;
       if (!run || !runId) {
@@ -817,6 +944,8 @@ export default function GrokDashboard() {
       const decoder = new TextDecoder();
       let buffer = "";
       let completed: Run | null = null;
+      let waitingApproval = false;
+      streamLive.current = true;
       while (!completed) {
         const chunk = await reader.read();
         if (chunk.done) break;
@@ -845,12 +974,21 @@ export default function GrokDashboard() {
               ...current.filter((message) => message != null && message.id !== `streaming-${runId}`),
               { id: `streaming-${runId}`, role: "assistant", content: streamedContent },
             ]);
+          } else if (eventName === "tool.approval_required" || eventName === "run.waiting_approval") {
+            waitingApproval = true;
           } else if (eventName === "run.completed" || eventName === "run.failed" || eventName === "run.cancelled") {
             completed = parsed as Run;
           }
         }
       }
-      if (!completed) throw new Error("Streaming berakhir sebelum Run selesai.");
+      if (!completed) {
+        if (waitingApproval) {
+          approvalRunId.current = runId;
+          return;
+        }
+        throw new Error("Sambungan terputus sebelum jawaban selesai. Kalau ada permintaan persetujuan, tekan Setujui.");
+      }
+      approvalRunId.current = null;
       if (completed.error) throw new Error(completed.error);
       if (currentSubmission !== submissionId.current) return;
       if (selectedBotId.current != null && selectedBotId.current !== botId) return;
@@ -860,6 +998,12 @@ export default function GrokDashboard() {
     } catch (cause) {
       if (currentSubmission !== submissionId.current) return;
       if (cause instanceof DOMException && cause.name === "AbortError") return;
+      if (!accepted && generation === uploadGeneration.current) {
+        setPrompt((current) => current || content);
+        setAttachments((current) => [...files, ...current].slice(0, 5));
+        setMessages((current) => current.filter((message) => message.id !== `local-${currentSubmission}`));
+        setGroupMessages((current) => current.filter((message) => message.id !== `local-${currentSubmission}`));
+      }
       setError(cause instanceof Error ? cause.message : "Pesan tidak dapat dikirim.");
     } finally {
       if (currentSubmission === submissionId.current) {
@@ -867,18 +1011,19 @@ export default function GrokDashboard() {
         workingRef.current = false;
         setWorking(false);
         setActiveTool(null);
-        setActiveRunId(null);
+        if (!approvalRunId.current) setActiveRunId(null);
+        streamLive.current = false;
       }
     }
   };
 
   const submitComposer = (event?: FormEvent) => {
     event?.preventDefault();
-    const draft = messageDraft(composerRef.current?.value ?? prompt);
-    if ((!selectedBot && !selectedGroup) || !draft) return;
+    const draft = messageDraft(composerRef.current?.value ?? prompt) || (attachments.length ? "Tolong baca file terlampir." : "");
+    if ((!selectedBot && !selectedGroup) || !draft || uploadBusy.current) return;
     const currentSubmission = ++submissionId.current;
     if (workingRef.current) stopCurrentTurn();
-    void sendMessage(draft, currentSubmission);
+    void sendMessage(draft, currentSubmission, attachments);
   };
 
   const stopRun = async () => {
@@ -926,18 +1071,30 @@ export default function GrokDashboard() {
     }
   };
 
-  const openBot = (bot: Bot) => {
-    setSelectedGroup(null);
-    setSelectedBot(bot);
-    setMobilePane("chat");
-  };
-
-  const openBotSettings = (bot: Bot) => {
-    openBot(bot);
+  const fillSettings = (bot: Bot) => {
+    settingsBotId.current = bot.id;
     setEditName(bot.name);
     setEditDescription(bot.description);
     setEditInstructions(bot.instructions || "");
     setEditModel(modelByBot[bot.id] ?? bot.model ?? "");
+  };
+
+  const rememberSelection = (kind: "bot" | "group", id: string) => {
+    const next = `#${kind}/${id}`;
+    if (window.location.hash !== next) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${next}`);
+  };
+
+  const openBot = (bot: Bot) => {
+    setSelectedGroup(null);
+    setSelectedBot(bot);
+    setMobilePane("chat");
+    if (settingsOpen) fillSettings(bot);
+    rememberSelection("bot", bot.id);
+  };
+
+  const openBotSettings = (bot: Bot) => {
+    openBot(bot);
+    fillSettings(bot);
     setSettingsOpen(true);
   };
 
@@ -948,9 +1105,10 @@ export default function GrokDashboard() {
 
   const saveSettings = async (event: FormEvent) => {
     event.preventDefault();
-    if (!selectedBot || !editName.trim()) return;
+    const botId = settingsBotId.current;
+    if (!selectedBot || !botId || botId !== selectedBot.id || !editName.trim()) return;
     try {
-      const updated = await request<Bot>(`/bots/${selectedBot.id}`, {
+      const updated = await request<Bot>(`/bots/${botId}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: editName.trim(),
@@ -989,16 +1147,22 @@ export default function GrokDashboard() {
     setSelectedBot(null);
     setSelectedGroup(group);
     setMobilePane("chat");
+    rememberSelection("group", group.id);
   };
 
   const createGroup = async () => {
-    const name = window.prompt("Nama grup baru");
-    if (!name?.trim() || activeBots.length === 0) return;
+    if (!groupDraftName.trim() || groupDraftMembers.length === 0) {
+      setError("Isi nama grup dan pilih minimal satu anggota.");
+      return;
+    }
     try {
       const group = await request<Group>("/groups", {
         method: "POST",
-        body: JSON.stringify({ name: name.trim(), description: "Grup koordinasi Bandros.", member_bot_ids: activeBots.map((bot) => bot.id) }),
+        body: JSON.stringify({ name: groupDraftName.trim(), description: "Grup koordinasi Bandros.", member_bot_ids: groupDraftMembers }),
       });
+      setGroupDraftOpen(false);
+      setGroupDraftName("");
+      setGroupDraftMembers([]);
       setGroups((current) => [group, ...current]);
       openGroup(group);
     } catch (cause) {
@@ -1007,14 +1171,20 @@ export default function GrokDashboard() {
   };
 
   const createBot = async () => {
-    const name = window.prompt("Nama Bot baru");
-    if (!name?.trim()) return;
+    if (!botDraftName.trim()) {
+      setError("Nama bot wajib diisi.");
+      return;
+    }
     try {
       const bot = await request<Bot>("/bots", { method: "POST", body: JSON.stringify({
-        name: name.trim(),
-        description: "Bot baru dalam ekosistem Bandros.",
-        instructions: "Bantu pengguna dengan jawaban yang jelas dan dapat ditinjau.",
+        name: botDraftName.trim(),
+        description: botDraftJob.trim() || "Bot baru dalam ekosistem Bandros.",
+        instructions: botDraftInstructions.trim() || "Bantu pengguna dengan jawaban yang jelas dan dapat ditinjau.",
       }) });
+      setBotDraftOpen(false);
+      setBotDraftName("");
+      setBotDraftJob("");
+      setBotDraftInstructions("");
       setBots((current) => [bot, ...current.filter((item) => item.id !== bot.id)]);
       setSelectedBot(bot);
       setMobilePane("chat");
@@ -1118,7 +1288,7 @@ export default function GrokDashboard() {
   const selectableModels = withLatestCodexModel(chatGPTModels);
   const automaticModel = selectableModels.find((model) => model.id === chatGPT.preferred_model)?.display_name || chatGPT.preferred_model || latestCodexModel.display_name;
   const modelSelect = (
-    <select aria-label="Model Codex" value={currentModel} onChange={(event) => void chooseModel(event.target.value)} disabled={!selectedBot}>
+    <select aria-label="Model" value={currentModel} onChange={(event) => void chooseModel(event.target.value)} disabled={!selectedBot}>
       <option value="">{`Otomatis · ${automaticModel}`}</option>
       {selectableModels.map((model) => <option key={model.id} value={`chatgpt/${model.id}`}>{model.display_name}</option>)}
     </select>
@@ -1128,26 +1298,27 @@ export default function GrokDashboard() {
     <main className={`bandros-app ${mobilePane === "chat" ? "is-chat" : "is-list"} ${selectedGroup && !membersOpen ? "is-members-closed" : ""} ${screenOpen ? "is-screen-open" : ""}`} data-theme={theme} data-motion={motionEnabled ? "on" : "off"}>
       <aside className="bandros-sidebar">
         <div className="bandros-brand">
-          <button className="bandros-toolbar-button" type="button" aria-label="Cari" title="Cari" onClick={() => composerRef.current?.focus()}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg></button>
+          <button className="bandros-toolbar-button" type="button" aria-label="Cari" title="Cari" aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => !open)}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg></button>
           <div className="bandros-toolbar-actions">
             <button className="bandros-toolbar-button" type="button" aria-label={theme === "dark" ? "Mode terang" : "Mode gelap"} title={theme === "dark" ? "Mode terang" : "Mode gelap"} onClick={() => setTheme((current) => { const next = current === "dark" ? "light" : "dark"; window.localStorage.setItem("bandros_theme", next); return next; })}><svg viewBox="0 0 24 24" aria-hidden="true">{theme === "dark" ? <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></> : <path d="M20 14a8 8 0 0 1-10-10 8 8 0 1 0 10 10Z" />}</svg></button>
-            <CreateMenu disabled={!chatGPT.connected} onCreateBot={() => void createBot()} onCreateGroup={() => void createGroup()} />
+            <CreateMenu disabled={!chatGPT.connected} onCreateBot={() => setBotDraftOpen(true)} onCreateGroup={() => { setGroupDraftMembers([]); setGroupDraftOpen(true); }} />
           </div>
         </div>
+        {searchOpen && <input className="bandros-search" aria-label="Cari bot atau grup" placeholder="Cari bot atau grup" value={listQuery} onChange={(event) => setListQuery(event.target.value)} />}
         <div className="bandros-agent-list">
           {loading && <p className="bandros-muted">Memuat Bot…</p>}
-          {activeBots.map((bot) => <div className={`bandros-agent ${selectedBot?.id === bot.id && !selectedGroup ? "is-selected" : ""}`} key={bot.id}><button type="button" className="bandros-agent-open" onClick={() => openBot(bot)}><BandrosAvatar name={bot.name} working={typingPeople.includes(bot.name) || (working && selectedBot?.id === bot.id && !selectedGroup)} /><span className="bandros-agent-copy"><strong>{bot.name}</strong><small>{bot.description || "Belum ada peran"}</small></span></button><button className="bandros-agent-more" type="button" aria-label={`Pengaturan ${bot.name}`} title={`Pengaturan ${bot.name}`} onClick={() => openBotSettings(bot)}>⋯</button></div>)}
+          {visibleBots.map((bot) => <div className={`bandros-agent ${selectedBot?.id === bot.id && !selectedGroup ? "is-selected" : ""}`} key={bot.id}><button type="button" className="bandros-agent-open" onClick={() => openBot(bot)}><BandrosAvatar name={bot.name} working={typingPeople.includes(bot.name) || (working && selectedBot?.id === bot.id && !selectedGroup)} /><span className="bandros-agent-copy"><strong>{bot.name}</strong><small>{bot.description || "Belum ada peran"}</small></span></button><button className="bandros-agent-more" type="button" aria-label={`Pengaturan ${bot.name}`} title={`Pengaturan ${bot.name}`} onClick={() => openBotSettings(bot)}>⋯</button></div>)}
           {!loading && chatGPT.connected && bots.length === 0 && <p className="bandros-muted">Belum ada Bot. Buat Bot pertama.</p>}
           {authReady && !chatGPT.connected && <p className="bandros-muted">Masuk dengan ChatGPT untuk membuka Bot kamu.</p>}
         </div>
         <div className="bandros-group-list">
-          <div className="bandros-groups-heading"><span>Groups</span></div>
-          {groups.map((group) => {
+          <div className="bandros-groups-heading"><span>Grup</span></div>
+          {visibleGroups.map((group) => {
             const roster = presentGroupMembers(group.members, bots, selectedGroup?.id === group.id ? selectedGroup.members : []);
             return <button className={`bandros-group ${selectedGroup?.id === group.id ? "is-selected" : ""}`} key={group.id} onClick={() => openGroup(group)}><span className="bandros-group-mark"><BandrosAvatar name={group.name} working={selectedGroup?.id === group.id && typingPeople.length > 0} /><em>{roster.length}</em></span><span className="bandros-agent-copy"><strong>{group.name}</strong><small>{groupMemberSubtitle(roster)}</small></span></button>;
           })}
         </div>
-        <button className="bandros-account" type="button" onClick={() => chatGPT.connected ? void disconnectChatGPT() : void connectChatGPT()}><BandrosAvatar name="Marketplace" /><span><strong>Marketplace</strong><small>{chatGPT.connected ? chatGPT.email || "ChatGPT terhubung" : "Sign in with ChatGPT"}</small></span></button>
+        <button className="bandros-account" type="button" onClick={() => chatGPT.connected ? void disconnectChatGPT() : void connectChatGPT()}><BandrosAvatar name={chatGPT.email || "Akun"} /><span><strong>{chatGPT.connected ? (chatGPT.email || "Akun ChatGPT") : "Masuk"}</strong><small>{chatGPT.connected ? "Keluar" : "Masuk dengan ChatGPT"}</small></span></button>
       </aside>
       <section className="bandros-main">
         <header className="bandros-topbar">
@@ -1166,7 +1337,20 @@ export default function GrokDashboard() {
           if (!node) return;
           stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
         }}>
-          {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>{selectedBot?.name.toLowerCase() === "bandros" ? "Bandros adalah orkestrator. Minta dia membuat Bot spesialis; dia yang menulis tugas, cara kerja, output, dan batasannya." : `Kirim satu tugas yang selesai jelas. ${displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.`}</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.filter((message) => hasVisibleBubble(message.content)).map((message) => <article className={`bandros-message ${message.sender_type === "user" ? "from-user" : "from-bot"}`} key={message.id}>{(() => { const sender = message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot"; const mine = message.sender_type === "user"; return <>{!mine && <BandrosAvatar name={sender} working={typingPeople.includes(sender)} />}<div className="bandros-message-body"><button type="button" style={{ color: mine ? undefined : nameColor(sender) }} onClick={() => { if (!mine) insertMention(sender); }}>{sender}</button>{mine ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content, selectedGroup.members.map((member) => member.name))}<SourceList citations={message.citations} /><time>{chatTime(message.created_at)}</time></div>}</div></>; })()}</article>) : messages.map((message) => <article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`} key={message.id}>{message.role !== "user" && <BandrosAvatar name={displayName} working={typingPeople.includes(displayName)} />}<div className="bandros-message-body"><span>{message.role === "user" ? "Kamu" : displayName}</span>{message.role === "user" ? <p className="bandros-bubble">{message.content}<time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content)}<SourceList citations={message.citations} /><time>{chatTime(message.created_at)}</time></div>}</div></article>)}
+          {!authReady ? <p className="bandros-muted">Memuat akun…</p> : !chatGPT.connected ? <section className="bandros-welcome"><h1>Masuk dengan ChatGPT</h1><p>Bot, grup, dan berkas terikat ke akun ChatGPT kamu. Akun lain tidak bisa melihatnya.</p><button className="bandros-signin" type="button" onClick={() => void connectChatGPT()}>Sign in with ChatGPT</button></section> : !selectedGroup && messages.length === 0 ? <section className="bandros-welcome"><h1>What can I take off your plate?</h1><p>{selectedBot?.name.toLowerCase() === "bandros" ? "Bandros adalah orkestrator. Minta dia membuat Bot spesialis; dia yang menulis tugas, cara kerja, output, dan batasannya." : `Kirim satu tugas yang selesai jelas. ${displayName} mengerjakannya di komputer akunmu, menyimpan berkas, dan hanya kembali saat butuh persetujuanmu.`}</p><div className="bandros-quick-prompts">{quickPrompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}</div></section> : selectedGroup ? groupMessages.filter((message) => hasVisibleBubble(message.content) || message.attachments?.length).map((message) => {
+            const sender = message.sender_type === "user" ? "Kamu" : selectedGroup.members.find((member) => member.id === message.sender_bot_id)?.name || "Bot";
+            const mine = message.sender_type === "user";
+            return <article className={`bandros-message ${mine ? "from-user" : "from-bot"}`} key={message.id}>
+              {!mine && <BandrosAvatar name={sender} working={typingPeople.includes(sender)} />}
+              <div className="bandros-message-body">
+                <button type="button" style={{ color: mine ? undefined : nameColor(sender) }} onClick={() => { if (!mine) insertMention(sender); }}>{sender}</button>
+                {mine ? <p className="bandros-bubble">{message.content}<AttachmentList files={message.attachments} /><time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content, selectedGroup.members.map((member) => member.name))}<SourceList citations={message.citations} /><AttachmentList files={message.attachments} /><time>{chatTime(message.created_at)}</time></div>}
+              </div>
+            </article>;
+          }) : byCreatedAt(messages).map((message, index, list) => <Fragment key={message.id}>{dayHeading(message.created_at) && dayHeading(message.created_at) !== dayHeading(list[index - 1]?.created_at) ? <p className="bandros-day" role="separator">{dayHeading(message.created_at)}</p> : null}<article className={`bandros-message ${message.role === "user" ? "from-user" : "from-bot"}`}>
+            {message.role !== "user" && <BandrosAvatar name={displayName} working={typingPeople.includes(displayName)} />}
+            <div className="bandros-message-body"><span>{message.role === "user" ? "Kamu" : displayName}</span>{message.role === "user" ? <p className="bandros-bubble">{message.content}<AttachmentList files={message.attachments} /><time>{chatTime(message.created_at)}</time></p> : <div className="bandros-bubble">{renderMarkdown(message.content)}<SourceList citations={message.citations} /><AttachmentList files={message.attachments} /><time>{chatTime(message.created_at)}</time></div>}</div>
+          </article></Fragment>)}
           {typingPeople.map((name) => {
             const toolLabel = selectedGroup ? typingToolLabel(typingActivity, name) : toolUseLabel(activeTool);
             return <article className="bandros-message from-bot bandros-typing" key={`typing-${name}`} aria-label={toolLabel ? `${name} sedang mengetik, ${toolLabel}` : `${name} sedang mengetik`}><BandrosAvatar name={name} working /><div className="bandros-message-body"><button type="button" style={{ color: nameColor(name) }} onClick={() => insertMention(name)}>{name}</button>{toolLabel ? <span className="bandros-tool-use" role="status">{toolLabel}</span> : null}<div className="bandros-bubble bandros-typing-bubble"><i className="bandros-dot" /><i className="bandros-dot" /><i className="bandros-dot" /></div></div></article>;
@@ -1174,12 +1358,22 @@ export default function GrokDashboard() {
         </div>
         <span className="bandros-sr-only" role="status" aria-live="polite" aria-atomic="true">{typingPeople.length > 0 ? `${typingPeople.join(", ")} sedang mengetik` : ""}</span>
         {mentionSuggestions.length > 0 && <div className="bandros-mentions" role="listbox" aria-label="Saran mention">{mentionSuggestions.map((member) => <button type="button" key={member.id} onMouseDown={(event) => event.preventDefault()} onClick={() => insertMention(member.name)}>@{member.name}</button>)}</div>}
-        {approvals.length > 0 && !selectedGroup && <div className="bandros-approval">{approvals.map((approval) => <div key={approval.id}><p>Perlu persetujuan: {approval.reason}</p><button type="button" onClick={() => void request(`/approvals/${approval.id}/approve`, { method: "POST" }).then(() => setApprovals((current) => current.filter((item) => item.id !== approval.id)))}>Setujui</button><button type="button" onClick={() => void request(`/approvals/${approval.id}/reject`, { method: "POST" }).then(() => setApprovals((current) => current.filter((item) => item.id !== approval.id)))}>Tolak</button></div>)}</div>}
+        {approvals.length > 0 && !selectedGroup && <div className="bandros-approval">{approvals.map((approval) => <div key={approval.id}><p>Perlu persetujuan: {approval.reason}</p><button type="button" onClick={() => void request(`/approvals/${approval.id}/approve`, { method: "POST" }).then(() => { setApprovals((current) => current.filter((item) => item.id !== approval.id)); const runId = approvalRunId.current || activeRunId; if (runId) setActiveRunId(runId); })}>Setujui</button><button type="button" onClick={() => void request(`/approvals/${approval.id}/reject`, { method: "POST" }).then(() => setApprovals((current) => current.filter((item) => item.id !== approval.id)))}>Tolak</button></div>)}</div>}
         {chatGPT.connected && <form className="bandros-composer" onSubmit={submitComposer}>
+          <div className="bandros-composer-files">
+            {(attachments.length > 0 || uploading) && <div className="bandros-attachments" aria-label="File yang akan dikirim">
+              {attachments.map((file) => <div className="bandros-attachment" key={file.id}><span>{file.name} <small>{Math.ceil(file.size / 1024)} KB</small></span><button type="button" aria-label={`Hapus ${file.name}`} onClick={() => setAttachments((current) => current.filter((item) => item.id !== file.id))}>×</button>{file.warning && <small>{file.warning}</small>}</div>)}
+              {uploading && <span role="status">Mengunggah dan membaca file…</span>}
+            </div>}
+            <input ref={fileInputRef} type="file" hidden multiple accept={attachmentAccept} onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void uploadFiles(files); }} />
+          </div>
+          <div className="bandros-composer-row">
+          <button className="bandros-attach" type="button" aria-label="Lampirkan file" title="Lampirkan file: teks, PDF, DOCX, XLSX, PNG/JPEG/WebP. Maksimal 5 file, 2 MB per file." disabled={uploading || attachments.length >= 5 || (!selectedBot && !selectedGroup)} onClick={() => fileInputRef.current?.click()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 13 7-7a3 3 0 0 1 4 4L9 20a5 5 0 0 1-7-7L13 2" /><path d="m5 15 9-9" /></svg></button>
           <textarea ref={composerRef} value={prompt} onChange={(event) => { setPrompt(event.target.value); syncMention(event.target.value, event.target.selectionStart); }} onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyUp={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={(event) => { if (event.key === "Escape") setMentionQuery(null); if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (mentionQuery !== null && mentionSuggestions[0]) insertMention(mentionSuggestions[0].name); else submitComposer(); } }} placeholder={selectedGroup ? `Message ${displayName}` : `Message ${displayName}`} rows={1} aria-label={`Message ${displayName}`} />
           <div className="bandros-composer-actions">
             {turnActive && <button type="button" className="bandros-stop" onClick={() => void stopRun()} aria-label="Stop run">Stop</button>}
-            <button type="button" disabled={sendControlDisabled(turnActive, prompt)} aria-label="Send message" onClick={() => submitComposer()}>↑</button>
+            <button type="button" disabled={sendControlDisabled(turnActive, prompt, attachments.length, uploading)} aria-label="Send message" onClick={() => submitComposer()}>↑</button>
+          </div>
           </div>
         </form>}
         {chatGPT.connected && selectedBot && !selectedGroup && <div className="bandros-composer-footer"><span>Model</span>{modelSelect}</div>}
@@ -1187,15 +1381,28 @@ export default function GrokDashboard() {
       <aside className="bandros-computer" aria-label={selectedGroup ? "Members" : "Computer"} inert={screenOpen || undefined}>
         {selectedGroup ? <>
           <div className="bandros-computer-head"><strong>Members</strong><button type="button" aria-label="Tutup panel anggota" onClick={() => setMembersOpen(false)}>×</button></div>
-          {selectedGroup.members.map((member) => <button className="bandros-member" type="button" key={member.id} onClick={() => insertMention(member.name)}><BandrosAvatar name={member.name} working={typingPeople.includes(member.name)} />{member.name}</button>)}
+          {selectedGroup.members.map((member) => <div className="bandros-member" key={member.id}><button type="button" onClick={() => insertMention(member.name)}><BandrosAvatar name={member.name} working={typingPeople.includes(member.name)} />{member.name}</button><button type="button" aria-label={`Keluarkan ${member.name}`} onClick={() => void request<Group>(`/groups/${selectedGroup.id}/members/${member.id}`, { method: "DELETE" }).then((updated) => { setGroups((current) => current.map((group) => group.id === updated.id ? updated : group)); setSelectedGroup(updated); }).catch((cause) => setError(cause instanceof Error ? cause.message : "Anggota tidak dapat dikeluarkan."))}>Keluarkan</button></div>)}
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </> : <>
-          <div className={`bandros-screen${screenUrl ? " has-view" : ""}`}>{screenUrl && !screenOpen ? <DesktopScreen url={screenUrl} title="Layar komputer kecil" frameName="bandros-screen" onVisible={markDesktopVisible} /> : screenUrl && screenOpen ? "Layar terbuka" : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
-          <p>{displayName}&apos;s screen</p>
+          <div className="bandros-screen-label"><i className={computerState === "on" ? "is-live" : ""} />{displayName}</div>
+          <div className={`bandros-screen${screenUrl ? " has-view" : ""}`}>{screenUrl && !screenOpen ? <DesktopScreen url={screenUrl} title="Layar komputer" frameName="bandros-screen" onVisible={markDesktopVisible} /> : screenUrl && screenOpen ? "Layar terbuka" : computerPhase === "starting" ? "Menyalakan…" : computerState === "on" ? "Menyambungkan…" : "Mati"}</div>
+          {computerNote && <p className="bandros-muted" role="status">{computerNote}</p>}
+          <button className="bandros-computer-toggle" type="button" disabled={computerPhase === "starting"} onClick={() => {
+            setComputerPhase("starting");
+            setComputerNote(null);
+            void request<{ state?: string; screen_url?: string | null }>("/computer/start", { method: "POST" }).then((body) => {
+              const on = body.state === "on";
+              setComputerState(on ? "on" : "off");
+              setScreenUrl(body.screen_url ?? null);
+              setComputerPhase(on ? "on" : "error");
+              setComputerNote(on ? "Komputer menyala." : "Komputer belum menyala.");
+            }).catch((cause) => {
+              setComputerPhase("error");
+              setComputerState("off");
+              setComputerNote(cause instanceof Error ? cause.message : "Komputer tidak dapat dinyalakan.");
+            });
+          }}>{computerPhase === "starting" ? "Menyalakan…" : computerState === "on" ? "Komputer menyala" : "Nyalakan komputer"}</button>
           {screenUrl && <button className="bandros-computer-toggle" type="button" onClick={openScreen}>Buka layar</button>}
-          <p>{computerState === "on" ? "Desktop aktif selama Bot menggunakannya dan akan diparkir setelah gilirannya selesai." : "Desktop hanya aktif saat Bot meminta bantuan komputer."}</p>
-          <div className="bandros-computer-head"><strong>Routines</strong></div>
-          <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </>}
         {chatGPT.connected && <PluginPanel botId={selectedBot?.id ?? null} />}
       </aside>
@@ -1231,7 +1438,30 @@ export default function GrokDashboard() {
           </div>
         </div>
       </div>}
-      {deviceFlow && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Sign in with ChatGPT">
+      {botDraftOpen && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Buat bot">
+        <form className="bandros-device-card" onSubmit={(event) => { event.preventDefault(); void createBot(); }}>
+          <h2>Buat bot</h2>
+          <label htmlFor="draft-bot-name">Nama</label>
+          <input id="draft-bot-name" value={botDraftName} onChange={(event) => setBotDraftName(event.target.value)} required />
+          <label htmlFor="draft-bot-job">Tugas</label>
+          <textarea id="draft-bot-job" value={botDraftJob} onChange={(event) => setBotDraftJob(event.target.value)} rows={3} />
+          <label htmlFor="draft-bot-instructions">Instruksi</label>
+          <textarea id="draft-bot-instructions" value={botDraftInstructions} onChange={(event) => setBotDraftInstructions(event.target.value)} rows={4} />
+          <button type="submit">Simpan bot</button>
+          <button type="button" onClick={() => setBotDraftOpen(false)}>Batal</button>
+        </form>
+      </div>}
+      {groupDraftOpen && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Buat grup">
+        <form className="bandros-device-card" onSubmit={(event) => { event.preventDefault(); void createGroup(); }}>
+          <h2>Buat grup</h2>
+          <label htmlFor="draft-group-name">Nama grup</label>
+          <input id="draft-group-name" value={groupDraftName} onChange={(event) => setGroupDraftName(event.target.value)} required />
+          <fieldset><legend>Anggota</legend>{activeBots.map((bot) => <label key={bot.id}><input type="checkbox" checked={groupDraftMembers.includes(bot.id)} onChange={() => setGroupDraftMembers((current) => current.includes(bot.id) ? current.filter((id) => id !== bot.id) : [...current, bot.id])} /> {bot.name}</label>)}</fieldset>
+          <button type="submit">Simpan grup</button>
+          <button type="button" onClick={() => setGroupDraftOpen(false)}>Batal</button>
+        </form>
+      </div>}
+      {deviceFlow && <div className="bandros-device-backdrop" role="dialog" aria-modal="true" aria-label="Masuk dengan ChatGPT">
         <section className="bandros-device-card">
           <button className="bandros-device-close" aria-label="Tutup device login" onClick={() => setDeviceFlow(null)}>×</button>
           <span className="bandros-settings-eyebrow">ChatGPT</span>

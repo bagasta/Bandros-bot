@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 import asyncio
 import json
+import logging
 import os
 import base64
 import hashlib
@@ -23,10 +24,11 @@ from jwt import PyJWKClient
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .database import Database, database_revision, encode_snapshot, hold_snapshot, release_snapshot, snapshot_held, stage_snapshot
-from .computer import DaytonaComputer
+from .computer import ComputerError, DaytonaComputer
+from .firecracker_computer import FirecrackerComputer
 from .credential_store import CredentialStore
 from .domain import AssignSkill, Approval, ApprovalProposal, ApprovalStatus, Bot, BotActivity, BotStatus, ClawHubInstall, ClawHubListing, CreateBot, GroupActivity, GroupInput, GroupMemberInput, GroupMessage, GroupMessageInput, Handoff, HandoffInput, Job, JobInput, JobUpdate, Memory, Message, MessageEditInput, MessageInput, Plugin, PluginInput, RegenerateInput, Run, RunEvent, RunStatus, Skill, SkillInput, UpdateBot, WorkGroup
 from .group_activity import load_group_activity
@@ -35,6 +37,7 @@ from .model_gateway import (
     CompositeGateway,
     MockGateway,
     OpenRouterGateway,
+    preferred_chatgpt_model,
     resolve_group_model,
 )
 from .policy import PolicyEngine
@@ -44,6 +47,7 @@ from .repository import ORPHAN_NOTICE, Repository
 from .runtime import RunRuntime
 from .settings import Settings, running_on_vercel
 from .tenancy import tenant_digest, tenant_locations
+from .attachments import AttachmentStore, MAX_FILE_BYTES
 
 
 settings = Settings.from_environment()
@@ -237,12 +241,8 @@ def activate_account(account_id: str) -> tuple[object, object]:
             max_model_calls=settings.max_model_calls_per_run,
             workspace_root=files,
             resolve_group_model=_model_for_group_bot,
-            computer=DaytonaComputer(
-                api_key=settings.daytona_api_key,
-                api_url=settings.daytona_api_url,
-                account_id=digest,
-                target=settings.daytona_target,
-            ) if settings.daytona_api_key else None,
+            resolve_bot_model=_model_for_bot,
+            computer=None if settings.environment_name == "vercel" else FirecrackerComputer(account_id=digest),
         )
         workspace_runtime.recover(resume=not settings.await_runs)
         pair = (repo, workspace_runtime)
@@ -250,10 +250,27 @@ def activate_account(account_id: str) -> tuple[object, object]:
     return current_repository.set(pair[0]), current_runtime.set(pair[1])
 
 
+logger = logging.getLogger(__name__)
+
+
+async def _start_local_computer() -> None:
+    try:
+        await asyncio.to_thread(FirecrackerComputer(account_id="local").wake)
+    except Exception:
+        logger.exception("Komputer Firecracker tidak dapat dinyalakan saat startup")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
-    yield
+    starter: asyncio.Task[None] | None = None
+    if settings.environment_name != "vercel" and "PYTEST_CURRENT_TEST" not in os.environ:
+        starter = asyncio.create_task(_start_local_computer())
+    try:
+        yield
+    finally:
+        if starter is not None and not starter.done():
+            starter.cancel()
 
 
 class SnapshotEnvelope:
@@ -368,10 +385,10 @@ app = FastAPI(title="Persistent Agent Workspace", version="0.1.0", lifespan=life
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if settings.cors_allow_all else ["http://localhost:3000", "http://127.0.0.1:3000", settings.web_origin],
-    allow_origin_regex=None if settings.cors_allow_all else r"https://.*\.vercel\.app",
+    allow_origin_regex=None if settings.cors_allow_all else r"https://(.*\.vercel\.app|.*\.github\.io)",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Bandros-Session", "X-Bandros-Snapshot", "X-Bandros-Envelope"],
+    allow_headers=["Content-Type", "Authorization", "Last-Event-ID", "X-Bandros-Session", "X-Bandros-Snapshot", "X-Bandros-Envelope"],
     expose_headers=["X-Bandros-Snapshot", "X-Bandros-Snapshot-Rev"],
 )
 
@@ -483,20 +500,18 @@ def not_found(error: KeyError) -> HTTPException:
 
 
 def _model_for_bot(bot: Bot, requested: str | None = None) -> str:
+    connection = _chatgpt_connection()
+    # Avoid routing Codex-authenticated runs to a stale, unprefixed provider model.
+    codex_model = preferred_chatgpt_model(connection, LATEST_CODEX_MODEL["id"])
+    if codex_model and connection and connection.get("auth_mode") == "codex":
+        for candidate in (requested, bot.model):
+            if isinstance(candidate, str) and candidate.startswith("chatgpt/"):
+                return candidate
+        return codex_model
     if requested:
         return requested
     if bot.model:
         return bot.model
-    connection = _chatgpt_connection()
-    if (
-        connection
-        and (
-            connection.get("auth_mode") == "codex"
-            or "chatgpt.tokens.use.direct" in str(connection.get("scope") or "").split()
-        )
-        and connection.get("preferred_model")
-    ):
-        return f"chatgpt/{connection['preferred_model']}"
     return settings.default_model
 
 
@@ -601,15 +616,31 @@ async def computer_status() -> dict[str, str | None]:
     computer = _account_computer()
     if computer is None:
         return {"state": "unavailable", "screen_url": None}
-    return await asyncio.to_thread(computer.status)
+    try:
+        return await asyncio.to_thread(computer.status)
+    except ComputerError:
+        return {"state": "unavailable", "screen_url": None}
+
+
+def _computer_start_detail(error: ComputerError) -> str:
+    logger.warning("computer start failed: %s", error)
+    text = str(error)
+    if "Kernel" in text or "Disk" in text:
+        return "Komputer Bandros belum punya kernel atau disk sendiri. VM project lain tidak dipakai."
+    if "Socket" in text or "vsock" in text or "Proxy VNC" in text or "noVNC" in text or "Agen di dalam" in text:
+        return "Komputer Bandros belum menyala. VM ini terpisah dari project lain. Coba lagi sebentar."
+    return "Komputer tidak dapat dinyalakan."
 
 
 @app.post("/api/v1/computer/start")
 async def computer_start() -> dict[str, str | None]:
-    raise HTTPException(
-        status_code=409,
-        detail="Desktop hanya diaktifkan saat Bot memanggil alat komputer.",
-    )
+    computer = _account_computer()
+    if not isinstance(computer, FirecrackerComputer):
+        raise HTTPException(status_code=409, detail="Komputer hanya tersedia saat backend berjalan di mesin ini.")
+    try:
+        return await asyncio.to_thread(computer.wake)
+    except ComputerError as error:
+        raise HTTPException(status_code=409, detail=_computer_start_detail(error)) from error
 
 
 @app.post("/api/v1/computer/shown")
@@ -668,12 +699,7 @@ async def computer_view_socket(websocket: WebSocket, ticket: str) -> None:
     except HTTPException:
         await websocket.close(code=4401)
         return
-    computer = DaytonaComputer(
-        api_key=settings.daytona_api_key or "",
-        api_url=settings.daytona_api_url,
-        account_id=tenant_digest(account_id),
-        target=settings.daytona_target,
-    )
+    computer = FirecrackerComputer(account_id=tenant_digest(account_id))
     origin = await asyncio.to_thread(computer.preview_origin)
     if not origin:
         await websocket.close(code=4404)
@@ -726,24 +752,19 @@ def _ticket_account(ticket: str) -> str:
 
 
 async def _preview_origin(ticket: str) -> str:
-    if not settings.daytona_api_key:
-        raise HTTPException(status_code=503, detail="Komputer Daytona belum dikonfigurasi.")
-    computer = DaytonaComputer(
-        api_key=settings.daytona_api_key,
-        api_url=settings.daytona_api_url,
-        account_id=tenant_digest(_ticket_account(ticket)),
-        target=settings.daytona_target,
-    )
+    computer = FirecrackerComputer(account_id=tenant_digest(_ticket_account(ticket)))
     origin = await asyncio.to_thread(computer.preview_origin)
     if not origin:
         raise HTTPException(status_code=404, detail="Nyalakan komputer dulu.")
     return origin
 
 
-def _account_computer() -> DaytonaComputer | None:
+def _account_computer() -> FirecrackerComputer | DaytonaComputer | None:
     runtime = current_runtime.get()
     computer = getattr(runtime, "computer", None)
-    return computer if isinstance(computer, DaytonaComputer) else None
+    if isinstance(computer, (FirecrackerComputer, DaytonaComputer)):
+        return computer
+    return None
 
 
 def _git_commit_sha() -> str:
@@ -1123,6 +1144,11 @@ def list_bots() -> list[Bot]:
 @app.post("/api/v1/bots", response_model=Bot, status_code=status.HTTP_201_CREATED)
 def create_bot(payload: CreateBot) -> Bot:
     bot = repository.create_bot(payload.name, payload.description, payload.instructions, payload.model)
+    if payload.kickstart_requested:
+        colleagues = [item.name for item in repository.list_bots() if item.id != bot.id and item.status is BotStatus.ACTIVE]
+        team = f"Tim kamu saat ini: {', '.join(colleagues[:12])}. " if colleagues else ""
+        repository.append_message(repository.conversation_for_bot(bot.id), "assistant",
+            f"Halo, aku {bot.name}. {team}Apa peran dan tugas pertamaku? Kamu bisa mulai dengan riset, pengembangan aplikasi, atau operasional.")
     if "manager" in bot.name.lower():
         skills = {skill.name: skill.id for skill in repository.list_skills()}
         for skill_name in ("workspace_admin", "job_manager", "coordination"):
@@ -1290,6 +1316,15 @@ def add_group_member(group_id: UUID, payload: GroupMemberInput) -> WorkGroup:
         raise not_found(error) from error
 
 
+@app.delete("/api/v1/groups/{group_id}/members/{bot_id}", response_model=WorkGroup)
+def remove_group_member(group_id: UUID, bot_id: UUID) -> WorkGroup:
+    try:
+        repository.remove_group_member(group_id, bot_id)
+        return repository.get_group(group_id)
+    except KeyError as error:
+        raise not_found(error) from error
+
+
 def _group_activity_rows(group_id: UUID) -> list[GroupActivity]:
     tool_by_bot: dict[UUID, str] = {}
     for run in repository.live_runs_for_group(group_id):
@@ -1351,6 +1386,35 @@ def bot_activity(bot_id: UUID) -> BotActivity:
     return BotActivity(working=False)
 
 
+class AttachmentUpload(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    data: str = Field(min_length=1, max_length=4 * ((MAX_FILE_BYTES + 2) // 3))
+
+
+@app.post("/api/v1/attachments", status_code=201)
+async def upload_attachment(payload: AttachmentUpload) -> dict:
+    try:
+        return await asyncio.to_thread(AttachmentStore(repository.database).upload, payload.name, payload.data)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.get("/api/v1/attachments/{file_id}")
+def read_attachment(file_id: UUID) -> dict:
+    try:
+        row = AttachmentStore(repository.database).get(str(file_id))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {**json.loads(row["metadata"]), "data": row["data"]}
+
+
+def resolve_attachments(refs: list[dict]) -> list[dict]:
+    try:
+        return AttachmentStore(repository.database).resolve(refs)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 @app.get("/api/v1/groups/{group_id}/messages", response_model=list[GroupMessage])
 def list_group_messages(group_id: UUID) -> list[GroupMessage]:
     try:
@@ -1369,12 +1433,16 @@ class GroupStep(BaseModel):
 async def post_group_message(group_id: UUID, payload: GroupMessageInput) -> GroupMessage:
     try:
         group = repository.get_group(group_id)
-        message = repository.append_group_message(group_id, "user", payload.content)
+        active_ids = {member.id for member in group.members if member.status is BotStatus.ACTIVE}
+        if not set(payload.mentioned_bot_ids).issubset(active_ids):
+            raise HTTPException(status_code=422, detail="mentioned bot is not an active member of this group")
+        attachments = resolve_attachments(payload.attachments)
+        message = repository.append_group_message(group_id, "user", payload.content, attachments=attachments)
     except KeyError as error:
         raise not_found(error) from error
     # The previous turn stops. The bot reads this message and decides whether it is a stop, a continuation, or a new task.
     runtime.interrupt_group(group_id)
-    runtime.schedule_group_reply(group_id, payload.content, None, 0)
+    runtime.schedule_group_reply(group_id, payload.content, None, 0, target_ids=payload.mentioned_bot_ids or None)
     return message
 
 
@@ -1455,9 +1523,25 @@ def restore_bot(bot_id: UUID) -> Bot:
 
 
 @app.get("/api/v1/bots/{bot_id}/messages", response_model=list[Message])
-def list_messages(bot_id: UUID) -> list[Message]:
+def list_messages(bot_id: UUID, session_id: UUID | None = None) -> list[Message]:
     try:
-        return repository.list_messages(repository.conversation_for_bot(bot_id))
+        return repository.list_messages(repository.conversation_for_bot(bot_id, session_id))
+    except KeyError as error:
+        raise not_found(error) from error
+
+
+@app.get("/api/v1/bots/{bot_id}/sessions")
+def list_sessions(bot_id: UUID) -> list[dict[str, Any]]:
+    try:
+        return repository.list_sessions(bot_id)
+    except KeyError as error:
+        raise not_found(error) from error
+
+
+@app.post("/api/v1/bots/{bot_id}/sessions", status_code=status.HTTP_201_CREATED)
+def create_session(bot_id: UUID) -> dict[str, Any]:
+    try:
+        return repository.create_session(bot_id)
     except KeyError as error:
         raise not_found(error) from error
 
@@ -1465,8 +1549,8 @@ def list_messages(bot_id: UUID) -> list[Message]:
 @app.patch("/api/v1/bots/{bot_id}/messages/{message_id}", response_model=Message)
 def edit_message(bot_id: UUID, message_id: UUID, payload: MessageEditInput) -> Message:
     try:
-        conversation_id = repository.conversation_for_bot(bot_id)
         existing = repository.get_message(message_id)
+        conversation_id = repository.conversation_for_bot(bot_id, existing.conversation_id)
         if existing.conversation_id != conversation_id:
             raise KeyError("message does not belong to bot conversation")
         message = repository.edit_message(message_id, payload.content)
@@ -1483,7 +1567,7 @@ async def regenerate(bot_id: UUID, payload: RegenerateInput | None = None) -> Ru
         bot = repository.get_bot(bot_id)
         if bot.status is not BotStatus.ACTIVE:
             raise HTTPException(status_code=409, detail="bot is archived")
-        conversation_id = repository.conversation_for_bot(bot_id)
+        conversation_id = repository.conversation_for_bot(bot_id, payload.session_id if payload else None)
         latest_user = next(
             (message for message in reversed(repository.list_messages(conversation_id)) if message.role == "user"),
             None,
@@ -1508,25 +1592,29 @@ async def send_message(bot_id: UUID, payload: MessageInput, request: Request) ->
         bot = repository.get_bot(bot_id)
         if bot.status is not BotStatus.ACTIVE:
             raise HTTPException(status_code=409, detail="bot is archived")
-        conversation_id = repository.conversation_for_bot(bot_id)
+        conversation_id = repository.conversation_for_bot(bot_id, payload.session_id)
+        reply = repository.get_message(payload.reply_to_id) if payload.reply_to_id else None
+        if reply is not None and reply.conversation_id != conversation_id:
+            raise KeyError("reply target does not belong to this session")
     except KeyError as error:
         raise not_found(error) from error
-    repository.append_message(
-        conversation_id,
-        "user",
-        payload.content,
-        model=payload.model,
-        attachments=payload.attachments,
-    )
-    runtime.interrupt_bot(bot_id)
+    attachments = resolve_attachments(payload.attachments)
     interrupted = repository.latest_interrupted_run(bot_id) if is_resume_request(payload.content) else None
     prompt = prompt_for_direct_message(payload.content, interrupted.continuation if interrupted else None)
-    run = repository.create_run(
-        bot_id,
-        conversation_id,
-        prompt,
-        _model_for_bot(bot, payload.model),
-    )
+    if reply is not None:
+        prompt = f"Menanggapi pesan {reply.id}:\n{reply.content}\n\n{prompt}"
+    try:
+        run, created = repository.accept_message(
+            bot_id, conversation_id, message_id=payload.message_id, content=payload.content,
+            prompt=prompt, model=_model_for_bot(bot, payload.model), requested_model=payload.model,
+            attachments=attachments,
+            reply_to_id=payload.reply_to_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if not created:
+        return run
+    runtime.interrupt_bot(bot_id, except_run_id=run.id)
     runtime._disconnect_probes[run.id] = request.is_disconnected
     try:
         run_id = runtime.queue_dm(bot_id, run.id, prompt)
@@ -1551,30 +1639,64 @@ def get_run(run_id: UUID) -> Run:
         raise not_found(error) from error
 
 
+@app.get("/api/v1/work/continuations")
+def list_continuation_work() -> list[dict[str, Any]]:
+    return repository.list_continuation_work()
+
+
+@app.post("/api/v1/work/continuations/{run_id}/resume")
+async def resume_continuation(run_id: UUID) -> list[dict[str, Any]]:
+    try:
+        repository.get_run(run_id)
+        repository.resume_continuation(run_id)
+        for successor in repository.dispatch_continuations():
+            await _start_run(successor)
+        return repository.list_continuation_work()
+    except KeyError as error:
+        raise not_found(error) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/v1/work/continuations/{run_id}/cancel")
+def cancel_continuation(run_id: UUID) -> list[dict[str, Any]]:
+    try:
+        runtime.stop(run_id)
+        return repository.list_continuation_work()
+    except KeyError as error:
+        raise not_found(error) from error
+
+
 @app.get("/api/v1/runs/{run_id}/events/stream")
-async def stream_run_events(run_id: UUID) -> StreamingResponse:
+async def stream_run_events(run_id: UUID, request: Request, after: int = Query(default=0, ge=0)) -> StreamingResponse:
     try:
         repository.get_run(run_id)
     except KeyError as error:
         raise not_found(error) from error
 
+    try:
+        initial_cursor = max(after, int(request.headers.get("last-event-id", "0")))
+        if initial_cursor < 0:
+            raise ValueError
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="invalid Last-Event-ID") from error
+
     async def events() -> AsyncIterator[str]:
-        cursor = 0
+        cursor = initial_cursor
         terminal = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.FAILED_RETRYABLE, RunStatus.CANCELLED}
         while True:
             for event in repository.list_events(run_id):
                 if event.id <= cursor:
                     continue
                 cursor = event.id
-                yield f"event: {event.type}\ndata: {json.dumps(event.model_dump(mode='json'))}\n\n"
+                yield f"id: {event.id}\nevent: {event.type}\ndata: {json.dumps(event.model_dump(mode='json'))}\n\n"
             run = repository.get_run(run_id)
             if run.status in terminal:
-                yield f"event: run.completed\ndata: {json.dumps(run.model_dump(mode='json'))}\n\n"
                 break
             yield ": keep-alive\n\n"
             await asyncio.sleep(0.25)
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/v1/runs/{run_id}/cancel", response_model=Run)

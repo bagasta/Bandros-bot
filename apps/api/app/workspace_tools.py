@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import re
 import socket
@@ -41,6 +42,12 @@ class ToolDefinition:
     max_retries: int = 0
 
 
+def _png_size(data: bytes) -> tuple[int, int]:
+    if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    return 0, 0
+
+
 class WorkspaceToolset:
     """Only exposes tools granted by the Bot's persisted skills."""
 
@@ -57,6 +64,7 @@ class WorkspaceToolset:
         computer: Any | None = None,
         remote_workspace: bool = True,
         on_computer_wake: Callable[[], None] | None = None,
+        model_for_bot: Callable[[Any], str] | None = None,
     ) -> None:
         self.repository = repository
         self.run_id = run_id
@@ -70,6 +78,7 @@ class WorkspaceToolset:
         self.computer = computer
         self.remote_workspace = remote_workspace
         self.on_computer_wake = on_computer_wake
+        self.model_for_bot = model_for_bot
         self.skill_names = {skill.name for skill in repository.list_bot_skills(bot_id)}
         self.continuation: str | None = None
         self.tool_uses = 0
@@ -163,42 +172,59 @@ class WorkspaceToolset:
                 ),
                 ToolDefinition(
                     "computer_screenshot",
-                    "See the shared desktop. No payload. Use this before clicking.",
+                    "Look at the shared desktop. The result includes the screen image. No payload. Read the image before clicking.",
                     self.computer_screenshot,
                     RiskClass.READ_ONLY,
-                    timeout_seconds=20,
+                    timeout_seconds=30,
                 ),
                 ToolDefinition(
                     "computer_click",
-                    "Click the shared desktop. payload: {x, y}",
+                    "Click one pixel on the shared desktop, then look again. payload: {x, y}. x and y are pixels of the latest screenshot, origin at the top left.",
                     self.computer_click,
                     RiskClass.LOCAL_WRITE,
+                    timeout_seconds=30,
                 ),
                 ToolDefinition(
                     "computer_type",
-                    "Type into the shared desktop. payload: {text}",
+                    "Type text into the focused place on the shared desktop, then look again. payload: {text}. Click the field first.",
                     self.computer_type,
                     RiskClass.LOCAL_WRITE,
+                    timeout_seconds=30,
+                ),
+                ToolDefinition(
+                    "computer_key",
+                    "Press one key on the shared desktop, then look again. payload: {key}. Keys: enter, tab, escape, backspace, delete, space, up, down, left, right, ctrl-l, ctrl-a, ctrl-c, ctrl-v, ctrl-t, ctrl-w.",
+                    self.computer_key,
+                    RiskClass.LOCAL_WRITE,
+                    timeout_seconds=30,
                 ),
             ])
         if self.repository.group_for_run(self.run_id):
             definitions = [item for item in definitions if item.name not in {"handoff_to_bot", "post_to_group"}]
+        self._raw_handlers = {item.name: item.handler for item in definitions}
         return [self._audited(definition) for definition in definitions]
+
+    async def run_granted(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run a tool the user already approved, without asking again."""
+        handler = getattr(self, "_raw_handlers", {}).get(name)
+        if handler is None:
+            self.definitions()
+            handler = self._raw_handlers.get(name)
+        if handler is None:
+            return {"ok": False, "error": "Alat itu tidak tersedia."}
+        result = await handler(payload)
+        if not isinstance(result, dict):
+            return {"ok": False, "error": "Alat tidak mengembalikan status."}
+        return result
 
     def _audited(self, definition: ToolDefinition) -> ToolDefinition:
         async def handler(payload: dict[str, Any]) -> dict[str, Any]:
             run = self.repository.get_run(self.run_id)
             if run.stop_requested or run.status is RunStatus.CANCELLED:
                 return {"ok": False, "stopped": True, "error": "Dihentikan."}
-            approved_payloads = self.approved_tools.get(definition.name, [])
-            approved_index = next(
-                (index for index, candidate in enumerate(approved_payloads) if candidate == payload),
-                None,
-            )
-            is_approved = approved_index is not None
-            if approved_index is not None:
-                approved_payloads.pop(approved_index)
-            decision = self.policy.decide(definition.risk_class) if not is_approved else None
+            decision = self.policy.decide(definition.risk_class)
+            if decision.requires_approval and self.repository.consume_approval(self.run_id, definition.name, payload):
+                decision = None
             if decision and decision.requires_approval:
                 approval = self.repository.create_approval(
                     self.run_id,
@@ -233,7 +259,10 @@ class WorkspaceToolset:
                 self.repository.complete_tool_call(call_id, result, False)
                 self.repository.record_event(self.run_id, "tool.failed", {"tool": definition.name, "tool_call_id": str(call_id)})
                 return result
-            self.repository.complete_tool_call(call_id, result, bool(result.get("ok", True)))
+            stored = {key: value for key, value in result.items() if key != "image"}
+            if "image" in result:
+                stored["image"] = "attached"
+            self.repository.complete_tool_call(call_id, stored, bool(result.get("ok", True)))
             self.repository.record_event(self.run_id, "tool.completed", {"tool": definition.name, "tool_call_id": str(call_id)})
             return result
         return ToolDefinition(
@@ -366,7 +395,8 @@ class WorkspaceToolset:
         conversation_id = self.repository.conversation_for_bot(target_bot_id)
         prompt = f"Delegasi dari {self.repository.get_bot(self.bot_id).name}: {task}"
         self.repository.append_message(conversation_id, f"bot:{self.bot_id}", prompt)
-        child = self.repository.create_run(target_bot_id, conversation_id, prompt, target.model or self.default_model)
+        model = self.model_for_bot(target) if self.model_for_bot else (target.model or self.default_model)
+        child = self.repository.create_run(target_bot_id, conversation_id, prompt, model)
         self.repository.set_handoff_child(handoff.id, child.id)
         self.start_child_run(child.id)
         return {"ok": True, "handoff_id": str(handoff.id), "run_id": str(child.id), "target_bot": target.name}
@@ -440,13 +470,13 @@ class WorkspaceToolset:
 
     async def computer_screenshot(self, payload: dict[str, Any]) -> dict[str, Any]:
         screen_url = await self._wake_computer()
-        image = await asyncio.to_thread(self.computer.screenshot)
-        return {"ok": True, "image": image, "screen_url": screen_url}
+        return await self._desktop_view(screen_url)
 
     async def computer_click(self, payload: dict[str, Any]) -> dict[str, Any]:
         screen_url = await self._wake_computer()
         await asyncio.to_thread(self.computer.click, int(payload.get("x", 0)), int(payload.get("y", 0)))
-        return {"ok": True, "screen_url": screen_url}
+        await asyncio.sleep(0.4)
+        return await self._desktop_view(screen_url)
 
     async def computer_type(self, payload: dict[str, Any]) -> dict[str, Any]:
         screen_url = await self._wake_computer()
@@ -454,7 +484,23 @@ class WorkspaceToolset:
         if len(text) > 2_000:
             raise ValueError("text exceeds 2000 characters")
         await asyncio.to_thread(self.computer.type_text, text)
-        return {"ok": True, "screen_url": screen_url}
+        await asyncio.sleep(0.4)
+        return await self._desktop_view(screen_url)
+
+    async def computer_key(self, payload: dict[str, Any]) -> dict[str, Any]:
+        screen_url = await self._wake_computer()
+        press = getattr(self.computer, "press_key", None)
+        if press is None:
+            return {"ok": False, "error": "Tombol keyboard tidak tersedia di komputer ini."}
+        await asyncio.to_thread(press, self._text(payload, "key"))
+        await asyncio.sleep(0.4)
+        return await self._desktop_view(screen_url)
+
+    async def _desktop_view(self, screen_url: str | None) -> dict[str, Any]:
+        image = await asyncio.to_thread(self.computer.screenshot)
+        raw = base64.b64decode(image) if isinstance(image, str) else b""
+        width, height = _png_size(raw)
+        return {"ok": True, "width": width, "height": height, "image": image, "screen_url": screen_url}
 
     async def run_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         screen_url = await self._wake_computer()
@@ -540,10 +586,8 @@ class WorkspaceToolset:
         tool_name = self._text(payload, "tool")
         arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
         if not tool_name.lower().startswith(("list", "get", "search", "read", "fetch", "find")):
-            approved = self.approved_tools.get("use_plugin", [])
-            already = any(
-                item.get("plugin") == plugin.name and item.get("tool") == tool_name and item.get("arguments") == arguments
-                for item in approved
+            already = self.repository.consume_approval(
+                self.run_id, "use_plugin", {"plugin": plugin.name, "tool": tool_name, "arguments": arguments}
             )
             if not already:
                 approval = self.repository.create_approval(
@@ -565,6 +609,7 @@ class WorkspaceToolset:
         note = self._text(payload, "note")[:2_000]
         self.continuation = note
         self.repository.set_run_continuation(self.run_id, note)
+        self.repository.checkpoint_work(self.run_id, note)
         return {"ok": True, "continue": True}
 
     async def _wake_computer(self) -> str | None:
