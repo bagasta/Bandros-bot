@@ -1,0 +1,81 @@
+#!/bin/bash
+# One request per connection. The host speaks a tiny length-prefixed protocol.
+set -u
+workspace=/home/bandros/workspace
+mkdir -p "$workspace"
+
+read -r op || exit 0
+read -r nbytes || exit 0
+case "$nbytes" in
+  ''|*[!0-9]*) exit 1 ;;
+esac
+if [ "$nbytes" -gt 100000 ]; then
+  exit 1
+fi
+payload=$(head -c "$nbytes")
+
+reply() {
+  printf '%s\n%s\n%s' "$1" "${#2}" "$2"
+}
+
+safe_path() {
+  local relative="$1"
+  if [ -z "$relative" ] || [ "$relative" = "." ]; then
+    printf '%s' "$workspace"
+    return 0
+  fi
+  case "$relative" in
+    /*|*..*) return 1 ;;
+  esac
+  printf '%s/%s' "$workspace" "$relative"
+}
+
+case "$op" in
+  run)
+    output=$(cd "$workspace" && timeout 15 bash -lc "$payload" 2>&1)
+    code=$?
+    output=${output:0:8000}
+    reply "$code" "$output"
+    ;;
+  read)
+    path=$(safe_path "$payload") || { reply 1 "path is invalid"; exit 0; }
+    if [ ! -f "$path" ]; then
+      reply 1 "file not found"
+      exit 0
+    fi
+    body=$(head -c 100000 "$path")
+    reply 0 "$body"
+    ;;
+  write)
+    relative=${payload%%$'\n'*}
+    content=${payload#*$'\n'}
+    path=$(safe_path "$relative") || { reply 1 "path is invalid"; exit 0; }
+    mkdir -p "$(dirname "$path")"
+    printf '%s' "$content" >"$path"
+    reply 0 "ok"
+    ;;
+  list)
+    path=$(safe_path "$payload") || { reply 1 "path is invalid"; exit 0; }
+    if [ ! -d "$path" ]; then
+      reply 1 "directory not found"
+      exit 0
+    fi
+    body=""
+    for entry in "$path"/* "$path"/.[!.]*; do
+      [ -e "$entry" ] || continue
+      name=${entry##*/}
+      kind=file
+      [ -d "$entry" ] && kind=directory
+      if [ "$payload" = "." ] || [ -z "$payload" ]; then
+        child=$name
+      else
+        child=$payload/$name
+      fi
+      body+="$kind $child"$'\n'
+    done
+    reply 0 "$body"
+    ;;
+  *)
+    reply 1 "unknown op"
+    ;;
+esac

@@ -93,11 +93,13 @@ class Run(APIModel):
     prompt: str
     model: str
     error: str | None
+    continuation: str | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     stop_requested: bool = False
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    heartbeat_at: datetime | None = None
 
 
 class RunEvent(APIModel):
@@ -221,11 +223,13 @@ class GroupActivity(APIModel):
     bot_id: UUID
     name: str
     status: str
+    tool: str | None = None
 
 
 class BotActivity(APIModel):
     working: bool
     error: str | None = None
+    tool: str | None = None
     approvals: list[Approval] = Field(default_factory=list)
 
 
@@ -239,6 +243,7 @@ class GroupMessage(APIModel):
     sender_type: str
     sender_bot_id: UUID | None
     content: str
+    citations: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
 
 

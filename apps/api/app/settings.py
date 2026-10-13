@@ -26,6 +26,29 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(value) if value else default
 
 
+def _postgres_dsn(value: str | None) -> str | None:
+    if not value:
+        return None
+    if value.startswith("postgres://"):
+        value = "postgresql://" + value[len("postgres://") :]
+    if value.startswith("postgresql://"):
+        return value
+    return None
+
+
+def resolve_database_url() -> str | None:
+    """Choose Postgres only from a real DSN. Otherwise the app keeps SQLite.
+
+    ``DATABASE_URL`` is the switch. A missing, blank, or non-Postgres value
+    keeps the current SQLite files and does not open a connection at startup.
+    ``POSTGRES_URL`` applies only when ``DATABASE_URL`` is not in the environment
+    at all, so an empty ``DATABASE_URL`` cannot select a second DSN.
+    """
+    if "DATABASE_URL" in os.environ:
+        return _postgres_dsn(_env_value("DATABASE_URL"))
+    return _postgres_dsn(_env_value("POSTGRES_URL"))
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_path: Path
@@ -48,6 +71,8 @@ class Settings:
     daytona_api_key: str | None
     daytona_api_url: str
     daytona_target: str
+    # Neon DSN from DATABASE_URL. None keeps the SQLite file at database_path.
+    database_url: str | None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -59,8 +84,9 @@ class Settings:
         data_root = Path("/tmp/bandros") if vercel else PROJECT_ROOT / "data"
         openrouter_key = _env_value("OPENROUTER_API_KEY")
         gateway = _env_value("MODEL_GATEWAY")
-        if gateway is None:
-            gateway = "mock" if vercel and not openrouter_key else "openrouter"
+        # A missing key must not silently echo prompts. Mock stays local-only.
+        if gateway is None or (vercel and gateway == "mock"):
+            gateway = "openrouter"
         return cls(
             database_path=_env_path("DATABASE_PATH", data_root / "workspace.db"),
             workspace_root=_env_path("WORKSPACE_ROOT", data_root / "workspace"),
@@ -86,4 +112,5 @@ class Settings:
             daytona_api_key=_env_value("DAYTONA_API_KEY"),
             daytona_api_url=(_env_value("DAYTONA_API_URL") or "https://app.daytona.io/api").rstrip("/"),
             daytona_target=_env_value("DAYTONA_TARGET") or "us",
+            database_url=resolve_database_url(),
         )

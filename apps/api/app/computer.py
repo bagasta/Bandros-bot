@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -14,17 +15,55 @@ import httpx
 SNAPSHOT = "daytona-small"
 AUTO_STOP_MINUTES = 5
 AUTO_ARCHIVE_MINUTES = 60
+PREVIEW_HOLD_SECONDS = 60
+PREVIEW_GRACE_SECONDS = 45
+PREVIEW_MAX_HOLD_SECONDS = 180
+PREVIEW_READY_TIMEOUT = 30
 WORKSPACE = "/home/daytona/workspace"
 _SKIP_STATES = {"destroyed", "destroying", "deleted", "error", "unknown"}
 _LIVE_STATES = {"started", "starting", "creating"}
+_PREVIEW_ERROR_MARKERS = ("daytona_daemon", "proxy upstream error")
+
+
+def _account_lock(account_id: str) -> threading.RLock:
+    with _ACCOUNT_LOCKS_GUARD:
+        return _ACCOUNT_LOCKS.setdefault(account_id, threading.RLock())
+
+
+_ACCOUNT_LOCKS: dict[str, threading.RLock] = {}
+_ACCOUNT_LOCKS_GUARD = threading.Lock()
 
 
 class ComputerError(RuntimeError):
     pass
 
 
+def _vnc_viewer_url(url: str) -> str:
+    """Open the noVNC page. The signed preview link is the static-file root, which lists the folder."""
+    parts = urlsplit(url)
+    if parts.path not in {"", "/"}:
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, "/vnc.html", parts.query, parts.fragment))
+
+
+def _with_signed_token(url: str, token: str) -> str:
+    """Keep the signed preview path and token. A separate token is part of the host."""
+    if not token or token in url:
+        return url
+    parts = urlsplit(url)
+    hostname = parts.hostname or ""
+    if "-" not in hostname or "." not in hostname:
+        return url
+    port_label, domain = hostname.split("-", 1)
+    domain = domain.split(".", 1)[1] if "." in domain else domain
+    netloc = f"{port_label}-{token}.{domain}"
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 class DaytonaComputer:
-    """Filesystem and shell on a 1 vCPU container. Desktop sessions are never started."""
+    """Filesystem and shell on a 1 vCPU container with lazy desktop activation."""
 
     def __init__(
         self,
@@ -34,14 +73,29 @@ class DaytonaComputer:
         target: str = "us",
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], float] | None = None,
+        preview_hold_seconds: float = PREVIEW_HOLD_SECONDS,
+        preview_grace_seconds: float = PREVIEW_GRACE_SECONDS,
+        preview_max_hold_seconds: float = PREVIEW_MAX_HOLD_SECONDS,
+        preview_ready_timeout: float = PREVIEW_READY_TIMEOUT,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.account_id = account_id
         self.target = target
+        self.preview_hold_seconds = preview_hold_seconds
+        self.preview_grace_seconds = preview_grace_seconds
+        self.preview_max_hold_seconds = preview_max_hold_seconds
+        self.preview_ready_timeout = preview_ready_timeout
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._client = client or httpx.Client(timeout=30)
         self._sleep = sleep
+        self._now = now or time.monotonic
         self._sandbox_id: str | None = None
+        self._account_lock = _account_lock(account_id)
+        self._preview_seen = threading.Event()
+        self._preview_seen_at = 0.0
+        self._signed_url: str | None = None
+        self._preview_ready = False
 
     def list_dir(self, relative: str) -> list[dict[str, str]]:
         remote = self._remote(relative)
@@ -108,32 +162,39 @@ class DaytonaComputer:
         sandbox = self._find()
         if sandbox is None or sandbox.get("state") != "started":
             return {"state": "off", "screen_url": None}
-        return {"state": "on", "screen_url": None}
+        return {"state": "on", "screen_url": self._ready_screen_url(str(sandbox["id"]))}
+
+    def note_preview_shown(self) -> None:
+        """The panel loaded the desktop itself, not merely a preview URL."""
+        self._preview_seen.set()
+        self._preview_seen_at = self._now()
+
+    def keep_screen(self) -> None:
+        """The screen is open. Refresh the hold, and start the desktop again if it was parked."""
+        with self._account_lock:
+            self.note_preview_shown()
+            sandbox = self._find()
+            if sandbox is not None and str(sandbox.get("state") or "") == "started":
+                return
+            sandbox = self._ensure_unlocked()
+            started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
+            self._raise_for_status(started)
+            self._wait_for_preview(str(sandbox["id"]))
 
     def wake(self) -> dict[str, str | None]:
         """Start the small sandbox and its desktop. Caller must park it again."""
-        sandbox = self._ensure()
-        started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
-        self._raise_for_status(started)
-        self._ensure_chrome(sandbox)
-        return {"state": "on", "screen_url": None}
-
-    def _ensure_chrome(self, sandbox: dict[str, Any]) -> None:
-        """Linux desktop already runs. Add Chrome when the image does not ship it."""
-        command = (
-            "if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null "
-            "&& ! command -v chromium-browser >/dev/null; then "
-            "nohup sh -c 'sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y chromium' >/tmp/chrome-install.log 2>&1 & "
-            "fi"
-        )
-        installed = self._toolbox_raw(
-            sandbox,
-            "POST",
-            "/process/execute",
-            json={"command": command, "cwd": WORKSPACE, "timeout": 15},
-        )
-        if installed.status_code >= 400:
-            return
+        self._preview_seen.clear()
+        self._preview_seen_at = 0.0
+        self._signed_url = None
+        self._preview_ready = False
+        with self._account_lock:
+            sandbox = self._ensure()
+            started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
+            self._raise_for_status(started)
+            return {
+                "state": "on",
+                "screen_url": self._wait_for_preview(str(sandbox["id"])),
+            }
 
     def preview_origin(self) -> str | None:
         sandbox = self._find()
@@ -141,7 +202,10 @@ class DaytonaComputer:
             return None
         return self._preview_origin(str(sandbox["id"]))
 
-    def _preview_origin(self, sandbox_id: str) -> str | None:
+    def _signed_preview(self, sandbox_id: str) -> str | None:
+        """Full signed preview URL, including path and token. Cached so the iframe does not reload."""
+        if self._signed_url:
+            return self._signed_url
         try:
             response = self._send(
                 "GET",
@@ -150,17 +214,69 @@ class DaytonaComputer:
             )
         except ComputerError:
             return None
-        url = response.json().get("url")
+        body = response.json()
+        url = body.get("url")
         if not url:
             return None
-        parts = urlsplit(str(url))
+        signed = _vnc_viewer_url(_with_signed_token(str(url), str(body.get("token") or "")))
+        self._signed_url = signed
+        return signed
+
+    def _preview_origin(self, sandbox_id: str) -> str | None:
+        url = self._signed_preview(sandbox_id)
+        if not url:
+            return None
+        parts = urlsplit(url)
         return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
-    def park(self) -> None:
-        """Stop compute billing, then archive so disk is not billed either."""
+    def park_after_preview(self) -> None:
+        """Leave the desktop URL readable until the panel can show it, then park."""
         sandbox = self._find()
-        if sandbox is None:
-            return
+        if sandbox is not None and sandbox.get("state") == "started":
+            # Grace counts from the end of the turn, even if the preview opened earlier.
+            if self._preview_seen.is_set():
+                self._preview_seen_at = self._now()
+            self._wait_for_preview_view()
+        self.park(respect_screen=True)
+
+    def _screen_in_use(self) -> bool:
+        if not self._preview_seen.is_set():
+            return False
+        return self._now() < self._preview_seen_at + self.preview_grace_seconds
+
+    def _wait_for_preview_view(self) -> None:
+        started = self._now()
+        cap = started + self.preview_max_hold_seconds
+        while True:
+            now = self._now()
+            if now >= cap:
+                return
+            if self._preview_seen.is_set():
+                idle_at = self._preview_seen_at + self.preview_grace_seconds
+                if now >= idle_at:
+                    return
+                remaining = idle_at - now
+            else:
+                # A minted URL is not the desktop. Park at the deadline when it never opened.
+                hold_at = started + self.preview_hold_seconds
+                if now >= hold_at:
+                    return
+                remaining = hold_at - now
+            self._sleep(min(0.2, max(remaining, 0)))
+
+    def park(self, *, respect_screen: bool = False) -> None:
+        """Stop compute billing, then archive so disk is not billed either."""
+        with self._account_lock:
+            if respect_screen and self._screen_in_use():
+                return
+            sandbox = self._find()
+            if sandbox is None:
+                return
+            self._park_sandbox(sandbox)
+            self._signed_url = None
+            self._preview_ready = False
+
+    def _park_sandbox(self, sandbox: dict[str, Any]) -> None:
         sandbox_id = str(sandbox["id"])
         state = str(sandbox.get("state") or "")
         if state in _LIVE_STATES or state == "stopping":
@@ -172,6 +288,10 @@ class DaytonaComputer:
             self._wait(sandbox_id, {"archived", "stopped"})
 
     def _ensure(self) -> dict[str, Any]:
+        with self._account_lock:
+            return self._ensure_unlocked()
+
+    def _ensure_unlocked(self) -> dict[str, Any]:
         sandbox = self._find()
         if sandbox is None:
             created = self._send(
@@ -189,6 +309,9 @@ class DaytonaComputer:
                 },
             )
             sandbox = created.json()
+            discovered = self._find()
+            if discovered is not None:
+                sandbox = discovered
         sandbox_id = str(sandbox["id"])
         self._sandbox_id = sandbox_id
         state = str(sandbox.get("state") or "")
@@ -202,7 +325,7 @@ class DaytonaComputer:
 
     def _find(self) -> dict[str, Any] | None:
         cursor = None
-        chosen: dict[str, Any] | None = None
+        candidates: list[dict[str, Any]] = []
         while True:
             params: dict[str, str] = {"labels": json.dumps({"app": "bandros", "account": self.account_id})}
             if cursor:
@@ -214,15 +337,21 @@ class DaytonaComputer:
                     continue
                 if str(item.get("state") or "") in _SKIP_STATES:
                     continue
-                chosen = item
-                if item.get("state") == "started":
-                    self._sandbox_id = str(item["id"])
-                    return item
+                candidates.append(item)
             cursor = body.get("nextCursor")
             if not cursor:
-                if chosen is not None:
-                    self._sandbox_id = str(chosen["id"])
-                return chosen
+                break
+
+        if not candidates:
+            return None
+
+        priority = {"started": 0, "starting": 1, "creating": 2, "stopping": 3, "stopped": 4, "archived": 5}
+        chosen = min(candidates, key=lambda item: priority.get(str(item.get("state") or ""), 6))
+        for duplicate in candidates:
+            if duplicate is not chosen:
+                self._park_sandbox(duplicate)
+        self._sandbox_id = str(chosen["id"])
+        return chosen
 
     def _wait(self, sandbox_id: str, targets: set[str]) -> dict[str, Any]:
         deadline = time.monotonic() + 90
@@ -236,6 +365,46 @@ class DaytonaComputer:
                 raise ComputerError(state)
             self._sleep(0.4)
         raise ComputerError(f"sandbox stayed {last.get('state')}")
+
+    def _ready_screen_url(self, sandbox_id: str) -> str | None:
+        """Signed noVNC URL only after the preview host serves the page."""
+        if self._preview_ready and self._signed_url:
+            return self._signed_url
+        signed = self._signed_preview(sandbox_id)
+        if not signed or not self._preview_page_ready(signed):
+            return None
+        self._preview_ready = True
+        return signed
+
+    def _preview_page_ready(self, url: str) -> bool:
+        try:
+            response = self._client.get(
+                url,
+                headers={"X-Daytona-Skip-Preview-Warning": "true"},
+                follow_redirects=True,
+                timeout=5.0,
+            )
+        except httpx.HTTPError:
+            return False
+        if response.status_code < 200 or response.status_code >= 400:
+            return False
+        sample = response.text[:4000].lower()
+        if not sample.strip():
+            return False
+        if any(marker in sample for marker in _PREVIEW_ERROR_MARKERS):
+            return False
+        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        return content_type != "application/json"
+
+    def _wait_for_preview(self, sandbox_id: str) -> str:
+        deadline = time.monotonic() + self.preview_ready_timeout
+        while True:
+            signed = self._ready_screen_url(sandbox_id)
+            if signed:
+                return signed
+            if time.monotonic() >= deadline:
+                raise ComputerError("desktop preview did not become ready")
+            self._sleep(0.4)
 
     def _remote(self, relative: str) -> str:
         raw = (relative or ".").strip() or "."
