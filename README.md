@@ -4,7 +4,7 @@ Open-source teammate workspace in the spirit of [Grok Bot](https://docs.x.ai/gro
 
 Bandros is not the official Grok Bot client. It is an independent project by [Bagas Tri Adiwira](https://www.linkedin.com/in/bagas-tri-adiwira-b76139168) for people who want a Grok Bot-style team they can read, run, and change.
 
-Live app: [bandros-web.vercel.app](https://bandros-web.vercel.app)
+Web: [bagasta.github.io/Bandros-bot](https://bagasta.github.io/Bandros-bot)
 
 ## Screenshots
 
@@ -56,7 +56,16 @@ Memory is for stable preferences and role facts. Files in the shared workspace a
 | Agent loop | PydanticAI |
 | Models | ChatGPT via Codex device login, or OpenRouter |
 | Data | SQLite, one workspace per ChatGPT account |
-| Hosting | Vercel |
+| Web host | GitHub Pages (`https://bagasta.github.io/Bandros-bot`) |
+| API host | A Python server. GitHub Pages only serves the static UI. |
+
+## Deploy the web UI
+
+GitHub Actions publishes a static export of `apps/web` to [bagasta.github.io/Bandros-bot](https://bagasta.github.io/Bandros-bot) on every push to `main`.
+
+Before the first deploy, add a repository variable named `NEXT_PUBLIC_API_BASE_URL` (Settings → Secrets and variables → Actions → Variables). The value is the API origin plus `/api/v1`. On that API host, set `WEB_ORIGIN=https://bagasta.github.io/Bandros-bot` so ChatGPT sign-in returns to the Pages site.
+
+GitHub Pages does not run FastAPI, Postgres, or agent turns. Those stay on the API host. Moving the UI off Vercel does not remove Vercel limits on the API if the API is still deployed there.
 
 ## Run it locally
 

@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 node_modules/
 .next/
+out/
 *.egg-info/
 *.tsbuildinfo
 data/
