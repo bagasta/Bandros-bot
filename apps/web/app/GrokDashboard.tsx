@@ -1067,8 +1067,7 @@ export default function GrokDashboard() {
           <div className={`bandros-screen${screenTicket ? " has-view" : ""}`}>{screenTicket && desktopUrl(screenTicket) ? <iframe title="Layar komputer kecil" src={desktopUrl(screenTicket) ?? undefined} /> : computerState === "on" ? "Menyambungkan…" : "Idle"}</div>
           <p>{displayName}&apos;s screen</p>
           {computerState === "on" && <button className="bandros-computer-toggle" type="button" onClick={() => setScreenOpen(true)}>Buka layar</button>}
-          {computerState === "on" && <p>Semua Bot memakai desktop yang sama. Matikan setelah selesai.</p>}
-          <button className="bandros-computer-toggle" type="button" disabled={computerBusy || computerState === "unavailable"} onClick={() => void toggleComputer()}>{computerBusy ? "Memulai…" : computerState === "on" ? "Matikan komputer" : "Nyalakan komputer"}</button>
+          <p>{computerState === "on" ? "Desktop aktif selama Bot menggunakannya dan akan diparkir setelah gilirannya selesai." : "Desktop hanya aktif saat Bot meminta bantuan komputer."}</p>
           <div className="bandros-computer-head"><strong>Routines</strong></div>
           <p>Routines are recurring tasks this Bot runs on a schedule. Ask it in chat to set one up.</p>
         </>}

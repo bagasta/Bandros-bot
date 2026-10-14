@@ -170,8 +170,8 @@ class Repository:
         run_id, timestamp = uuid4(), now()
         with self.database.connection() as db:
             db.execute(
-                "INSERT INTO runs (id, bot_id, conversation_id, status, prompt, model, error, usage, stop_requested, created_at, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(run_id), str(bot_id), str(conversation_id), RunStatus.QUEUED, prompt, model, None, "{}", 0, dump_time(timestamp), None, None),
+                "INSERT INTO runs (id, bot_id, conversation_id, status, prompt, model, error, continuation, usage, stop_requested, created_at, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(run_id), str(bot_id), str(conversation_id), RunStatus.QUEUED, prompt, model, None, None, "{}", 0, dump_time(timestamp), None, None),
             )
         self.record_event(run_id, "run.queued", {"model": model})
         return self.get_run(run_id)
@@ -179,6 +179,22 @@ class Repository:
     def set_run_prompt(self, run_id: UUID, prompt: str) -> None:
         with self.database.connection() as db:
             db.execute("UPDATE runs SET prompt = ? WHERE id = ?", (prompt, str(run_id)))
+
+    def set_run_continuation(self, run_id: UUID, continuation: str) -> None:
+        with self.database.connection() as db:
+            db.execute("UPDATE runs SET continuation = ? WHERE id = ?", (continuation[:2_000], str(run_id)))
+
+    def latest_interrupted_run(self, bot_id: UUID) -> Run | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                """
+                SELECT * FROM runs
+                WHERE bot_id = ? AND status = ? AND continuation IS NOT NULL AND continuation != ''
+                ORDER BY completed_at DESC, created_at DESC LIMIT 1
+                """,
+                (str(bot_id), RunStatus.CANCELLED),
+            ).fetchone()
+        return self._run(row) if row else None
 
     def get_run(self, run_id: UUID) -> Run:
         with self.database.connection() as db:
@@ -658,6 +674,21 @@ class Repository:
             ).fetchall()
         return [self._run(row) for row in rows]
 
+    def latest_interrupted_run_for_group(self, group_id: UUID, bot_id: UUID) -> Run | None:
+        with self.database.connection() as db:
+            row = db.execute(
+                """
+                SELECT runs.* FROM runs
+                JOIN group_run_links ON group_run_links.run_id = runs.id
+                WHERE group_run_links.group_id = ? AND runs.bot_id = ?
+                  AND runs.status = ? AND runs.continuation IS NOT NULL
+                  AND runs.continuation != ''
+                ORDER BY runs.completed_at DESC, runs.created_at DESC LIMIT 1
+                """,
+                (str(group_id), str(bot_id), RunStatus.CANCELLED),
+            ).fetchone()
+        return self._run(row) if row else None
+
     def create_handoff(self, source_bot_id: UUID, target_bot_id: UUID, task: str, parent_run_id: UUID | None) -> Handoff:
         if source_bot_id == target_bot_id:
             raise ValueError("a bot cannot hand off work to itself")
@@ -783,6 +814,7 @@ class Repository:
             error=row["error"],
             usage=json.loads(row["usage"] or "{}"),
             stop_requested=bool(row["stop_requested"]),
+            continuation=row["continuation"] if "continuation" in row.keys() else None,
             created_at=load_time(row["created_at"]),
             started_at=load_time(row["started_at"]),
             completed_at=load_time(row["completed_at"]),

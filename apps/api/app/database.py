@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS runs (
     prompt TEXT NOT NULL,
     model TEXT NOT NULL,
     error TEXT,
+    continuation TEXT,
     usage TEXT NOT NULL DEFAULT '{}',
     stop_requested INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -264,6 +265,7 @@ class Database:
                 "citations": "TEXT NOT NULL DEFAULT '[]'",
             },
             "runs": {
+                "continuation": "TEXT",
                 "usage": "TEXT NOT NULL DEFAULT '{}'",
                 "stop_requested": "INTEGER NOT NULL DEFAULT 0",
             },
