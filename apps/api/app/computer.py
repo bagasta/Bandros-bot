@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,15 @@ AUTO_ARCHIVE_MINUTES = 60
 WORKSPACE = "/home/daytona/workspace"
 _SKIP_STATES = {"destroyed", "destroying", "deleted", "error", "unknown"}
 _LIVE_STATES = {"started", "starting", "creating"}
+
+
+def _account_lock(account_id: str) -> threading.RLock:
+    with _ACCOUNT_LOCKS_GUARD:
+        return _ACCOUNT_LOCKS.setdefault(account_id, threading.RLock())
+
+
+_ACCOUNT_LOCKS: dict[str, threading.RLock] = {}
+_ACCOUNT_LOCKS_GUARD = threading.Lock()
 
 
 class ComputerError(RuntimeError):
@@ -42,6 +52,7 @@ class DaytonaComputer:
         self._client = client or httpx.Client(timeout=30)
         self._sleep = sleep
         self._sandbox_id: str | None = None
+        self._account_lock = _account_lock(account_id)
 
     def list_dir(self, relative: str) -> list[dict[str, str]]:
         remote = self._remote(relative)
@@ -112,10 +123,11 @@ class DaytonaComputer:
 
     def wake(self) -> dict[str, str | None]:
         """Start the small sandbox and its desktop. Caller must park it again."""
-        sandbox = self._ensure()
-        started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
-        self._raise_for_status(started)
-        self._ensure_chrome(sandbox)
+        with self._account_lock:
+            sandbox = self._ensure()
+            started = self._toolbox_raw(sandbox, "POST", "/computeruse/start")
+            self._raise_for_status(started)
+            self._ensure_chrome(sandbox)
         return {"state": "on", "screen_url": None}
 
     def _ensure_chrome(self, sandbox: dict[str, Any]) -> None:
@@ -158,9 +170,13 @@ class DaytonaComputer:
 
     def park(self) -> None:
         """Stop compute billing, then archive so disk is not billed either."""
-        sandbox = self._find()
-        if sandbox is None:
-            return
+        with self._account_lock:
+            sandbox = self._find()
+            if sandbox is None:
+                return
+            self._park_sandbox(sandbox)
+
+    def _park_sandbox(self, sandbox: dict[str, Any]) -> None:
         sandbox_id = str(sandbox["id"])
         state = str(sandbox.get("state") or "")
         if state in _LIVE_STATES or state == "stopping":
@@ -172,6 +188,10 @@ class DaytonaComputer:
             self._wait(sandbox_id, {"archived", "stopped"})
 
     def _ensure(self) -> dict[str, Any]:
+        with self._account_lock:
+            return self._ensure_unlocked()
+
+    def _ensure_unlocked(self) -> dict[str, Any]:
         sandbox = self._find()
         if sandbox is None:
             created = self._send(
@@ -189,6 +209,9 @@ class DaytonaComputer:
                 },
             )
             sandbox = created.json()
+            discovered = self._find()
+            if discovered is not None:
+                sandbox = discovered
         sandbox_id = str(sandbox["id"])
         self._sandbox_id = sandbox_id
         state = str(sandbox.get("state") or "")
@@ -202,7 +225,7 @@ class DaytonaComputer:
 
     def _find(self) -> dict[str, Any] | None:
         cursor = None
-        chosen: dict[str, Any] | None = None
+        candidates: list[dict[str, Any]] = []
         while True:
             params: dict[str, str] = {"labels": json.dumps({"app": "bandros", "account": self.account_id})}
             if cursor:
@@ -214,15 +237,21 @@ class DaytonaComputer:
                     continue
                 if str(item.get("state") or "") in _SKIP_STATES:
                     continue
-                chosen = item
-                if item.get("state") == "started":
-                    self._sandbox_id = str(item["id"])
-                    return item
+                candidates.append(item)
             cursor = body.get("nextCursor")
             if not cursor:
-                if chosen is not None:
-                    self._sandbox_id = str(chosen["id"])
-                return chosen
+                break
+
+        if not candidates:
+            return None
+
+        priority = {"started": 0, "starting": 1, "creating": 2, "stopping": 3, "stopped": 4, "archived": 5}
+        chosen = min(candidates, key=lambda item: priority.get(str(item.get("state") or ""), 6))
+        for duplicate in candidates:
+            if duplicate is not chosen:
+                self._park_sandbox(duplicate)
+        self._sandbox_id = str(chosen["id"])
+        return chosen
 
     def _wait(self, sandbox_id: str, targets: set[str]) -> dict[str, Any]:
         deadline = time.monotonic() + 90
